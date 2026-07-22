@@ -30,12 +30,11 @@ setup(
     zip_safe=True,
     maintainer="Gunwoo Moon",
     maintainer_email="moongunwoo7019@naver.com",
-    description="LiDAR cone Viewer and single debug mission for Xycar.",
+    description="LiDAR cone Viewer with Space-key debug driving for Xycar.",
     license="Apache-2.0",
     entry_points={
         "console_scripts": [
             "cone_path_viewer = xycar_debug.cone_path_viewer:main",
-            "cone_debug_drive = xycar_debug.cone_debug_drive:main",
         ],
     },
 )

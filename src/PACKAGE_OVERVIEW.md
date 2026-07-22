@@ -20,21 +20,20 @@ planner/control library입니다. 전체 코스용 실행 진입점은 아직 �
 ### `xycar_debug`
 
 - 공용 입력: 기본 `/scan`
-- Viewer: `ros2 launch xycar_debug cone_path_viewer.launch.py`
-- 콘 mission: `ros2 run xycar_debug cone_debug_drive`
-- 콘 mission launch: `ros2 launch xycar_debug cone_debug_drive.launch.py`
+- 통합 Viewer/주행: `ros2 launch xycar_debug cone_path_viewer.launch.py`
+- 기존 `/scan` 사용: `ros2 run xycar_debug cone_path_viewer`
 - 화면 설정: `xycar_debug/config/cone_viewer.yaml`
-- mission 설정: `xycar_debug/config/cone_debug_drive.yaml`
 
 원시 점군, cone 후보와 좌우 경계, 중앙 경로, lookahead, 예상 회전 arc와
-예상 angle/speed를 표시하는 Viewer에는 motor publisher가 없습니다.
+preview/actual angle·speed를 하나의 GUI에 표시합니다. 시작은 항상 DRIVE OFF이며
+Space로 실제 주행을 ON/OFF 합니다. ON 상태의 양쪽 경계는 speed 3~5, 급커브와
+한쪽 경계는 speed 3으로 주행합니다. 경로가 사라지면 즉시 정지하고 0.5초 안에
+복구되면 재개하며, 그 시간을 넘으면 OFF로 바뀝니다. launch는 LiDAR driver를
+포함하고 node는 motor command를 publish할 수 있으므로 매 실행 전 승인이
+필요합니다.
 
-`cone_debug_drive`는 전체 map용 node가 아니라 콘 구간 하나를 검증하는 자동
-mission입니다. 서로 다른 유효 LaserScan 3개 뒤 자동 출발하고 양쪽 경계는
-speed 3~5, 급커브와 한쪽 경계는 speed 3으로 주행합니다. 경로가 사라지면 즉시
-정지하며 0.5초 안에 회복되지 않으면 정지 명령 5회 후 종료합니다. launch는
-LiDAR와 motor hardware driver를 포함하지 않지만 이 node 자체가 motor command를
-publish하므로 실행할 때마다 승인이 필요합니다.
+실행 문서와 경로는 실제 차량
+`xytron@10.42.0.1:/home/xytron/xycar_ws_mgw`를 기준으로 관리합니다.
 
 ## 전체 구조 요약
 

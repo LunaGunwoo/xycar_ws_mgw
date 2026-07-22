@@ -1,12 +1,13 @@
 # Shared LiDAR cone detection, path planning, and motor preview tuning.
 # Distances are metres, angles are degrees unless stated, and times are seconds.
-# The track_drive library and both xycar_debug commands load this exact file.
+# The track_drive library and xycar_debug cone GUI load this exact file.
 
 topics:
   # xycar_lidar is explicitly launched in the root namespace, so /scan is absolute.
   scan_topic: /scan
-  # Keep the current MGW motor contract relative to ROS_NAMESPACE (normally xycar).
-  motor_topic: xycar_motor
+  # The actual robot graph exposes the motor bridge at this absolute topic.
+  # Keeping it absolute avoids ROS_NAMESPACE=xycar changing it to /xycar/xycar_motor.
+  motor_topic: /xycar_motor
 
 cone_filter:
   min_range_m: 0.30
@@ -57,7 +58,7 @@ control:
   min_single_side_confidence: 0.22
   min_cones_per_visible_side: 2
   min_drive_horizon_m: 1.60
-  # Cone debug mission hard range: minimum 3 and maximum 5.
+  # Space-key cone debug drive hard range: minimum 3 and maximum 5.
   max_speed: 5.0
   sharp_turn_speed: 3.0
   single_side_speed: 3.0

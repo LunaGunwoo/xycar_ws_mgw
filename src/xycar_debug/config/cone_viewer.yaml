@@ -1,5 +1,5 @@
-# GUI-only values. Cone recognition and predicted commands come from
-# track_drive/config/cone_drive.yaml so the Viewer matches the driving node.
+# GUI and Space-key drive lifecycle values. Cone recognition, motor topic,
+# speed (3..5), and steering come from track_drive/config/cone_drive.yaml.
 view:
   update_interval_ms: 100
   display_abs_x_m: 6.0
@@ -11,3 +11,11 @@ view:
   trajectory_horizon_m: 3.0
   trajectory_step_m: 0.10
   window_geometry: 1200x720+80+80
+
+drive:
+  # Publish stop immediately on loss. Turn DRIVE OFF after this duration.
+  path_loss_timeout_sec: 0.50
+  # Stop messages sent on manual OFF, forced OFF, and process shutdown.
+  stop_publish_count: 5
+  # Ignore repeated Space events from a held key for this duration.
+  key_debounce_sec: 0.30

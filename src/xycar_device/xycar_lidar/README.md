@@ -3,6 +3,35 @@
 
 xycar_lidar is a new ros package, which is designed to gradually become the standard driver package for ydlidar devices in the ros2 environment.
 
+## Xycar MGW 실제 차량 사용
+
+이 저장소의 실행 기준은 `xytron@10.42.0.1:/home/xytron/xycar_ws_mgw`다. 기본
+설정은 `/dev/ttyLIDAR`, 512000 baud, 10 Hz이며 `/scan`을 publish한다.
+
+```bash
+ssh xytron@10.42.0.1
+cd /home/xytron/xycar_ws_mgw
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install --packages-select xycar_lidar
+source /home/xytron/xycar_ws_mgw/install/setup.bash
+ros2 pkg prefix xycar_lidar
+ros2 launch xycar_lidar xycar_lidar.launch.py
+```
+
+`ros2 pkg prefix` 결과는
+`/home/xytron/xycar_ws_mgw/install/xycar_lidar`여야 한다. LiDAR launch는 실제
+serial 장치를 열기 때문에 매 실행 전 승인이 필요하다. driver를 직접 실행하거나
+scan client를 사용할 때의 현재 명령은 다음과 같다.
+
+```bash
+ros2 run xycar_lidar xycar_lidar_node
+ros2 run xycar_lidar xycar_lidar_client
+ros2 launch xycar_lidar xycar_lidar_viewer.launch.py
+```
+
+`xycar_debug`의 통합 명령은 위 LiDAR launch를 내부에서 포함하므로 별도로 두
+driver를 동시에 실행하지 않는다.
+
 ## How to [install ROS2](https://index.ros.org/doc/ros2/Installation)
 [ubuntu](https://index.ros.org/doc/ros2/Installation/Dashing/Linux-Install-Debians/)
 
@@ -179,7 +208,6 @@ More paramters details, see [here](details.md)
 ![Development Path](images/EAI.png)
 
 If you have any extra questions, please feel free to [contact us](http://www.ydlidar.cn/cn/contact)
-
 
 
 

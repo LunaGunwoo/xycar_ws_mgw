@@ -78,7 +78,7 @@ install(TARGETS
     ${PROJECT_NAME}_node ${PROJECT_NAME}_client
     DESTINATION lib/${PROJECT_NAME})
 
-install(DIRECTORY launch params startup config
+install(DIRECTORY launch params startup
     DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
@@ -87,4 +87,3 @@ if(BUILD_TESTING)
 endif()
 
 ament_package()
-
