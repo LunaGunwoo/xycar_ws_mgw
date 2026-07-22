@@ -27,13 +27,15 @@ setup(
         ),
     ],
     install_requires=["setuptools"],
+    tests_require=["pytest"],
     zip_safe=True,
     maintainer="Gunwoo Moon",
     maintainer_email="moongunwoo7019@naver.com",
-    description="Terminal teleop and camera-first AI dataset recorder for Xycar.",
+    description="Gamepad/terminal teleop and camera-first dataset tools for Xycar.",
     license="Apache-2.0",
     entry_points={
         "console_scripts": [
+            "gamepad_teleop = xycar_data.gamepad_teleop:main",
             "teleop_recorder = xycar_data.teleop_recorder:main",
         ],
     },

@@ -1,0 +1,29 @@
+game_controller_node:
+  ros__parameters:
+    device_id: 0
+    deadzone: 0.05
+    autorepeat_rate: 20.0
+    sticky_buttons: false
+    coalesce_interval_ms: 1
+
+gamepad_teleop:
+  ros__parameters:
+    joy_topic: /joy
+    motor_topic: /xycar_motor
+
+    # Remote Gamepad mapping observed through joy/game_controller_node.
+    steering_axis: 0
+    lt_axis: 4
+    rt_axis: 5
+    invert_steering: true
+
+    # angle = -steering * max_angle (Xycar motor driver compensation)
+    # speed = RT * max_forward_speed - LT * max_reverse_speed
+    max_angle: 100.0
+    max_reverse_speed: 5.0
+    max_forward_speed: 7.0
+
+    publish_rate_hz: 20.0
+    joy_timeout_sec: 0.25
+    graph_check_period_sec: 0.5
+    stop_publish_count: 5

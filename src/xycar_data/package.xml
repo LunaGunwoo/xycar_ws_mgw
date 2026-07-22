@@ -3,7 +3,7 @@
 <package format="3">
   <name>xycar_data</name>
   <version>0.1.0</version>
-  <description>Terminal teleop and camera-first AI dataset recorder for Xycar.</description>
+  <description>Gamepad/terminal teleop and camera-first dataset tools for Xycar.</description>
   <maintainer email="moongunwoo7019@naver.com">Gunwoo Moon</maintainer>
   <license>Apache-2.0</license>
 
@@ -11,6 +11,7 @@
   <exec_depend>cv_bridge</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>joy</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
@@ -19,6 +20,8 @@
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>xycar_cam</exec_depend>
   <exec_depend>xycar_lidar</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
 
   <export>
     <build_type>ament_python</build_type>

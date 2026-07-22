@@ -1,10 +1,10 @@
 # xycar_data
 
-`xycar_data`는 카메라 기반 behavior-cloning 모델 학습용 데이터를 수집하는
-터미널 Teleop 패키지다. 학습 입력의 기준은 카메라 frame이며, 각 PNG frame에는
-그 순간 발행한 연속형 `angle`, `speed`가 label로 저장된다. LiDAR는 나중의
-분석·센서 융합을 위한 선택적 보조 정보이며, 끊겨도 카메라 수집 속도나 주행을
-막지 않는다.
+`xycar_data`는 게임패드·터미널로 Xycar를 조종하고 카메라 기반
+behavior-cloning 모델 학습용 데이터를 수집하는 패키지다. 게임패드 조종은
+카메라·LiDAR·녹화와 독립적이다. 터미널 Teleop의 학습 입력 기준은 카메라
+frame이며, 각 PNG frame에는 그 순간 발행한 연속형 `angle`, `speed`가 label로
+저장된다.
 
 모든 명령은 실제 차량 `xytron@10.42.0.1:/home/xytron/xycar_ws_mgw` 기준이다.
 카메라·LiDAR driver 또는 motor publisher를 시작하므로 각각 실행 직전에 별도
@@ -27,6 +27,40 @@ export ROS_NAMESPACE=xycar
 
 `teleop_recorder`는 키보드 TTY가 필요하므로 `ros2 launch`로 실행하지 않는다.
 SSH 연결에도 `-t`를 유지한다.
+
+## Remote Gamepad Teleop
+
+Remote Gamepad 휴대폰 앱과 PC 앱을 먼저 연결한다. 차량 바퀴를 지면에서 띄우고
+다른 `/xycar_motor` publisher가 없는지 확인한 뒤 다음 launch를 실행한다.
+
+```bash
+ros2 launch xycar_data gamepad_teleop.launch.py
+```
+
+launch는 ROS 2 공식 `joy/game_controller_node`와 `gamepad_teleop`을 함께
+시작한다. 입력과 출력은 다음과 같다.
+
+| Gamepad 입력 | 변환 | 범위 |
+| --- | --- | --- |
+| 왼쪽 스틱 좌우 `axes[0]` | `angle = -100 * axes[0]` | `-100 ~ 100` |
+| LT `axes[4]` | `speed -= 5 * axes[4]` | `0 ~ -5` |
+| RT `axes[5]` | `speed += 7 * axes[5]` | `0 ~ 7` |
+
+LT와 RT는 합산하므로 둘을 끝까지 누르면 speed는 `2`다. 두 트리거가 모두
+0이면 speed만 0이 되고 angle은 왼쪽 스틱을 계속 따라간다. A/B 버튼은 사용하지
+않는다.
+
+`/joy`가 0.25초 이상 끊기거나, 축 배열이 잘못됐거나, motor subscriber가 없거나,
+다른 motor publisher가 발견되면 `[0, 0]`을 발행한다. 종료할 때도 정지 명령을
+5회 발행한다. 연결이 복구되면 A/B 승인 없이 트리거 입력이 즉시 반영되므로
+재연결 전에 LT와 RT에서 손을 떼야 한다.
+
+기본값은 `config/gamepad_teleop.yaml`에서 바꿀 수 있다. 다른 SDL 장치를 쓸 때는
+device ID를 launch 인자로 지정한다.
+
+```bash
+ros2 launch xycar_data gamepad_teleop.launch.py device_id:=1
+```
 
 ## 센서 실행
 
