@@ -1,0 +1,34 @@
+# Camera frames are the primary AI samples. LiDAR is optional metadata and
+# never gates driving or image collection.
+topics:
+  camera_topic: /image_raw
+  lidar_topic: /scan
+  motor_topic: /xycar_motor
+
+control:
+  # Commands are Float32MultiArray([angle, speed]).
+  publish_rate_hz: 20.0
+  key_timeout_sec: 0.25
+  graph_check_period_sec: 0.5
+  stop_publish_count: 5
+  forward_angle: 0.0
+  forward_speed: 5.0
+  reverse_angle: 0.0
+  reverse_speed: -3.0
+  left_angle: -30.0
+  left_speed: 3.0
+  right_angle: 30.0
+  right_speed: 3.0
+
+sensors:
+  # The camera is mandatory for motion. LiDAR remains optional.
+  camera_timeout_sec: 0.25
+  lidar_timeout_sec: 0.30
+  max_lidar_skew_sec: 0.20
+
+recording:
+  root_dir: /home/xytron/xycar_data/teleop
+  # OpenCV PNG compression range: 0 (fast/larger) .. 9 (slow/smaller).
+  png_compression: 3
+  queue_size: 128
+  min_free_space_mb: 1024
