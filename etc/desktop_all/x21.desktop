@@ -1,0 +1,9 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Version=1.0
+Type=Application
+Terminal=true
+Exec=/home/xytron/xycar_ws/etc/gui-shell/x21.sh
+Name=ROS 구독/발행 
+Comment=ROS 구독/발행
+Icon=/home/xytron/xycar_ws/etc/icon/x21.png

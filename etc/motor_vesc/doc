@@ -1,0 +1,14 @@
+docker run -it --rm \
+    --privileged \
+    --name ros1_container \
+    --network host \
+    -e DISPLAY=$DISPLAY \
+    -v /tmp/.X11-unix:/tmp/.X11-unix \
+    -v /home/xytron/Downloads:/root/Downloads \
+    -v /home/xytron/noetic_ws:/root/noetic_ws \
+    -v /dev:/dev \
+    --group-add dialout \
+    osrf/ros:noetic-xycar \
+    bash
+    
+

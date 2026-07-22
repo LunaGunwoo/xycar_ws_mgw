@@ -1,0 +1,10 @@
+# Debug-only lifecycle for one cone-following mission.
+# Perception, path, speed (3..5), and steering values remain in
+# track_drive/config/cone_drive.yaml so this command matches the Viewer.
+mission:
+  # Count distinct valid LaserScan messages, not repeated control ticks.
+  start_valid_frames: 3
+  # Stop immediately on loss; finish the process if loss lasts this long.
+  path_loss_timeout_sec: 0.50
+  # Stop commands sent on mission completion, failure, Ctrl+C, and shutdown.
+  stop_publish_count: 5

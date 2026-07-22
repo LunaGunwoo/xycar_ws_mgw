@@ -1,0 +1,9 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Version=1.0
+Type=Application
+Terminal=true
+Exec=/home/xytron/xycar_ws/etc/gui-shell/x1.sh
+Name=뷰어 실행
+Comment=뷰어 실행
+Icon=/home/xytron/xycar_ws/etc/icon/x1.png

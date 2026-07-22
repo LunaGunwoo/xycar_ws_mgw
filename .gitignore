@@ -1,0 +1,74 @@
+# ROS 2 / colcon workspace outputs
+build/
+install/
+log/
+compile_commands.json
+
+# ROS runtime data
+.ros/
+rosbag2_*/
+*.bag
+*.bag.active
+*.db3
+*.db3-shm
+*.db3-wal
+*.mcap
+
+# Python bytecode and tool caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Python packaging outputs
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments and local environment variables
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+!.env.example
+
+# Standalone CMake outputs created outside the colcon build directory
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+_deps/
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.code-workspace
+*.user
+*.suo
+*.swp
+*.swo
+*~
+
+# Operating system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Generic local logs and caches
+*.log
+.cache/
+
+# Real-car local tools and independently managed nested repositories
+/etc/motor_vesc/vesc_tool_6.05
+/src/yolo_ros/
+/src/xycar_device/xycar_lidar/YDLidar-SDK/

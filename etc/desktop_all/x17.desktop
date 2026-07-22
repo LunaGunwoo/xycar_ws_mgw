@@ -1,0 +1,10 @@
+#!/usr/bin/env xdg-open
+
+[Desktop Entry]
+Version=1.0
+Type=Application
+Terminal=false
+Exec=/home/xytron/workspaces/isaac_ros-dev/etc/gui-shell/x17.sh
+Name=화면 축소
+Comment=화면 축소
+Icon=/home/xytron/workspaces/isaac_ros-dev/etc/icon/x17.png

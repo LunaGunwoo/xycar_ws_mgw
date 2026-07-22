@@ -1,0 +1,115 @@
+#!/bin/bash
+
+# --- 설정 변수 ---
+ROS1_CONTAINER_NAME="ros1_container"
+ROS1_IMAGE_NAME="osrf/ros:noetic-xycar"
+HOST_WS_PATH="/home/xytron/noetic_ws" 
+
+# --- ---
+    echo "* * * * * * * * * * * * * * * * * * * * * * *"
+    echo "  모 터 제 어 기  설 정 을  시 작 합 니 다. "
+    echo ""
+
+# --- 0. 모터제어기 연결 확인 ---
+echo "---------------------------------------------"
+echo "(0) 모터제어기(VESC) 연결상태를 확인합니다..."
+
+if [ ! -e /dev/ttyMOTOR ]; then
+    echo ""
+    echo "[ERROR] /dev/ttyMOTOR 장치를 찾을 수 없습니다."
+    echo "[ERROR] 모터 전원이 켜져 있는지 확인하세요"
+    echo "[ERROR] 모터제어기(VESC)의 USB 연결상태를 확인하세요."
+    echo ""
+    echo "이 창은 10초 후에 자동으로 닫힙니다."
+    sleep 10
+    exit 1
+fi
+
+echo "  [OK] /dev/ttyMOTOR 장치를 찾았습니다."
+echo "  [OK] 모터 연결이 확인되었습니다."
+
+# --- 1. 기존 컨테이너 정리 ---
+echo "---------------------------------------------"
+echo "(1) 기존 컨테이너를 정리합니다..."
+docker stop $ROS1_CONTAINER_NAME > /dev/null 2>&1
+docker rm $ROS1_CONTAINER_NAME > /dev/null 2>&1
+
+# --- 2. ROS1 Docker 실행 및 모터 노드 자동 구동 ---
+echo "---------------------------------------------"
+echo "(2) 도커를 실행하고 모터노드를 구동합니다..."
+# -d 옵션을 사용하여 백그라운드에서 먼저 실행합니다 (브릿지 실행을 위해)
+docker run -d \
+    --privileged \
+    --name $ROS1_CONTAINER_NAME \
+    --network host \
+    -e DISPLAY=$DISPLAY \
+    -v /tmp/.X11-unix:/tmp/.X11-unix \
+    -v /home/xytron/Downloads:/root/Downloads \
+    -v $HOST_WS_PATH:/root/noetic_ws \
+    -v /dev:/dev \
+    --group-add dialout \
+    -e ROS_MASTER_URI=http://localhost:11311 \
+    $ROS1_IMAGE_NAME \
+    bash -ci "source /opt/ros/noetic/setup.bash; source /root/noetic_ws/devel/setup.bash; motor"
+
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "[ERROR] 도커 실행에 실패했습니다."
+    sleep 10
+    exit 1
+fi
+
+echo "  [OK] 도커 컨테이너 : ros1_container"
+
+# 모터 노드가 완전히 뜰 때까지 충분히 대기 (중요)
+sleep 3 
+if ! docker ps | grep -q "$ROS1_CONTAINER_NAME"; then
+    echo "[ERROR] motor 노드 실행 실패"
+    echo "[ERROR] docker 로그를 확인하세요."
+    docker logs $ROS1_CONTAINER_NAME
+    exit 1
+fi
+
+# --- 3. 호스트에서 ROS1-ROS2 브릿지 실행 ---
+echo "---------------------------------------------"
+echo "(3) 호스트에서 ROS1-ROS2 브릿지를 실행합니다..."
+source /opt/ros/humble/setup.bash
+source ~/ros-humble-ros1-bridge/install/local_setup.bash > /dev/null 2>&1
+export ROS_MASTER_URI=http://localhost:11311
+
+# 브릿지 실행
+(ros2 run ros1_bridge dynamic_bridge --bridge-all-topics > /dev/null 2>&1 &)
+BRIDGE_PID=$(pgrep -n -f "ros1_bridge")
+echo "  [OK] ros1_bridge started (PID: $BRIDGE_PID)"
+sleep 3
+
+# --- 4. 사용자 터미널을 도커 내부로 연결 (최종 상태 유지) ---
+echo "---------------------------------------------"
+echo "(4) 환경설정 완료! 이제 모터를 사용할 수 있습니다."
+echo "---------------------------------------------"
+echo " >>> 모터 사용이 끝나면 'exit'을 입력하세요."
+echo "---------------------------------------------"
+
+# 이미 실행 중인 컨테이너에 접속하여 쉘 유지
+docker exec -it $ROS1_CONTAINER_NAME bash -ci "source /opt/ros/noetic/setup.bash; source /root/noetic_ws/devel/setup.bash; exec bash"
+
+# --- 5. 종료 처리 (컨테이너에서 나오면 실행됨) ---
+echo "-----------------------------------"
+echo "(5) 프로세스 정리를 시작합니다."
+echo " >>> 창을 닫지 말고 잠시 기다려 주세요..."
+
+# 1. 먼저 브릿지를 강제 종료하여 에러 로그 출력을 원천 차단
+if [ ! -z "$BRIDGE_PID" ]; then
+    disown $BRIDGE_PID 2>/dev/null
+    kill -9 $BRIDGE_PID > /dev/null 2>&1
+fi
+
+# 2. 도커 컨테이너 중지
+docker stop $ROS1_CONTAINER_NAME > /dev/null 2>&1
+
+sleep 0.5
+echo "---------------------------------------------"
+echo "모든 프로세스가 정리되었습니다."
+echo "-----------------------------------"
+
+

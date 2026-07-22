@@ -1,0 +1,71 @@
+# Shared LiDAR cone detection, path planning, and motor preview tuning.
+# Distances are metres, angles are degrees unless stated, and times are seconds.
+# The track_drive library and both xycar_debug commands load this exact file.
+
+topics:
+  # xycar_lidar is explicitly launched in the root namespace, so /scan is absolute.
+  scan_topic: /scan
+  # Keep the current MGW motor contract relative to ROS_NAMESPACE (normally xycar).
+  motor_topic: xycar_motor
+
+cone_filter:
+  min_range_m: 0.30
+  max_range_m: 10.00
+  min_forward_m: 0.20
+  max_abs_x_m: 4.00
+  max_adjacent_gap_m: 0.35
+  max_index_gap: 2
+  min_cluster_points: 2
+  max_cluster_points: 8
+  max_cluster_diameter_m: 0.35
+  # Rotate the LaserScan coordinate system if the physical LiDAR front is offset.
+  front_angle_deg: 0.0
+
+cone_path:
+  max_cones_per_side: 5
+  max_graph_cones: 12
+  max_boundary_path_length: 5
+  max_boundary_paths: 120
+  min_edge_length_m: 0.70
+  max_edge_length_m: 5.00
+  min_forward_progress_m: 0.25
+  min_lane_width_m: 2.00
+  max_lane_width_m: 6.20
+  max_width_delta_m: 1.70
+  max_boundary_turn_deg: 105.0
+  centerline_step_m: 0.45
+  min_plan_horizon_m: 1.60
+  min_lookahead_m: 1.20
+  mid_lookahead_m: 1.80
+  max_lookahead_m: 2.60
+  default_half_width_m: 2.25
+  min_half_width_m: 1.40
+  max_half_width_m: 3.00
+  half_width_ema_alpha: 0.20
+  fallback_sample_y_m: [1.20, 1.80, 2.60, 3.40, 4.20]
+  # Reused paths are drawn in the Viewer but are never allowed to drive.
+  max_previous_reuse_frames: 3
+  reused_confidence_decay: 0.25
+  lookahead_medium_curvature: 0.045
+  lookahead_sharp_curvature: 0.12
+
+control:
+  control_rate_hz: 10.0
+  scan_timeout_sec: 0.30
+  min_pair_confidence: 0.50
+  min_fallback_both_confidence: 0.35
+  min_single_side_confidence: 0.22
+  min_cones_per_visible_side: 2
+  min_drive_horizon_m: 1.60
+  # Cone debug mission hard range: minimum 3 and maximum 5.
+  max_speed: 5.0
+  sharp_turn_speed: 3.0
+  single_side_speed: 3.0
+  medium_curvature: 0.025
+  sharp_curvature: 0.045
+  curvature_gain: 160.0
+  heading_gain: 220.0
+  # Set to -1 only if the Viewer/raised-car check proves steering is reversed.
+  steering_sign: 1.0
+  # Initial clamp is 30. Values up to the hardware scale limit 100 are accepted.
+  steering_limit: 30.0

@@ -1,0 +1,9 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Version=1.0
+Type=Application
+Terminal=true
+Exec=/home/xytron/xycar_ws/etc/gui-shell/x23.sh
+Name=초음파 뷰어
+Comment=초음파 뷰어
+Icon=/home/xytron/xycar_ws/etc/icon/x23.png

@@ -1,0 +1,9 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Version=1.0
+Type=Application
+Terminal=false
+Exec=/home/xytron/workspaces/isaac_ros-dev/etc/gui-shell/x0.sh
+Name=화면 확장
+Comment=화면 확장
+Icon=/home/xytron/workspaces/isaac_ros-dev/etc/icon/x0.png

@@ -1,0 +1,13 @@
+# GUI-only values. Cone recognition and predicted commands come from
+# track_drive/config/cone_drive.yaml so the Viewer matches the driving node.
+view:
+  update_interval_ms: 100
+  display_abs_x_m: 6.0
+  display_y_min_m: -1.0
+  display_y_max_m: 12.0
+  raw_point_size: 8.0
+  candidate_point_size: 18.0
+  cone_point_size: 72.0
+  trajectory_horizon_m: 3.0
+  trajectory_step_m: 0.10
+  window_geometry: 1200x720+80+80
