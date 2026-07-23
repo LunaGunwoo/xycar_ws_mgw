@@ -2,14 +2,21 @@
 # Licensed under the Apache License, Version 2.0
 
 import math
+from types import SimpleNamespace
 
 import pytest
 
 from xycar_data.gamepad_teleop import (
     DriveCommand,
     GamepadConfig,
+    GamepadTeleopNode,
     InvalidJoyInput,
     NeutralArmingGate,
+    RecordingAction,
+    RecordingGate,
+    RecordingState,
+    _PendingRecordingFinish,
+    _validate_recording_parameters,
     _validate_runtime_parameters,
     is_input_fresh,
     map_joy_axes,
@@ -159,3 +166,145 @@ def test_input_freshness_timeout():
     assert not is_input_fresh(10.251, 10.0, 0.25)
     assert not is_input_fresh(10.0, None, 0.25)
     assert not is_input_fresh(9.9, 10.0, 0.25)
+
+
+def test_recording_gate_waits_for_positive_published_speed():
+    gate = RecordingGate()
+
+    assert gate.observe_buttons(
+        a_pressed=True,
+        b_pressed=False,
+    ) == RecordingAction.WAITING_STARTED
+    assert gate.state == RecordingState.WAITING_FORWARD
+    assert gate.observe_published_speed(0.0) == RecordingAction.NONE
+    assert gate.observe_published_speed(-1.0) == RecordingAction.NONE
+    assert gate.observe_published_speed(0.1) == (
+        RecordingAction.START_RECORDING
+    )
+    assert gate.state == RecordingState.RECORDING
+
+
+def test_releasing_a_cancels_waiting_but_not_active_recording():
+    gate = RecordingGate()
+    gate.observe_buttons(a_pressed=True, b_pressed=False)
+
+    assert gate.observe_buttons(
+        a_pressed=False,
+        b_pressed=False,
+    ) == RecordingAction.WAITING_CANCELLED
+    assert gate.state == RecordingState.IDLE
+
+    gate.observe_buttons(a_pressed=True, b_pressed=False)
+    gate.observe_published_speed(1.0)
+    assert gate.observe_buttons(
+        a_pressed=False,
+        b_pressed=False,
+    ) == RecordingAction.NONE
+    assert gate.state == RecordingState.RECORDING
+
+
+def test_b_finishes_normally_and_requires_a_release_before_restart():
+    gate = RecordingGate()
+    gate.observe_buttons(a_pressed=True, b_pressed=False)
+    gate.observe_published_speed(1.0)
+
+    assert gate.observe_buttons(
+        a_pressed=True,
+        b_pressed=True,
+    ) == RecordingAction.FINISH_NORMAL
+    gate.finish_completed()
+    assert gate.state == RecordingState.IDLE
+
+    gate.observe_buttons(a_pressed=True, b_pressed=False)
+    assert gate.state == RecordingState.IDLE
+    gate.observe_buttons(a_pressed=False, b_pressed=False)
+    assert gate.observe_buttons(
+        a_pressed=True,
+        b_pressed=False,
+    ) == RecordingAction.WAITING_STARTED
+
+
+@pytest.mark.parametrize('speed', [0.0, -0.1])
+def test_nonpositive_speed_requests_emergency_recording_finish(speed):
+    gate = RecordingGate()
+    gate.observe_buttons(a_pressed=True, b_pressed=False)
+    gate.observe_published_speed(1.0)
+
+    assert gate.observe_published_speed(speed) == (
+        RecordingAction.FINISH_EMERGENCY
+    )
+    assert gate.state == RecordingState.FINISHING
+    assert speed <= 0.0
+
+
+def test_pending_writer_finish_is_retried_until_accepted():
+    class RetryWriter:
+        failure = None
+
+        def __init__(self):
+            self.calls = []
+
+        def finish(self, token, reason, **kwargs):
+            self.calls.append((token, reason, kwargs))
+            return len(self.calls) >= 2
+
+    pending = _PendingRecordingFinish(
+        token=7,
+        reason='b_button',
+        complete=True,
+        extra_metadata={'emergency_discard_count': 0},
+        final_samples=(),
+    )
+    node = SimpleNamespace(
+        writer=RetryWriter(),
+        _pending_recording_finish=pending,
+    )
+
+    GamepadTeleopNode._retry_pending_recording_finish(node)
+    assert node._pending_recording_finish is pending
+    GamepadTeleopNode._retry_pending_recording_finish(node)
+    assert node._pending_recording_finish is None
+    assert len(node.writer.calls) == 2
+
+
+@pytest.mark.parametrize(
+    ('field', 'value'),
+    [
+        ('camera_topic', ''),
+        ('recording_root_dir', ''),
+        ('record_start_button', -1),
+        ('record_stop_button', -1),
+        ('emergency_discard_frames', -1),
+        ('recording_png_compression', 10),
+        ('recording_queue_size', 0),
+        ('recording_min_free_space_mb', -1),
+    ],
+)
+def test_invalid_recording_parameter_is_rejected(field, value):
+    parameters = {
+        'camera_topic': '/image_raw',
+        'recording_root_dir': '/tmp/xycar_data_test',
+        'record_start_button': 0,
+        'record_stop_button': 1,
+        'emergency_discard_frames': 15,
+        'recording_png_compression': 3,
+        'recording_queue_size': 128,
+        'recording_min_free_space_mb': 0,
+    }
+    parameters[field] = value
+    with pytest.raises(ValueError):
+        _validate_recording_parameters(**parameters)
+
+
+def test_recording_buttons_must_be_distinct():
+    with pytest.raises(ValueError, match='must be different'):
+        _validate_recording_parameters(
+            camera_topic='/image_raw',
+            recording_root_dir='/tmp/xycar_data_test',
+            record_start_button=0,
+            record_stop_button=0,
+            emergency_discard_frames=15,
+            recording_png_compression=3,
+            recording_queue_size=128,
+            recording_min_free_space_mb=0,
+        )

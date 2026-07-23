@@ -10,6 +10,7 @@ gamepad_teleop:
   ros__parameters:
     joy_topic: /joy
     motor_topic: /xycar_motor
+    camera_topic: /image_raw
 
     # Remote Gamepad mapping observed through joy/game_controller_node.
     # This profile reports released..pressed triggers as 0..+1.
@@ -30,3 +31,16 @@ gamepad_teleop:
     graph_check_period_sec: 0.5
     neutral_trigger_threshold: 0.05
     stop_publish_count: 5
+
+    # Hold A while stopped to wait; recording begins only after the node
+    # actually publishes a positive speed. B saves without stopping the car.
+    record_start_button: 0
+    record_stop_button: 1
+
+    # Camera-only behavior-cloning samples use the same root and CSV contract
+    # as terminal teleop. The newest 15 frames are held back while recording.
+    recording_root_dir: /home/xytron/xycar_data/teleop
+    emergency_discard_frames: 15
+    recording_png_compression: 3
+    recording_queue_size: 128
+    recording_min_free_space_mb: 1024

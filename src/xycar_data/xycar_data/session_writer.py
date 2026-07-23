@@ -12,7 +12,7 @@ from pathlib import Path
 import queue
 import shutil
 from threading import Event, Lock, Thread
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -102,6 +102,7 @@ class _FinishJob:
     reason: str
     complete: bool
     extra_metadata: Mapping[str, Any]
+    final_samples: tuple[CameraSample, ...]
 
 
 @dataclass(frozen=True)
@@ -180,11 +181,18 @@ class AsyncSessionWriter:
         *,
         complete: bool = True,
         extra_metadata: Optional[Mapping[str, Any]] = None,
+        final_samples: Sequence[CameraSample] = (),
     ) -> bool:
         if self.failure is not None:
             return False
         return self._enqueue(
-            _FinishJob(token, reason, complete, dict(extra_metadata or {}))
+            _FinishJob(
+                token,
+                reason,
+                complete,
+                dict(extra_metadata or {}),
+                tuple(final_samples),
+            )
         )
 
     def poll_results(self) -> list[SessionResult]:
@@ -233,6 +241,8 @@ class AsyncSessionWriter:
                 elif isinstance(job, _FinishJob):
                     if current is None or current.token != job.token:
                         raise RuntimeError("finish does not belong to the active session")
+                    for sample in job.final_samples:
+                        self._write_sample(current, sample)
                     self._finish_session(
                         current,
                         job.reason,
@@ -261,7 +271,7 @@ class AsyncSessionWriter:
             raise RuntimeError("session storage was not initialized")
 
         sample_index = session.sample_count + 1
-        image_relative = f"Images/{sample_index:06d}.png"
+        image_relative = f"Images/{sample_index}.png"
         image_path = session.temp_dir / image_relative
         self._write_png(image_path, sample.image)
 
@@ -395,11 +405,12 @@ class AsyncSessionWriter:
             )
             return
 
+        stopped_at = datetime.now()
         metadata = {
             **dict(session.metadata),
             "format_version": 1,
             "start_time": session.started_at.isoformat(timespec="milliseconds"),
-            "stop_time": datetime.now().isoformat(timespec="milliseconds"),
+            "stop_time": stopped_at.isoformat(timespec="milliseconds"),
             "sample_count": session.sample_count,
             "lidar_linked_count": session.lidar_linked_count,
             "lidar_missing_count": session.lidar_missing_count,
@@ -412,9 +423,10 @@ class AsyncSessionWriter:
             yaml.safe_dump(metadata, allow_unicode=True, sort_keys=True),
             encoding="utf-8",
         )
-        state_prefix = "session" if complete else "_incomplete"
+        state_suffix = "session" if complete else "incomplete"
         final_dir = _unique_path(
-            self.root_dir / f"{state_prefix}_{_session_timestamp(datetime.now())}"
+            self.root_dir
+            / f"{_session_timestamp(stopped_at)}_{state_suffix}"
         )
         os.replace(session.temp_dir, final_dir)
         self._results.put(

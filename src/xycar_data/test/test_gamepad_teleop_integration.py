@@ -1,30 +1,52 @@
 # Copyright 2026 Gunwoo Moon
 # Licensed under the Apache License, Version 2.0
 
+import csv
 import time
 
 import pytest
 import rclpy
+import yaml
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
-from sensor_msgs.msg import Joy
+from sensor_msgs.msg import Image, Joy
 from std_msgs.msg import Float32MultiArray
 
-from xycar_data.gamepad_teleop import GamepadTeleopNode
+from xycar_data.gamepad_teleop import (
+    GamepadTeleopNode,
+    RecordingState,
+)
 
 
 JOY_TOPIC = '/xycar_data_test/gamepad/joy'
 MOTOR_TOPIC = '/xycar_data_test/gamepad/motor'
+CAMERA_TOPIC = '/xycar_data_test/gamepad/camera'
 
 
 def _joy_message(
     steering: float = 0.0,
     lt: float = 0.0,
     rt: float = 0.0,
+    a: bool = False,
+    b: bool = False,
 ) -> Joy:
     message = Joy()
     message.axes = [steering, 0.0, 0.0, 0.0, lt, rt]
+    message.buttons = [int(a), int(b)]
+    return message
+
+
+def _image_message(sequence: int) -> Image:
+    message = Image()
+    message.header.stamp.sec = sequence
+    message.header.stamp.nanosec = sequence * 1000
+    message.height = 4
+    message.width = 6
+    message.encoding = 'bgr8'
+    message.is_bigendian = False
+    message.step = message.width * 3
+    message.data = bytes([sequence % 256] * (message.step * message.height))
     return message
 
 
@@ -39,8 +61,15 @@ def _spin_for(harness, duration_sec, joy_message=None):
         harness['executor'].spin_once(timeout_sec=0.01)
 
 
+def _publish_camera_frames(harness, count, joy_message):
+    start_sequence = harness['teleop']._camera_sequence + 1
+    for sequence in range(start_sequence, start_sequence + count):
+        harness['camera_publisher'].publish(_image_message(sequence))
+        _spin_for(harness, 0.03, joy_message)
+
+
 @pytest.fixture
-def ros_harness(monkeypatch):
+def ros_harness(monkeypatch, tmp_path):
     # Keep this test graph away from the vehicle domain and motor topic.
     monkeypatch.setenv('ROS_DOMAIN_ID', '222')
     monkeypatch.setenv('ROS_LOCALHOST_ONLY', '1')
@@ -49,17 +78,24 @@ def ros_harness(monkeypatch):
     overrides = [
         Parameter('joy_topic', value=JOY_TOPIC),
         Parameter('motor_topic', value=MOTOR_TOPIC),
+        Parameter('camera_topic', value=CAMERA_TOPIC),
         Parameter('publish_rate_hz', value=20.0),
         Parameter('joy_timeout_sec', value=0.25),
         Parameter('graph_check_period_sec', value=0.05),
         Parameter('neutral_trigger_threshold', value=0.05),
         Parameter('stop_publish_count', value=1),
+        Parameter('recording_root_dir', value=str(tmp_path / 'teleop')),
+        Parameter('emergency_discard_frames', value=15),
+        Parameter('recording_png_compression', value=0),
+        Parameter('recording_queue_size', value=64),
+        Parameter('recording_min_free_space_mb', value=0),
     ]
     teleop = GamepadTeleopNode(parameter_overrides=overrides)
     peer = Node('gamepad_teleop_test_peer')
     received_commands = []
 
     joy_publisher = peer.create_publisher(Joy, JOY_TOPIC, 10)
+    camera_publisher = peer.create_publisher(Image, CAMERA_TOPIC, 10)
 
     def on_motor(message):
         received_commands.append(tuple(message.data))
@@ -79,9 +115,11 @@ def ros_harness(monkeypatch):
         'teleop': teleop,
         'peer': peer,
         'joy_publisher': joy_publisher,
+        'camera_publisher': camera_publisher,
         'motor_subscription': motor_subscription,
         'on_motor': on_motor,
         'received_commands': received_commands,
+        'recording_root': tmp_path / 'teleop',
     }
     assert teleop.motor_topic == MOTOR_TOPIC
     yield harness
@@ -138,6 +176,13 @@ def test_neutral_rearming_repeat_and_graph_fail_safes(ros_harness):
     _spin_for(harness, 0.10, held_forward)
     assert any(command[1] == pytest.approx(3.5) for command in commands)
 
+    # Missing A/B entries disable recording controls but never block driving.
+    short_buttons = _joy_message(rt=0.5)
+    short_buttons.buttons = []
+    commands.clear()
+    _spin_for(harness, 0.10, short_buttons)
+    assert any(command[1] == pytest.approx(3.5) for command in commands)
+
     # A competing publisher stops and disarms the teleop.
     competitor = harness['peer'].create_publisher(
         Float32MultiArray,
@@ -177,3 +222,117 @@ def test_neutral_rearming_repeat_and_graph_fail_safes(ros_harness):
     commands.clear()
     _spin_for(harness, 0.10, held_forward)
     assert any(command[1] == pytest.approx(3.5) for command in commands)
+
+
+def test_a_waits_for_forward_and_b_saves_all_frames_without_stopping(
+    ros_harness,
+):
+    harness = ros_harness
+    teleop = harness['teleop']
+    commands = harness['received_commands']
+    neutral = _joy_message()
+    waiting = _joy_message(a=True)
+    forward = _joy_message(steering=0.25, rt=0.5, a=True)
+
+    _spin_for(harness, 0.15, neutral)
+    assert teleop._arming_gate.armed
+    _spin_for(harness, 0.10, waiting)
+    assert teleop._recording_gate.state == RecordingState.WAITING_FORWARD
+    assert teleop._session_token is None
+
+    _spin_for(harness, 0.15, forward)
+    assert teleop._recording_gate.state == RecordingState.RECORDING
+    assert teleop._session_token is not None
+
+    # Missing or malformed camera data does not stop driving or the session.
+    _spin_for(harness, 0.10, forward)
+    malformed = Image()
+    malformed.encoding = 'unsupported'
+    harness['camera_publisher'].publish(malformed)
+    _spin_for(harness, 0.05, forward)
+    assert teleop._recording_gate.state == RecordingState.RECORDING
+
+    _publish_camera_frames(harness, 10, forward)
+    _spin_for(harness, 0.30, forward)
+    assert teleop._recording_gate.state == RecordingState.RECORDING
+    _publish_camera_frames(harness, 10, forward)
+    assert teleop._camera_sequence == 20
+
+    commands.clear()
+    finish = _joy_message(steering=0.25, rt=0.5, b=True)
+    _spin_for(harness, 0.15, finish)
+    _spin_for(
+        harness,
+        0.75,
+        _joy_message(steering=0.25, rt=0.5),
+    )
+
+    assert teleop._recording_gate.state == RecordingState.IDLE
+    assert any(command[1] == pytest.approx(3.5) for command in commands)
+    sessions = list(harness['recording_root'].glob('*_session*'))
+    assert len(sessions) == 1
+    with (sessions[0] / 'samples.csv').open(
+        encoding='utf-8',
+        newline='',
+    ) as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 20
+    assert {row['angle'] for row in rows} == {'-25.000000'}
+    assert {row['speed'] for row in rows} == {'3.500000'}
+    assert {row['input_key'] for row in rows} == {'gamepad'}
+    metadata = yaml.safe_load(
+        (sessions[0] / 'metadata.yaml').read_text(encoding='utf-8')
+    )
+    assert metadata['control_mode'] == 'gamepad'
+    assert metadata['stop_reason'] == 'b_button'
+    assert metadata['emergency_discard_count'] == 0
+
+
+def test_nonpositive_speed_discards_fifteen_and_keeps_driving(
+    ros_harness,
+):
+    harness = ros_harness
+    teleop = harness['teleop']
+    commands = harness['received_commands']
+    neutral = _joy_message()
+    forward_with_a = _joy_message(rt=0.5, a=True)
+
+    _spin_for(harness, 0.15, neutral)
+    _spin_for(harness, 0.15, forward_with_a)
+    assert teleop._recording_gate.state == RecordingState.RECORDING
+    _publish_camera_frames(harness, 20, forward_with_a)
+
+    commands.clear()
+    reverse_with_a = _joy_message(lt=1.0, a=True)
+    _spin_for(harness, 0.20, reverse_with_a)
+    _spin_for(harness, 0.75, reverse_with_a)
+
+    assert teleop._recording_gate.state == RecordingState.IDLE
+    assert any(command[1] == pytest.approx(-5.0) for command in commands)
+    sessions = list(harness['recording_root'].glob('*_session*'))
+    assert len(sessions) == 1
+    with (sessions[0] / 'samples.csv').open(
+        encoding='utf-8',
+        newline='',
+    ) as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 5
+    metadata = yaml.safe_load(
+        (sessions[0] / 'metadata.yaml').read_text(encoding='utf-8')
+    )
+    assert metadata['stop_reason'] == 'speed_nonpositive'
+    assert metadata['emergency_discard_count'] == 15
+
+    # Holding A across the emergency finish must not create a second session.
+    _spin_for(harness, 0.20, forward_with_a)
+    assert teleop._recording_gate.state == RecordingState.IDLE
+    assert teleop._session_token is None
+
+    # Releasing and pressing A again permits a new recording.
+    _spin_for(harness, 0.10, _joy_message(rt=0.5))
+    _spin_for(harness, 0.15, forward_with_a)
+    assert teleop._recording_gate.state == RecordingState.RECORDING
+    _spin_for(harness, 0.15, _joy_message(rt=0.5, b=True))
+    _spin_for(harness, 0.30, _joy_message(rt=0.5))
+    assert teleop._recording_gate.state == RecordingState.IDLE
+    assert len(list(harness['recording_root'].glob('*_session*'))) == 1

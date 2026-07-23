@@ -1,10 +1,10 @@
 # xycar_data
 
 `xycar_data`는 게임패드·터미널로 Xycar를 조종하고 카메라 기반
-behavior-cloning 모델 학습용 데이터를 수집하는 패키지다. 게임패드 조종은
-카메라·LiDAR·녹화와 독립적이다. 터미널 Teleop의 학습 입력 기준은 카메라
-frame이며, 각 PNG frame에는 그 순간 발행한 연속형 `angle`, `speed`가 label로
-저장된다.
+behavior-cloning 모델 학습용 데이터를 수집하는 패키지다. 두 Teleop 모두
+카메라 frame을 학습 입력으로 사용하고 각 PNG에는 그 순간 실제 발행한 연속형
+`angle`, `speed`를 label로 저장한다. 게임패드 주행은 카메라가 없어도 유지되며
+녹화 중 누락된 camera frame만 건너뛴다.
 
 모든 명령은 실제 차량 `xytron@10.42.0.1:/home/xytron/xycar_ws_mgw` 기준이다.
 카메라·LiDAR driver 또는 motor publisher를 시작하므로 각각 실행 직전에 별도
@@ -38,19 +38,32 @@ ros2 launch xycar_data gamepad_teleop.launch.py
 ```
 
 launch는 ROS 2 공식 `joy/game_controller_node`와 `gamepad_teleop`을 함께
-시작한다. 입력과 출력은 다음과 같다.
+시작하지만 camera driver는 포함하지 않는다. 입력과 출력은 다음과 같다.
 
 | Gamepad 입력 | 변환 | 범위 |
 | --- | --- | --- |
 | 왼쪽 스틱 좌우 `axes[0]` | `angle = -100 * axes[0]` | `-100 ~ 100` |
 | LT `axes[4]` | `speed -= 5 * depth` | `0 ~ -5` |
 | RT `axes[5]` | `speed += 7 * depth` | `0 ~ 7` |
+| A `buttons[0]` | 양수 속도 녹화 대기·시작 | — |
+| B `buttons[1]` | 현재 세션 정상 저장 | — |
 
 Remote Gamepad 실측 기준은 trigger release `0`, full press `+1`이므로
 `trigger_axis_mode: positive`가 기본값이다. `0`에서 `-1`로 움직이는 다른 SDL
 controller는 `negative` profile을 사용한다. LT와 RT는 합산하므로 둘을 끝까지
 누르면 speed는 `2`다. 두 트리거가 모두 0이면 speed만 0이 되고 angle은 왼쪽
-스틱을 계속 따라간다. A/B 버튼은 사용하지 않는다.
+스틱을 계속 따라간다.
+
+A를 누르고 있는 동안 녹화를 대기한다. 실제 `/xycar_motor`에 `speed > 0`이
+발행되는 순간 세션이 시작되며, 시작 전에 A를 놓으면 대기가 취소된다. 녹화
+시작 뒤에는 A를 놓아도 계속 기록한다. B는 보류 중인 frame까지 정상 저장하고
+녹화만 끝내므로 차량은 현재 gamepad 명령으로 계속 주행한다.
+
+녹화 중 실제 발행 speed가 `0` 또는 음수가 되면 최신 camera frame 15개를
+폐기하고 그 이전 frame을 학습 가능한 정상 세션으로 저장한다. 이 동작은 녹화만
+종료하며 별도 정지나 disarm을 하지 않으므로 LT에 의한 후진은 계속 발행될 수
+있다. B 또는 speed 종료 후 A를 계속 누르고 있어도 자동 재시작하지 않으며,
+A를 한 번 놓았다가 다시 눌러야 새 세션을 시작한다.
 
 `/joy`가 0.25초 이상 끊기거나, 축 배열이 잘못됐거나, motor subscriber가 없거나,
 다른 motor publisher가 발견되면 `[0, 0]`을 발행한다. 종료할 때도 정지 명령을
@@ -103,6 +116,11 @@ ros2 launch xycar_data teleop_sensors.launch.py use_lidar:=false
 중복 실행하지 않는다. `/scan`은 없어도 recorder가 동작하며 해당 sample은
 `lidar_valid=false`로 저장된다.
 
+Gamepad 녹화를 사용할 때도 `/image_raw`는 이 sensor launch 또는 별도의 승인된
+camera node에서 받아야 한다. camera가 없거나 중간에 끊기면 gamepad 주행과
+녹화 상태는 유지되고 해당 구간의 frame만 저장되지 않는다. camera가 복구되면
+같은 세션에서 새 frame 저장을 계속한다.
+
 ## Terminal Teleop과 수집
 
 두 번째 SSH TTY에서 environment를 적용한 뒤 실행한다. 이 명령은
@@ -146,17 +164,18 @@ frame은 저장하지 않는다.
 - motor subscriber가 없으면 command와 sample 저장을 거부한다.
 - LiDAR는 선택적이다. 최신 scan이 없으면 경고만 남기고 camera sample을 저장한다.
 - writer queue 포화, 디스크 여유 부족, 이미지·NPZ 쓰기 오류는 정지와
-  `_incomplete_...` 세션 보존으로 처리한다.
+  `YYYYMMDD_HHMMSS_mmm_incomplete` 세션 보존으로 처리한다.
 
 ## 데이터 형식
 
 기본 저장 위치는 저장소 밖의 `/home/xytron/xycar_data/teleop`이며
-`config/teleop_recorder.yaml`에서 바꿀 수 있다. 첫 유효 sample 전에는 directory를
-만들지 않으므로 빈 세션은 남지 않는다.
+터미널은 `config/teleop_recorder.yaml`, gamepad는
+`config/gamepad_teleop.yaml`에서 바꿀 수 있다. 첫 유효 sample 전에는
+directory를 만들지 않으므로 빈 세션은 남지 않는다.
 
 ```text
-session_YYYYMMDD_HHMMSS_mmm/
-  Images/000001.png
+YYYYMMDD_HHMMSS_mmm_session/
+  Images/1.png
   Lidar/000001.npz
   samples.csv
   metadata.yaml
@@ -167,11 +186,16 @@ session_YYYYMMDD_HHMMSS_mmm/
 유효한 LiDAR가 있으면 `lidar` 경로와 scan timestamp·skew도 기록하며, 하나의
 LiDAR scan이 여러 camera frame에 대응할 때 NPZ 파일을 재사용한다. NPZ에는
 전체 `ranges`, `intensities`, LaserScan geometry·timing·frame metadata가 담긴다.
+Gamepad sample은 `input_key=gamepad`, `lidar_valid=false`로 기록되고
+`metadata.yaml`의 `control_mode=gamepad`로 터미널 세션과 구분한다.
 
-정상 `W` 또는 종료는 임시 `_recording_...` directory를 `session_...`으로
+정상 `W` 또는 종료는 임시 `_recording_...` directory를
+`YYYYMMDD_HHMMSS_mmm_session`으로
 atomic rename한다. 쓰기 실패나 경쟁 motor publisher로 중단되면
-`_incomplete_...`으로 남고 `metadata.yaml`의 `stop_reason`에서 원인을 확인할 수
-있다.
+`YYYYMMDD_HHMMSS_mmm_incomplete`로 남고 `metadata.yaml`의 `stop_reason`에서
+원인을 확인할 수 있다. Gamepad B 종료는 `stop_reason=b_button`, speed 0 이하 종료는
+`stop_reason=speed_nonpositive`와 실제 `emergency_discard_count`를 남긴다.
+폐기 후 유효 sample이 하나도 없으면 빈 session directory를 만들지 않는다.
 
 ## 튜닝
 
@@ -179,9 +203,11 @@ atomic rename한다. 쓰기 실패나 경쟁 motor publisher로 중단되면
 
 - camera, LiDAR, motor topic
 - 방향키 angle/speed, 20 Hz publish rate, key timeout, stop 반복 횟수
-- gamepad axis·trigger 부호 profile, 중립 재활성 임계값과 출력 한계
+- gamepad axis·button mapping, trigger 부호 profile, 중립 재활성 임계값과
+  출력 한계
 - 필수 camera freshness와 선택 LiDAR 연결 허용 시간
-- dataset root, PNG compression, writer queue, 최소 디스크 여유
+- dataset root, emergency tail 15 frame, PNG compression, writer queue, 최소
+  디스크 여유
 
 YAML의 빈 topic, 잘못된 speed/steering 부호·범위, `NaN`·`Inf` 수치, 음수
 timeout, queue 크기와 PNG compression 범위 오류는 node 시작 시 거부된다.
