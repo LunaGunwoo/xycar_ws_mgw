@@ -1,0 +1,9 @@
+[project]
+name = "xycar-ai"
+version = "0.1.0"
+description = "Reproducible training workspace for Xycar real-car models."
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[tool.uv]
+package = false

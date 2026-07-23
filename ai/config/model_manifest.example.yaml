@@ -1,0 +1,14 @@
+schema_version: 1
+artifact_id: replace-with-artifact-id
+created_at: "YYYY-MM-DDTHH:MM:SSZ"
+source:
+  mgw_commit: replace-with-full-commit
+  source_dirty: false
+  uv_lock_sha256: replace-with-sha256
+dataset:
+  root: datasets/teleop
+  snapshot: replace-with-session-list-or-snapshot-id
+model:
+  format: replace-with-model-format
+  input_contract: replace-with-input-contract
+  output_contract: replace-with-output-contract

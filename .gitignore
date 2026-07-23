@@ -68,6 +68,16 @@ Desktop.ini
 *.log
 .cache/
 
+# AI datasets, environments, and model artifacts
+/artifacts/
+/datasets/
+**/.venv/
+*.ckpt
+*.engine
+*.onnx
+*.pt
+*.pth
+
 # Real-car local tools and independently managed nested repositories
 /etc/motor_vesc/vesc_tool_6.05
 /src/yolo_ros/
