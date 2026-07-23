@@ -9,6 +9,8 @@ from xycar_data.gamepad_teleop import (
     DriveCommand,
     GamepadConfig,
     InvalidJoyInput,
+    NeutralArmingGate,
+    _validate_runtime_parameters,
     is_input_fresh,
     map_joy_axes,
 )
@@ -40,6 +42,20 @@ def test_rt_maps_to_forward_speed():
 def test_triggers_are_combined_for_partial_and_simultaneous_input():
     partial = map_joy_axes([0.0, 0.0, 0.0, 0.0, 0.4, 0.5])
     both_full = map_joy_axes([0.0, 0.0, 0.0, 0.0, 1.0, 1.0])
+    assert partial.speed == pytest.approx(1.5)
+    assert both_full.speed == pytest.approx(2.0)
+
+
+def test_negative_trigger_profile_maps_depth_to_signed_speed():
+    config = GamepadConfig(trigger_axis_mode='negative')
+    partial = map_joy_axes(
+        [0.0, 0.0, 0.0, 0.0, -0.4, -0.5],
+        config,
+    )
+    both_full = map_joy_axes(
+        [0.0, 0.0, 0.0, 0.0, -1.0, -1.0],
+        config,
+    )
     assert partial.speed == pytest.approx(1.5)
     assert both_full.speed == pytest.approx(2.0)
 
@@ -79,6 +95,62 @@ def test_custom_mapping_and_limits_are_supported():
     )
     command = map_joy_axes([0.25, 0.5, -0.5], config)
     assert command == DriveCommand(-15.0, 1.25)
+
+
+@pytest.mark.parametrize(
+    ('field', 'value'),
+    [
+        ('max_angle', math.nan),
+        ('max_angle', math.inf),
+        ('max_reverse_speed', -math.inf),
+        ('max_forward_speed', math.nan),
+    ],
+)
+def test_non_finite_output_config_is_rejected(field, value):
+    config = GamepadConfig(**{field: value})
+    with pytest.raises(ValueError, match='finite and positive'):
+        map_joy_axes([0.0] * 6, config)
+
+
+def test_unknown_trigger_axis_mode_is_rejected():
+    config = GamepadConfig(trigger_axis_mode='automatic')
+    with pytest.raises(ValueError, match='trigger_axis_mode'):
+        map_joy_axes([0.0] * 6, config)
+
+
+@pytest.mark.parametrize(
+    ('field', 'value'),
+    [
+        ('publish_rate_hz', math.nan),
+        ('publish_rate_hz', math.inf),
+        ('joy_timeout_sec', math.nan),
+        ('graph_check_period_sec', math.inf),
+        ('neutral_trigger_threshold', math.nan),
+        ('neutral_trigger_threshold', 1.0),
+    ],
+)
+def test_non_finite_or_unsafe_runtime_parameter_is_rejected(field, value):
+    parameters = {
+        'publish_rate_hz': 20.0,
+        'joy_timeout_sec': 0.25,
+        'graph_check_period_sec': 0.5,
+        'neutral_trigger_threshold': 0.05,
+        'stop_publish_count': 5,
+    }
+    parameters[field] = value
+    with pytest.raises(ValueError):
+        _validate_runtime_parameters(**parameters)
+
+
+def test_neutral_arming_gate_requires_neutral_again_after_disarm():
+    gate = NeutralArmingGate(threshold=0.05)
+
+    assert not gate.observe(0.0, 0.5)
+    assert gate.observe(0.05, 0.04)
+
+    gate.disarm()
+    assert not gate.observe(0.06, 0.0)
+    assert gate.observe(0.0, 0.0)
 
 
 def test_input_freshness_timeout():

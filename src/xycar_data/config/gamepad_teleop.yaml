@@ -12,9 +12,11 @@ gamepad_teleop:
     motor_topic: /xycar_motor
 
     # Remote Gamepad mapping observed through joy/game_controller_node.
+    # This profile reports released..pressed triggers as 0..+1.
     steering_axis: 0
     lt_axis: 4
     rt_axis: 5
+    trigger_axis_mode: positive
     invert_steering: true
 
     # angle = -steering * max_angle (Xycar motor driver compensation)
@@ -26,4 +28,5 @@ gamepad_teleop:
     publish_rate_hz: 20.0
     joy_timeout_sec: 0.25
     graph_check_period_sec: 0.5
+    neutral_trigger_threshold: 0.05
     stop_publish_count: 5

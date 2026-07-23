@@ -43,17 +43,33 @@ launch는 ROS 2 공식 `joy/game_controller_node`와 `gamepad_teleop`을 함께
 | Gamepad 입력 | 변환 | 범위 |
 | --- | --- | --- |
 | 왼쪽 스틱 좌우 `axes[0]` | `angle = -100 * axes[0]` | `-100 ~ 100` |
-| LT `axes[4]` | `speed -= 5 * axes[4]` | `0 ~ -5` |
-| RT `axes[5]` | `speed += 7 * axes[5]` | `0 ~ 7` |
+| LT `axes[4]` | `speed -= 5 * depth` | `0 ~ -5` |
+| RT `axes[5]` | `speed += 7 * depth` | `0 ~ 7` |
 
-LT와 RT는 합산하므로 둘을 끝까지 누르면 speed는 `2`다. 두 트리거가 모두
-0이면 speed만 0이 되고 angle은 왼쪽 스틱을 계속 따라간다. A/B 버튼은 사용하지
-않는다.
+Remote Gamepad 실측 기준은 trigger release `0`, full press `+1`이므로
+`trigger_axis_mode: positive`가 기본값이다. `0`에서 `-1`로 움직이는 다른 SDL
+controller는 `negative` profile을 사용한다. LT와 RT는 합산하므로 둘을 끝까지
+누르면 speed는 `2`다. 두 트리거가 모두 0이면 speed만 0이 되고 angle은 왼쪽
+스틱을 계속 따라간다. A/B 버튼은 사용하지 않는다.
 
 `/joy`가 0.25초 이상 끊기거나, 축 배열이 잘못됐거나, motor subscriber가 없거나,
 다른 motor publisher가 발견되면 `[0, 0]`을 발행한다. 종료할 때도 정지 명령을
-5회 발행한다. 연결이 복구되면 A/B 승인 없이 트리거 입력이 즉시 반영되므로
-재연결 전에 LT와 RT에서 손을 떼야 한다.
+5회 발행한다. 시작할 때와 위 안전 정지에서 복구할 때는 LT와 RT가 모두
+`neutral_trigger_threshold` 이하인 입력을 한 번 확인해야 다시 주행할 수 있다.
+연결이 유효하고 `/joy`가 갱신되는 동안 마지막 유효 명령은 20 Hz로 반복된다.
+
+휴대폰 연결이 끊겨도 PC의 가상 controller가 마지막 `/joy`를 계속 갱신하면 이
+node는 실제 Remote 앱 단절과 정상적인 고정 입력을 구분할 수 없다. 이 동작은
+실차 주행 전에 별도로 확인해야 하며, 마지막 값이 계속 갱신되는 환경은 앱
+heartbeat 또는 별도 deadman 없이는 단절 안전이 검증된 것으로 보지 않는다.
+
+`/joy`가 이미 다른 승인된 `Joy` node에서 발행 중일 때는 teleop만 단독 실행할
+수 있다. 이 명령도 `/xycar_motor` publisher를 만들므로 실행 직전 승인이
+필요하다.
+
+```bash
+ros2 run xycar_data gamepad_teleop
+```
 
 기본값은 `config/gamepad_teleop.yaml`에서 바꿀 수 있다. 다른 SDL 장치를 쓸 때는
 device ID를 launch 인자로 지정한다.
@@ -61,6 +77,12 @@ device ID를 launch 인자로 지정한다.
 ```bash
 ros2 launch xycar_data gamepad_teleop.launch.py device_id:=1
 ```
+
+trigger가 `0`에서 `-1`로 움직이는 controller는 별도 YAML에서
+`trigger_axis_mode: negative`로 설정하고 `params_file` launch 인자로 전달한다.
+조향 `±100`, 전진 `7`, 후진 `-5`는 현재 기본값이지만 실제 motor scale과
+조향 끝값은 raised-car 상태에서 아직 검증되지 않았다. 첫 실차 시험은 낮은
+trigger 깊이부터 시작한다.
 
 ## 센서 실행
 
@@ -153,13 +175,15 @@ atomic rename한다. 쓰기 실패나 경쟁 motor publisher로 중단되면
 
 ## 튜닝
 
-`config/teleop_recorder.yaml`은 다음을 분리한다.
+`config/teleop_recorder.yaml`과 `config/gamepad_teleop.yaml`은 다음을 분리한다.
 
 - camera, LiDAR, motor topic
 - 방향키 angle/speed, 20 Hz publish rate, key timeout, stop 반복 횟수
+- gamepad axis·trigger 부호 profile, 중립 재활성 임계값과 출력 한계
 - 필수 camera freshness와 선택 LiDAR 연결 허용 시간
 - dataset root, PNG compression, writer queue, 최소 디스크 여유
 
-YAML의 빈 topic, 잘못된 speed/steering 부호·범위, 음수 timeout, queue 크기와
-PNG compression 범위 오류는 node 시작 시 거부된다. 실제 차에서는 raised-car
-상태에서 Left/Right 조향 부호와 Down 후진 부호를 먼저 확인한 뒤 값을 조정한다.
+YAML의 빈 topic, 잘못된 speed/steering 부호·범위, `NaN`·`Inf` 수치, 음수
+timeout, queue 크기와 PNG compression 범위 오류는 node 시작 시 거부된다.
+실제 차에서는 raised-car 상태에서 Left/Right 조향 부호와 후진 부호를 먼저
+확인한 뒤 값을 조정한다.
