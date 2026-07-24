@@ -24,6 +24,12 @@ control:
 sensors:
   # The camera is mandatory for motion. LiDAR remains optional.
   camera_timeout_sec: 0.25
+  # Reuse an existing healthy /image_raw source. If none exists, start only
+  # the headless xycar_cam.launch.py and wait for a decodable frame.
+  camera_auto_start: true
+  camera_discovery_timeout_sec: 1.0
+  camera_start_timeout_sec: 10.0
+  camera_shutdown_timeout_sec: 5.0
   lidar_timeout_sec: 0.30
   max_lidar_skew_sec: 0.20
 

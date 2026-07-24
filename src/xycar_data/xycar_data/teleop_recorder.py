@@ -6,14 +6,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-import sys
+import os
+import signal
+import subprocess
 import time
-from typing import Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 import numpy as np
 import rclpy
 from cv_bridge import CvBridge, CvBridgeError
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import Float32MultiArray
@@ -118,11 +121,94 @@ class _PendingFinish:
     complete: bool
 
 
+class CameraStartupError(RuntimeError):
+    """Raised when a usable headless camera cannot be prepared safely."""
+
+
+class HeadlessCameraProcess:
+    """Own only the headless camera process started by this recorder."""
+
+    command = ("ros2", "launch", "xycar_cam", "xycar_cam.launch.py")
+
+    def __init__(
+        self,
+        *,
+        popen: Callable[..., Any] = subprocess.Popen,
+        killpg: Callable[[int, int], None] = os.killpg,
+    ) -> None:
+        self._popen = popen
+        self._killpg = killpg
+        self._process: Optional[Any] = None
+
+    @property
+    def started(self) -> bool:
+        return self._process is not None
+
+    @property
+    def returncode(self) -> Optional[int]:
+        if self._process is None:
+            return None
+        return self._process.poll()
+
+    def start(self) -> None:
+        if self._process is not None:
+            raise RuntimeError("headless camera process was already started")
+        self._process = self._popen(
+            list(self.command),
+            start_new_session=True,
+        )
+
+    def stop(self, timeout_sec: float) -> None:
+        process = self._process
+        if process is None or process.poll() is not None:
+            return
+        deadline = time.monotonic() + timeout_sec
+        interrupt_deadline = time.monotonic() + (timeout_sec * 0.8)
+        self._signal_process_group(signal.SIGINT)
+        if self._wait_until(process, interrupt_deadline):
+            return
+        self._signal_process_group(signal.SIGTERM)
+        if self._wait_until(process, deadline):
+            return
+        self._signal_process_group(signal.SIGKILL)
+        try:
+            process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            pass
+
+    def _signal_process_group(self, signum: int) -> None:
+        process = self._process
+        if process is None or process.poll() is not None:
+            return
+        try:
+            self._killpg(process.pid, signum)
+        except ProcessLookupError:
+            pass
+
+    @staticmethod
+    def _wait_until(process: Any, deadline: float) -> bool:
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining == 0.0:
+            return process.poll() is not None
+        try:
+            process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
+
+
 class TeleopRecorderNode(Node):
     """ROS I/O, safety gates, and callback-to-writer data handoff."""
 
-    def __init__(self) -> None:
-        super().__init__("teleop_recorder")
+    def __init__(
+        self,
+        *,
+        parameter_overrides: Optional[Sequence[Parameter]] = None,
+    ) -> None:
+        super().__init__(
+            "teleop_recorder",
+            parameter_overrides=parameter_overrides,
+        )
         self.declare_parameter("tuning_file", default_tuning_path())
         self.tuning_path = str(self.get_parameter("tuning_file").value)
         self.tuning: TeleopTuning = load_tuning(self.tuning_path)
@@ -135,6 +221,8 @@ class TeleopRecorderNode(Node):
         self._lidar: Optional[LidarSnapshot] = None
         self._camera_sequence = 0
         self._lidar_sequence = 0
+        self._last_camera_decode_error: Optional[str] = None
+        self._owned_camera: Optional[HeadlessCameraProcess] = None
         self._competitors: tuple[str, ...] = ()
         self._has_motor_subscriber = False
         self._next_graph_check_monotonic = 0.0
@@ -143,6 +231,7 @@ class TeleopRecorderNode(Node):
         self._pending_finish: Optional[_PendingFinish] = None
         self._dropped_sample_count = 0
         self._last_lidar_missing_warning_monotonic = -math.inf
+        self._diagnostic_times: dict[str, float] = {}
         self.exit_requested = False
         self.exit_code = 0
         self._fatal_reason: Optional[str] = None
@@ -188,7 +277,11 @@ class TeleopRecorderNode(Node):
             f"dataset_root={recording.root_dir}"
         )
 
-    def handle_key(self, key: str, now_monotonic: Optional[float] = None) -> None:
+    def handle_key(
+        self,
+        key: str,
+        now_monotonic: Optional[float] = None,
+    ) -> None:
         now = time.monotonic() if now_monotonic is None else now_monotonic
         if key in ("w", "W", "s", "a", "d"):
             self._handle_drive_key(key, now)
@@ -224,14 +317,28 @@ class TeleopRecorderNode(Node):
         if self._session_token is not None:
             self._close_active_session("shutdown", complete=False)
         self.writer.shutdown()
+        if self._owned_camera is not None:
+            self.get_logger().info(
+                "Stopping the headless camera started by teleop_recorder."
+            )
+            self._owned_camera.stop(
+                self.tuning.sensors.camera_shutdown_timeout_sec
+            )
 
-    def stop_motion(self, reason: str, *, burst: bool = False) -> None:
+    def stop_motion(
+        self,
+        reason: str,
+        *,
+        burst: bool = False,
+        log: bool = True,
+    ) -> None:
         self.command_state.clear()
         self.publish_stop()
         if burst:
             for _ in range(self.tuning.control.stop_publish_count - 1):
                 self.publish_stop()
-        self.get_logger().info(f"Teleop stop: {reason}")
+        if log:
+            self.get_logger().info(f"Teleop stop: {reason}")
 
     def publish_stop(self) -> None:
         self._publish(DriveCommand())
@@ -248,13 +355,15 @@ class TeleopRecorderNode(Node):
         if not self._has_motor_subscriber:
             self.stop_motion("no motor subscriber", burst=True)
             self.get_logger().warning(
-                "Drive rejected: no subscriber is connected to the motor topic."
+                "Drive rejected: no subscriber is connected to the motor "
+                "topic."
             )
             return
         if not self._camera_is_fresh(now_monotonic):
-            self.stop_motion("camera is stale", burst=True)
-            self.get_logger().warning(
-                "Drive rejected: waiting for a fresh camera frame."
+            self.stop_motion("camera is unavailable", burst=True, log=False)
+            self._report_camera_unavailable(
+                now_monotonic,
+                prefix="Drive rejected",
             )
             return
         command = self.command_state.set_drive_key(key, now_monotonic)
@@ -265,7 +374,9 @@ class TeleopRecorderNode(Node):
             self.get_logger().warning("A recording session is already active.")
             return
         if self._finishing_token is not None:
-            self.get_logger().warning("Previous session is still flushing to disk.")
+            self.get_logger().warning(
+                "Previous session is still flushing to disk."
+            )
             return
         metadata = {
             "dataset_kind": "camera_first_teleop_behavior_cloning",
@@ -307,7 +418,9 @@ class TeleopRecorderNode(Node):
             pending.token,
             pending.reason,
             complete=pending.complete,
-            extra_metadata={"dropped_sample_count": self._dropped_sample_count},
+            extra_metadata={
+                "dropped_sample_count": self._dropped_sample_count,
+            },
         ):
             self._pending_finish = None
 
@@ -317,11 +430,13 @@ class TeleopRecorderNode(Node):
         try:
             image = self.bridge.imgmsg_to_cv2(message, desired_encoding="bgr8")
         except CvBridgeError as exc:
+            self._last_camera_decode_error = str(exc)
             self.get_logger().warning(
                 f"Camera image conversion failed: {exc}",
                 throttle_duration_sec=2.0,
             )
             return
+        self._last_camera_decode_error = None
         self._camera_sequence += 1
         stamp = message.header.stamp
         frame = _CameraFrame(
@@ -343,7 +458,10 @@ class TeleopRecorderNode(Node):
         self._lidar = LidarSnapshot(
             sequence=self._lidar_sequence,
             ranges=np.asarray(message.ranges, dtype=np.float32).copy(),
-            intensities=np.asarray(message.intensities, dtype=np.float32).copy(),
+            intensities=np.asarray(
+                message.intensities,
+                dtype=np.float32,
+            ).copy(),
             angle_min=float(message.angle_min),
             angle_max=float(message.angle_max),
             angle_increment=float(message.angle_increment),
@@ -414,6 +532,16 @@ class TeleopRecorderNode(Node):
 
     def _on_control_timer(self) -> None:
         now = time.monotonic()
+        if (
+            self._owned_camera is not None
+            and self._owned_camera.returncode is not None
+            and not self.exit_requested
+        ):
+            self._fail(
+                "the headless camera process started by teleop_recorder "
+                f"exited with code {self._owned_camera.returncode}"
+            )
+            return
         if self.writer.failure is not None:
             self._fail(self.writer.failure)
         self._poll_writer_results()
@@ -435,7 +563,15 @@ class TeleopRecorderNode(Node):
             self.stop_motion("motor subscriber disappeared", burst=True)
             return
         if not self._camera_is_fresh(now):
-            self.stop_motion("camera stream is stale", burst=True)
+            self.stop_motion(
+                "camera stream is unavailable",
+                burst=True,
+                log=False,
+            )
+            self._report_camera_unavailable(
+                now,
+                prefix="Safety stop",
+            )
             return
         self._publish(self.command_state.command)
 
@@ -473,7 +609,12 @@ class TeleopRecorderNode(Node):
                 and publisher.node_namespace == self.get_namespace()
             ):
                 continue
-            competitors.append(_node_label(publisher.node_namespace, publisher.node_name))
+            competitors.append(
+                _node_label(
+                    publisher.node_namespace,
+                    publisher.node_name,
+                )
+            )
         self._competitors = tuple(sorted(set(competitors)))
         self._has_motor_subscriber = bool(
             self.get_subscriptions_info_by_topic(topic)
@@ -485,6 +626,169 @@ class TeleopRecorderNode(Node):
             and now_monotonic - self._camera.received_monotonic
             <= self.tuning.sensors.camera_timeout_sec
         )
+
+    def camera_publishers(self) -> tuple[str, ...]:
+        topic = self.resolve_topic_name(self.tuning.topics.camera_topic)
+        return tuple(
+            sorted(
+                {
+                    _node_label(info.node_namespace, info.node_name)
+                    for info in self.get_publishers_info_by_topic(topic)
+                }
+            )
+        )
+
+    def camera_viewers(self) -> tuple[str, ...]:
+        viewers = {
+            _node_label(namespace, name)
+            for name, namespace in self.get_node_names_and_namespaces()
+            if name == "examine_image"
+        }
+        topic = self.resolve_topic_name(self.tuning.topics.camera_topic)
+        viewers.update(
+            _node_label(info.node_namespace, info.node_name)
+            for info in self.get_subscriptions_info_by_topic(topic)
+            if info.node_name == "examine_image"
+        )
+        return tuple(sorted(viewers))
+
+    def prepare_camera(
+        self,
+        *,
+        spin_once: Callable[..., None] = rclpy.spin_once,
+        monotonic: Callable[[], float] = time.monotonic,
+        process_factory: Callable[[], HeadlessCameraProcess] = (
+            HeadlessCameraProcess
+        ),
+    ) -> None:
+        """Discover, reuse, or start a usable headless camera before input."""
+        sensors = self.tuning.sensors
+        discovery_deadline = (
+            monotonic() + sensors.camera_discovery_timeout_sec
+        )
+        while monotonic() < discovery_deadline:
+            self._reject_gui_viewer()
+            spin_once(self, timeout_sec=0.05)
+        self._reject_gui_viewer()
+
+        publishers = self.camera_publishers()
+        if self._camera_is_fresh(monotonic()):
+            self.get_logger().info(
+                "Using an existing headless camera publisher on "
+                f"{self.tuning.topics.camera_topic}: "
+                + ", ".join(publishers or ("publisher discovered by frame",))
+            )
+            return
+
+        if publishers:
+            self.get_logger().warning(
+                "A camera publisher exists but no decodable frame has "
+                "arrived; "
+                "waiting without starting a duplicate camera: "
+                + ", ".join(publishers)
+            )
+        elif not sensors.camera_auto_start:
+            raise CameraStartupError(
+                f"no publisher was found on {self.tuning.topics.camera_topic} "
+                "and sensors.camera_auto_start is false"
+            )
+        else:
+            self.get_logger().warning(
+                f"No publisher found on {self.tuning.topics.camera_topic}; "
+                "starting the headless camera: "
+                + " ".join(HeadlessCameraProcess.command)
+            )
+            camera_process = process_factory()
+            try:
+                camera_process.start()
+            except OSError as exc:
+                raise CameraStartupError(
+                    f"could not start the headless camera: {exc}"
+                ) from exc
+            self._owned_camera = camera_process
+
+        startup_deadline = monotonic() + sensors.camera_start_timeout_sec
+        while monotonic() < startup_deadline:
+            self._reject_gui_viewer()
+            if (
+                self._owned_camera is not None
+                and self._owned_camera.returncode is not None
+            ):
+                raise CameraStartupError(
+                    "the headless camera process exited before a usable "
+                    f"frame arrived (code {self._owned_camera.returncode})"
+                )
+            spin_once(self, timeout_sec=0.05)
+            if self._camera_is_fresh(monotonic()):
+                source = (
+                    "the recorder-owned headless camera"
+                    if self._owned_camera is not None
+                    else "the existing camera publisher"
+                )
+                self.get_logger().info(
+                    f"Received a decodable camera frame from {source}; "
+                    "keyboard input is now enabled."
+                )
+                return
+
+        if self._last_camera_decode_error is not None:
+            raise CameraStartupError(
+                "camera image decode failed while waiting for startup: "
+                + self._last_camera_decode_error
+            )
+        publishers = self.camera_publishers()
+        if publishers:
+            raise CameraStartupError(
+                "camera publisher exists but no usable frame arrived within "
+                f"{sensors.camera_start_timeout_sec:.1f}s: "
+                + ", ".join(publishers)
+            )
+        raise CameraStartupError(
+            "no camera publisher or usable frame appeared within "
+            f"{sensors.camera_start_timeout_sec:.1f}s"
+        )
+
+    def _reject_gui_viewer(self) -> None:
+        viewers = self.camera_viewers()
+        if viewers:
+            raise CameraStartupError(
+                "GUI camera viewer is running ("
+                + ", ".join(viewers)
+                + "). Stop xycar_cam_viewer.launch.py, then run "
+                "teleop_recorder again; the recorder only uses the headless "
+                "xycar_cam.launch.py."
+            )
+
+    def _report_camera_unavailable(
+        self,
+        now_monotonic: float,
+        *,
+        prefix: str,
+    ) -> None:
+        publishers = self.camera_publishers()
+        if not publishers:
+            key = "camera_no_publisher"
+            detail = (
+                f"no publisher is present on "
+                f"{self.tuning.topics.camera_topic}"
+            )
+        elif self._last_camera_decode_error is not None:
+            key = "camera_decode"
+            detail = (
+                "camera image decode failed: "
+                + self._last_camera_decode_error
+            )
+        elif self._camera is None:
+            key = "camera_no_frame"
+            detail = "publisher exists but no decodable frame was received"
+        else:
+            key = "camera_stale"
+            age = now_monotonic - self._camera.received_monotonic
+            detail = f"camera frame is stale ({age:.3f}s old)"
+        last = self._diagnostic_times.get(key, -math.inf)
+        if now_monotonic - last >= 2.0:
+            self._diagnostic_times[key] = now_monotonic
+            self.get_logger().warning(f"{prefix}: {detail}.")
 
     def _publish(self, command: DriveCommand) -> None:
         message = Float32MultiArray()
@@ -533,34 +837,50 @@ def main(args: Optional[Sequence[str]] = None) -> None:
     exit_wait_started: Optional[float] = None
     try:
         node = TeleopRecorderNode()
-        _print_controls()
-        with TerminalKeyReader() as reader:
-            while rclpy.ok():
-                now = time.monotonic()
-                try:
-                    for key in reader.poll(now):
-                        node.handle_key(key, now)
-                except EOFError:
-                    node.request_exit("terminal input closed", complete=False)
-                    node.exit_code = 1
+        try:
+            node.prepare_camera()
+        except CameraStartupError as exc:
+            node.get_logger().error(f"Camera startup failed: {exc}")
+            node.exit_code = 1
+            node.request_exit(str(exc), complete=False)
+        if not node.exit_requested:
+            _print_controls()
+            with TerminalKeyReader() as reader:
+                while rclpy.ok():
+                    now = time.monotonic()
+                    if not node.exit_requested:
+                        try:
+                            for key in reader.poll(now):
+                                node.handle_key(key, now)
+                        except EOFError:
+                            node.request_exit(
+                                "terminal input closed",
+                                complete=False,
+                            )
+                            node.exit_code = 1
 
-                rclpy.spin_once(node, timeout_sec=0.02)
-                if node.exit_requested:
-                    if exit_wait_started is None:
-                        exit_wait_started = time.monotonic()
-                    if node.exit_ready():
-                        break
-                    if time.monotonic() - exit_wait_started > 15.0:
-                        node.exit_code = 1
-                        node.get_logger().error(
-                            "Timed out waiting for dataset writer finalization."
-                        )
-                        break
+                    rclpy.spin_once(node, timeout_sec=0.02)
+                    if node.exit_requested:
+                        if exit_wait_started is None:
+                            exit_wait_started = time.monotonic()
+                        if node.exit_ready():
+                            break
+                        if time.monotonic() - exit_wait_started > 15.0:
+                            node.exit_code = 1
+                            node.get_logger().error(
+                                "Timed out waiting for dataset writer "
+                                "finalization."
+                            )
+                            break
     except KeyboardInterrupt:
         if node is not None:
             node.request_exit("Ctrl+C", complete=True)
             deadline = time.monotonic() + 15.0
-            while rclpy.ok() and not node.exit_ready() and time.monotonic() < deadline:
+            while (
+                rclpy.ok()
+                and not node.exit_ready()
+                and time.monotonic() < deadline
+            ):
                 rclpy.spin_once(node, timeout_sec=0.02)
     finally:
         exit_code = 1 if node is None else node.exit_code

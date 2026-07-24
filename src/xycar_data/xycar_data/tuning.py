@@ -35,6 +35,10 @@ class ControlConfig:
 @dataclass(frozen=True)
 class SensorConfig:
     camera_timeout_sec: float = 0.25
+    camera_auto_start: bool = True
+    camera_discovery_timeout_sec: float = 1.0
+    camera_start_timeout_sec: float = 10.0
+    camera_shutdown_timeout_sec: float = 5.0
     lidar_timeout_sec: float = 0.30
     max_lidar_skew_sec: float = 0.20
 
@@ -163,6 +167,26 @@ def validate_tuning(tuning: TeleopTuning) -> None:
 
     sensors = tuning.sensors
     _range("sensors.camera_timeout_sec", sensors.camera_timeout_sec, 0.05, 5.0)
+    if not isinstance(sensors.camera_auto_start, bool):
+        raise ValueError("sensors.camera_auto_start must be a boolean")
+    _range(
+        "sensors.camera_discovery_timeout_sec",
+        sensors.camera_discovery_timeout_sec,
+        0.1,
+        10.0,
+    )
+    _range(
+        "sensors.camera_start_timeout_sec",
+        sensors.camera_start_timeout_sec,
+        1.0,
+        60.0,
+    )
+    _range(
+        "sensors.camera_shutdown_timeout_sec",
+        sensors.camera_shutdown_timeout_sec,
+        0.1,
+        30.0,
+    )
     _range("sensors.lidar_timeout_sec", sensors.lidar_timeout_sec, 0.05, 10.0)
     _range("sensors.max_lidar_skew_sec", sensors.max_lidar_skew_sec, 0.0, 5.0)
 

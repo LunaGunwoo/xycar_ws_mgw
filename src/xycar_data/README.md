@@ -100,8 +100,8 @@ trigger가 `0`에서 `+1`로 움직이는 controller는 별도 YAML에서
 
 ## 센서 실행
 
-첫 터미널에서 카메라와 선택적 LiDAR driver만 시작한다. 이 launch는 motor
-publisher를 포함하지 않는다.
+Gamepad 녹화 또는 센서만 수동으로 실행할 때 첫 터미널에서 카메라와 선택적
+LiDAR driver를 시작한다. 이 launch는 motor publisher를 포함하지 않는다.
 
 ```bash
 ros2 launch xycar_data teleop_sensors.launch.py
@@ -115,7 +115,8 @@ ros2 launch xycar_data teleop_sensors.launch.py use_lidar:=false
 
 이미 `/image_raw`와 `/scan`이 다른 승인된 node에서 publish 중이면 이 launch를
 중복 실행하지 않는다. `/scan`은 없어도 recorder가 동작하며 해당 sample은
-`lidar_valid=false`로 저장된다.
+`lidar_valid=false`로 저장된다. Terminal `teleop_recorder`는 필요한 headless
+camera를 자체 준비하므로 이 sensor launch를 먼저 실행할 필요가 없다.
 
 Gamepad 녹화를 사용할 때도 `/image_raw`는 이 sensor launch 또는 별도의 승인된
 camera node에서 받아야 한다. camera가 없거나 중간에 끊기면 gamepad 주행과
@@ -124,13 +125,31 @@ camera node에서 받아야 한다. camera가 없거나 중간에 끊기면 game
 
 ## Terminal Teleop과 수집
 
-두 번째 SSH TTY에서 environment를 적용한 뒤 실행한다. 이 명령은
-`/xycar_motor`에 `Float32MultiArray([angle, speed])`를 publish할 수 있으므로
-매 실행 직전 승인이 필요하다.
+SSH TTY에서 environment를 적용한 뒤 실행한다. 이 한 명령은 필요하면 camera
+driver를 시작하고 `/xycar_motor`에 `Float32MultiArray([angle, speed])`를
+publish할 수 있다. 따라서 camera 장치 접근과 motor 명령을 합친 실차 실행으로
+간주하며 매 실행 직전에 두 동작 모두에 대한 승인이 필요하다.
 
 ```bash
 ros2 run xycar_data teleop_recorder
 ```
+
+recorder는 키 입력을 받기 전에 ROS graph를 1초간 확인한다.
+
+- `/image_raw` publisher와 해석 가능한 최신 frame이 있으면 기존 headless
+  camera를 재사용한다.
+- publisher가 없으면 GUI 없는
+  `ros2 launch xycar_cam xycar_cam.launch.py`를 자동 시작하고 최대 10초간
+  해석 가능한 frame을 기다린다.
+- publisher는 있지만 frame이 없거나 decode할 수 없으면 camera를 중복 시작하지
+  않고 원인을 출력한 뒤 종료한다.
+- `/examine_image`가 발견되면 GUI viewer가 실행 중인 것으로 보고 시작을
+  거부한다. `xycar_cam_viewer.launch.py`를 종료한 뒤 recorder를 다시 실행한다.
+
+recorder가 직접 시작한 camera만 종료 시 SIGINT, SIGTERM 순서로 정리한다.
+사용자가 따로 시작한 headless camera는 재사용만 하고 종료하지 않는다. 현재
+차량에서 확인한 `/image_raw` 계약은 `sensor_msgs/Image`, `rgb8`, 약 30 Hz이며
+recorder는 이를 OpenCV BGR frame으로 변환한다.
 
 다른 YAML을 시험할 때는 ROS parameter로 경로를 바꾼다.
 
@@ -172,6 +191,8 @@ WASD 명령과 최신 camera frame이 동시에 있을 때만 파일을 저장�
 시작 전과 주행 중에는 다음 안전 gate가 적용된다.
 
 - 카메라가 0.25초 이상 stale이면 즉시 정지하고 새 WASD 입력이 필요하다.
+- recorder가 자동 시작한 camera process가 종료되면 즉시 `[0, 0]`으로 정지하고
+  활성 세션을 incomplete로 마감한 뒤 오류 종료한다.
 - 다른 `/xycar_motor` publisher가 있으면 주행을 거부한다. 주행 중 발견되면
   정지 후 오류 종료한다.
 - motor subscriber가 없으면 command와 sample 저장을 거부한다.
@@ -220,6 +241,8 @@ atomic rename한다. 쓰기 실패나 경쟁 motor publisher로 중단되면
 - gamepad axis·button mapping, trigger 부호 profile, 중립 재활성 임계값과
   출력 한계
 - 필수 camera freshness와 선택 LiDAR 연결 허용 시간
+- headless camera 자동 시작 여부와 graph discovery, frame startup, process
+  shutdown timeout
 - dataset root, emergency tail 15 frame, PNG compression, writer queue, 최소
   디스크 여유
 

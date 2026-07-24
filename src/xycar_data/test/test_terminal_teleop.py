@@ -10,7 +10,12 @@ from xycar_data.teleop_recorder import (
     _is_recordable_command,
 )
 from xycar_data.terminal_input import KeySequenceParser
-from xycar_data.tuning import ControlConfig, TeleopTuning, validate_tuning
+from xycar_data.tuning import (
+    ControlConfig,
+    SensorConfig,
+    TeleopTuning,
+    validate_tuning,
+)
 
 
 def test_wasd_speed_and_steering_adjust_independent_components():
@@ -155,3 +160,17 @@ def test_space_stops_and_only_escape_or_ctrl_c_exit():
 def test_invalid_keyboard_control_range_is_rejected(control):
     with pytest.raises(ValueError):
         validate_tuning(TeleopTuning(control=control))
+
+
+@pytest.mark.parametrize(
+    "sensors",
+    [
+        SensorConfig(camera_auto_start=1),
+        SensorConfig(camera_discovery_timeout_sec=0.0),
+        SensorConfig(camera_start_timeout_sec=0.0),
+        SensorConfig(camera_shutdown_timeout_sec=0.0),
+    ],
+)
+def test_invalid_camera_startup_configuration_is_rejected(sensors):
+    with pytest.raises(ValueError):
+        validate_tuning(TeleopTuning(sensors=sensors))
