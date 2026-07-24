@@ -24,14 +24,12 @@ class ControlConfig:
     key_timeout_sec: float = 0.25
     graph_check_period_sec: float = 0.5
     stop_publish_count: int = 5
-    forward_angle: float = 0.0
-    forward_speed: float = 5.0
-    reverse_angle: float = 0.0
-    reverse_speed: float = -3.0
-    left_angle: float = -30.0
-    left_speed: float = 3.0
-    right_angle: float = 30.0
-    right_speed: float = 3.0
+    min_angle: float = -100.0
+    max_angle: float = 100.0
+    angle_step: float = 10.0
+    forward_speed: float = 8.0
+    forward_boost_multiplier: float = 1.5
+    reverse_speed: float = -8.0
 
 
 @dataclass(frozen=True)
@@ -141,28 +139,27 @@ def validate_tuning(tuning: TeleopTuning) -> None:
         1,
         20,
     )
-    for field in (
-        "forward_angle",
-        "reverse_angle",
-        "left_angle",
-        "right_angle",
-    ):
+    for field in ("min_angle", "max_angle"):
         _range(f"control.{field}", getattr(control, field), -100.0, 100.0)
-    for field in (
-        "forward_speed",
-        "reverse_speed",
-        "left_speed",
-        "right_speed",
-    ):
-        _range(f"control.{field}", getattr(control, field), -100.0, 100.0)
-    if control.forward_speed <= 0.0:
-        raise ValueError("control.forward_speed must be positive")
-    if control.reverse_speed >= 0.0:
-        raise ValueError("control.reverse_speed must be negative")
-    if control.left_speed <= 0.0 or control.right_speed <= 0.0:
-        raise ValueError("control.left_speed and right_speed must be positive")
-    if control.left_angle >= 0.0 or control.right_angle <= 0.0:
-        raise ValueError("control.left_angle must be negative and right_angle positive")
+    _range("control.angle_step", control.angle_step, 0.1, 100.0)
+    _range("control.forward_speed", control.forward_speed, 0.1, 100.0)
+    _range(
+        "control.forward_boost_multiplier",
+        control.forward_boost_multiplier,
+        1.0,
+        5.0,
+    )
+    _range("control.reverse_speed", control.reverse_speed, -100.0, -0.1)
+    if control.min_angle >= 0.0 or control.max_angle <= 0.0:
+        raise ValueError(
+            "control.min_angle must be negative and max_angle positive"
+        )
+    if control.angle_step > control.max_angle - control.min_angle:
+        raise ValueError("control.angle_step must not exceed the angle range")
+    if control.forward_speed * control.forward_boost_multiplier > 100.0:
+        raise ValueError(
+            "boosted control.forward_speed must not exceed 100"
+        )
 
     sensors = tuning.sensors
     _range("sensors.camera_timeout_sec", sensors.camera_timeout_sec, 0.05, 5.0)

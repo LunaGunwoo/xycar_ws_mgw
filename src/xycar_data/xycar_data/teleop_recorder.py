@@ -44,22 +44,40 @@ class DriveCommand:
         return self.speed == 0.0 and self.angle == 0.0
 
 
-class ArrowCommandState:
-    """Pure latest-arrow state. Terminal key-up is represented by a timeout."""
+class KeyboardCommandState:
+    """Independent speed/steering state with terminal timeout release."""
 
     def __init__(self, config: ControlConfig) -> None:
         self.config = config
         self.command = DriveCommand()
         self.last_input_monotonic = -math.inf
 
-    def set_arrow(self, key: str, now_monotonic: float) -> DriveCommand:
-        mapping = {
-            "up": (self.config.forward_angle, self.config.forward_speed),
-            "down": (self.config.reverse_angle, self.config.reverse_speed),
-            "left": (self.config.left_angle, self.config.left_speed),
-            "right": (self.config.right_angle, self.config.right_speed),
-        }
-        angle, speed = mapping[key]
+    def set_drive_key(self, key: str, now_monotonic: float) -> DriveCommand:
+        angle = self.command.angle
+        speed = self.command.speed
+        if key == "w":
+            speed = self.config.forward_speed
+        elif key == "W":
+            speed = (
+                self.config.forward_speed
+                * self.config.forward_boost_multiplier
+            )
+        elif key == "s":
+            speed = self.config.reverse_speed
+        elif key == "a":
+            angle = _clamp(
+                angle - self.config.angle_step,
+                self.config.min_angle,
+                self.config.max_angle,
+            )
+        elif key == "d":
+            angle = _clamp(
+                angle + self.config.angle_step,
+                self.config.min_angle,
+                self.config.max_angle,
+            )
+        else:
+            raise ValueError(f"unsupported drive key: {key}")
         self.command = DriveCommand(float(angle), float(speed), key)
         self.last_input_monotonic = now_monotonic
         return self.command
@@ -75,6 +93,12 @@ class ArrowCommandState:
         self.command = DriveCommand()
         self.last_input_monotonic = -math.inf
         return self.command
+
+    def expire_if_stale(self, now_monotonic: float) -> bool:
+        if self.command.is_stop or self.is_active(now_monotonic):
+            return False
+        self.clear()
+        return True
 
 
 @dataclass(frozen=True)
@@ -104,7 +128,7 @@ class TeleopRecorderNode(Node):
         self.tuning: TeleopTuning = load_tuning(self.tuning_path)
 
         self.bridge = CvBridge()
-        self.command_state = ArrowCommandState(self.tuning.control)
+        self.command_state = KeyboardCommandState(self.tuning.control)
         self._last_published = DriveCommand()
         self._last_publish_monotonic = -math.inf
         self._camera: Optional[_CameraFrame] = None
@@ -155,7 +179,7 @@ class TeleopRecorderNode(Node):
         self.get_logger().warning(
             "Teleop recorder is armed but stopped. Camera frames are primary "
             "training samples; LiDAR is optional metadata. "
-            "R starts a dataset session, W saves it, Space stops, Q/Esc exits."
+            "E starts a dataset session, Q saves it, Space stops, Esc exits."
         )
         self.get_logger().info(
             f"camera={self.tuning.topics.camera_topic}, "
@@ -166,16 +190,18 @@ class TeleopRecorderNode(Node):
 
     def handle_key(self, key: str, now_monotonic: Optional[float] = None) -> None:
         now = time.monotonic() if now_monotonic is None else now_monotonic
-        if key in ("up", "down", "left", "right"):
-            self._handle_arrow(key, now)
-        elif key == "r":
+        if key in ("w", "W", "s", "a", "d"):
+            self._handle_drive_key(key, now)
+        elif key == "e":
             self._start_session()
-        elif key == "w":
-            self.stop_motion("session ended by W", burst=True)
-            self._close_active_session("operator ended session", complete=True)
+        elif key == "q":
+            self._close_active_session(
+                "operator ended session with Q",
+                complete=True,
+            )
         elif key == "space":
             self.stop_motion("stopped by Space", burst=True)
-        elif key in ("q", "escape", "ctrl_c"):
+        elif key in ("escape", "ctrl_c"):
             self.request_exit("operator requested exit", complete=True)
 
     def request_exit(self, reason: str, *, complete: bool) -> None:
@@ -210,7 +236,7 @@ class TeleopRecorderNode(Node):
     def publish_stop(self) -> None:
         self._publish(DriveCommand())
 
-    def _handle_arrow(self, key: str, now_monotonic: float) -> None:
+    def _handle_drive_key(self, key: str, now_monotonic: float) -> None:
         self._refresh_graph(now_monotonic)
         if self._competitors:
             self.stop_motion("competing motor publisher", burst=True)
@@ -231,7 +257,7 @@ class TeleopRecorderNode(Node):
                 "Drive rejected: waiting for a fresh camera frame."
             )
             return
-        command = self.command_state.set_arrow(key, now_monotonic)
+        command = self.command_state.set_drive_key(key, now_monotonic)
         self._publish(command)
 
     def _start_session(self) -> None:
@@ -257,7 +283,7 @@ class TeleopRecorderNode(Node):
         self._session_token = token
         self._dropped_sample_count = 0
         self.get_logger().info(
-            "Recording session armed. Data is saved only while an arrow key "
+            "Recording session armed. Data is saved only while a WASD "
             "command is active and a fresh camera frame arrives."
         )
 
@@ -341,6 +367,8 @@ class TeleopRecorderNode(Node):
         command = self.command_state.command
         if self._last_published != command:
             return
+        if not _is_recordable_command(command):
+            return
         if not self._has_motor_subscriber or self._competitors:
             return
         lidar, skew = self._matching_lidar(frame)
@@ -393,6 +421,7 @@ class TeleopRecorderNode(Node):
         if now >= self._next_graph_check_monotonic:
             self._refresh_graph(now)
 
+        self.command_state.expire_if_stale(now)
         if not self.command_state.is_active(now):
             self.publish_stop()
             return
@@ -479,10 +508,19 @@ def _node_label(namespace: str, name: str) -> str:
     return label if label.startswith("/") else f"/{label}"
 
 
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+    return min(max(float(value), float(minimum)), float(maximum))
+
+
+def _is_recordable_command(command: DriveCommand) -> bool:
+    return command.speed != 0.0
+
+
 def _print_controls() -> None:
     print(
-        "\nTeleop controls: arrows drive; R starts recording; W saves and stops; "
-        "Space stops; Q/Esc exits.\n"
+        "\nCLI teleop controls: W=+8; Shift+W=+12; S=-8; A/D adjust "
+        "steering; E starts recording; Q saves recording; Space stops; "
+        "Esc exits.\n"
         "Camera frames are the AI inputs. LiDAR is optional metadata only.\n",
         flush=True,
     )

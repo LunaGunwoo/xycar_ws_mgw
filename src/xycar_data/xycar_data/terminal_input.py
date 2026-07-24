@@ -16,16 +16,16 @@ from typing import Optional, TextIO
 class KeySequenceParser:
     """Parse terminal bytes, including fragmented arrow-key escape sequences."""
 
-    _ARROWS = {
-        b"\x1b[A": "up",
-        b"\x1b[B": "down",
-        b"\x1b[C": "right",
-        b"\x1b[D": "left",
-        b"\x1bOA": "up",
-        b"\x1bOB": "down",
-        b"\x1bOC": "right",
-        b"\x1bOD": "left",
-    }
+    _IGNORED_ARROWS = (
+        b"\x1b[A",
+        b"\x1b[B",
+        b"\x1b[C",
+        b"\x1b[D",
+        b"\x1bOA",
+        b"\x1bOB",
+        b"\x1bOC",
+        b"\x1bOD",
+    )
 
     def __init__(self) -> None:
         self._buffer = bytearray()
@@ -40,19 +40,16 @@ class KeySequenceParser:
         while self._buffer:
             if self._buffer[0] == 0x1B:
                 current = bytes(self._buffer)
-                complete = next(
-                    (
-                        key
-                        for sequence, key in self._ARROWS.items()
-                        if current.startswith(sequence)
-                    ),
-                    None,
-                )
-                if complete is not None:
+                if any(
+                    current.startswith(sequence)
+                    for sequence in self._IGNORED_ARROWS
+                ):
                     del self._buffer[:3]
-                    keys.append(complete)
                     continue
-                if any(sequence.startswith(current) for sequence in self._ARROWS):
+                if any(
+                    sequence.startswith(current)
+                    for sequence in self._IGNORED_ARROWS
+                ):
                     break
                 del self._buffer[0]
                 keys.append("escape")
@@ -63,10 +60,18 @@ class KeySequenceParser:
                 keys.append("ctrl_c")
             elif byte == 0x20:
                 keys.append("space")
-            elif byte in (ord("r"), ord("R")):
-                keys.append("r")
-            elif byte in (ord("w"), ord("W")):
+            elif byte == ord("w"):
                 keys.append("w")
+            elif byte == ord("W"):
+                keys.append("W")
+            elif byte in (ord("s"), ord("S")):
+                keys.append("s")
+            elif byte in (ord("a"), ord("A")):
+                keys.append("a")
+            elif byte in (ord("d"), ord("D")):
+                keys.append("d")
+            elif byte in (ord("e"), ord("E")):
+                keys.append("e")
             elif byte in (ord("q"), ord("Q")):
                 keys.append("q")
         return keys

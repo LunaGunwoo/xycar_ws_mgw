@@ -11,14 +11,15 @@ control:
   key_timeout_sec: 0.25
   graph_check_period_sec: 0.5
   stop_publish_count: 5
-  forward_angle: 0.0
-  forward_speed: 5.0
-  reverse_angle: 0.0
-  reverse_speed: -3.0
-  left_angle: -30.0
-  left_speed: 3.0
-  right_angle: 30.0
-  right_speed: 3.0
+  # W/S set speed immediately; uppercase W is Shift+W boost. A/D adjust only
+  # steering. At a typical 30 Hz terminal key-repeat rate, 10 A/D events
+  # reach full lock in about 0.3 seconds after repeat begins.
+  min_angle: -100.0
+  max_angle: 100.0
+  angle_step: 10.0
+  forward_speed: 8.0
+  forward_boost_multiplier: 1.5
+  reverse_speed: -8.0
 
 sensors:
   # The camera is mandatory for motion. LiDAR remains optional.

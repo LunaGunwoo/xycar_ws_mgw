@@ -25,8 +25,8 @@ export ROS_DOMAIN_ID=7
 export ROS_NAMESPACE=xycar
 ```
 
-`teleop_recorder`는 키보드 TTY가 필요하므로 `ros2 launch`로 실행하지 않는다.
-SSH 연결에도 `-t`를 유지한다.
+`teleop_recorder`는 GUI나 창을 만들지 않는 CLI 전용 node다. 키보드 TTY가
+필요하므로 `ros2 launch`로 실행하지 않고 SSH 연결에도 `-t`를 유지한다.
 
 ## Remote Gamepad Teleop
 
@@ -143,23 +143,35 @@ ros2 run xycar_data teleop_recorder --ros-args \
 
 | 키 | `[angle, speed]` | 동작 |
 | --- | --- | --- |
-| Up | `[0, 5]` | 전진 |
-| Down | `[0, -3]` | 저속 후진 |
-| Left | `[-30, 3]` | 좌회전 전진 |
-| Right | `[30, 3]` | 우회전 전진 |
-| R | — | 새 기록 세션 시작 |
-| W | `[0, 0]` | 현재 세션 저장·마감 후 정지 |
+| W | speed `8` | 현재 angle을 유지하고 전진 속도 즉시 적용 |
+| Shift+W | speed `12` | 전진 속도 `8`의 1.5배를 즉시 적용 |
+| S, Shift+S | speed `-8` | 현재 angle을 유지하고 후진 속도 즉시 적용 |
+| A | angle `-10`, 최소 `-100` | 현재 speed를 유지하고 좌측 조향 누적 |
+| D | angle `+10`, 최대 `100` | 현재 speed를 유지하고 우측 조향 누적 |
+| E | — | 새 기록 세션 시작 |
+| Q | 현재 명령 유지 | 현재 세션 저장·마감 |
 | Space | `[0, 0]` | 세션을 유지한 즉시 정지 |
-| Q, Esc, Ctrl+C | `[0, 0]` | 정지 명령 5회 후 종료 |
+| Esc, Ctrl+C | `[0, 0]` | 정지 명령 5회 후 종료 |
 
-방향키는 OS key-repeat으로 유지되며 0.25초 동안 새 입력이 없으면 즉시 정지한다.
-기록 세션이 없어도 수동 주행은 가능하지만, `R` 이후 유효한 방향키 명령과 최신
-카메라 frame이 동시에 있을 때만 파일을 저장한다. 방향키가 없거나 정지 상태인
-frame은 저장하지 않는다.
+W/S에는 증분이 없으며 한 번의 입력으로 각각 `8`과 `-8`을 설정한다. CLI/SSH
+TTY는 Shift 단독 event를 전달하지 않으므로 대문자 `W`를 Shift+W로 해석해
+`12`를 설정한다. 대문자·소문자 S는 모두 `-8`이며 후진 boost는 없다.
+
+A/D는 OS key-repeat으로 누적 조정된다. 기본 angle step `10`은 10회 입력으로
+중립에서 `±100`에 도달하며, terminal repeat가 30 Hz이면 repeat 시작 뒤 약
+0.3초가 걸린다. 실제 시간은 OS/SSH key-repeat 설정에 따라 달라진다. 모든
+WASD 입력이 0.25초 끊기면 angle과 speed 상태를 모두 초기화하고 즉시 `[0, 0]`을
+발행한다. W로 정한 speed는 A/D가 계속 입력되는 동안 유지된다. 방향키는 주행
+입력으로 사용하지 않는다.
+
+기록 세션이 없어도 수동 주행은 가능하지만, `E` 이후 speed가 0이 아닌 유효
+WASD 명령과 최신 camera frame이 동시에 있을 때만 파일을 저장한다. speed가
+0인 조향-only frame과 입력 timeout 상태는 저장하지 않는다. `Q`는 세션만
+저장·마감하며 현재 차량 명령을 별도로 정지시키지 않는다.
 
 시작 전과 주행 중에는 다음 안전 gate가 적용된다.
 
-- 카메라가 0.25초 이상 stale이면 즉시 정지하고 새 방향키 입력이 필요하다.
+- 카메라가 0.25초 이상 stale이면 즉시 정지하고 새 WASD 입력이 필요하다.
 - 다른 `/xycar_motor` publisher가 있으면 주행을 거부한다. 주행 중 발견되면
   정지 후 오류 종료한다.
 - motor subscriber가 없으면 command와 sample 저장을 거부한다.
@@ -190,7 +202,7 @@ LiDAR scan이 여러 camera frame에 대응할 때 NPZ 파일을 재사용한다
 Gamepad sample은 `input_key=gamepad`, `lidar_valid=false`로 기록되고
 `metadata.yaml`의 `control_mode=gamepad`로 터미널 세션과 구분한다.
 
-정상 `W` 또는 종료는 임시 `_recording_...` directory를
+정상 `Q` 또는 종료는 임시 `_recording_...` directory를
 `YYYYMMDD_HHMMSS_mmm_session`으로
 atomic rename한다. 쓰기 실패나 경쟁 motor publisher로 중단되면
 `YYYYMMDD_HHMMSS_mmm_incomplete`로 남고 `metadata.yaml`의 `stop_reason`에서
@@ -203,7 +215,8 @@ atomic rename한다. 쓰기 실패나 경쟁 motor publisher로 중단되면
 `config/teleop_recorder.yaml`과 `config/gamepad_teleop.yaml`은 다음을 분리한다.
 
 - camera, LiDAR, motor topic
-- 방향키 angle/speed, 20 Hz publish rate, key timeout, stop 반복 횟수
+- WASD angle step, 즉시 speed와 boost, 20 Hz publish rate, key timeout,
+  stop 반복 횟수
 - gamepad axis·button mapping, trigger 부호 profile, 중립 재활성 임계값과
   출력 한계
 - 필수 camera freshness와 선택 LiDAR 연결 허용 시간
@@ -212,5 +225,5 @@ atomic rename한다. 쓰기 실패나 경쟁 motor publisher로 중단되면
 
 YAML의 빈 topic, 잘못된 speed/steering 부호·범위, `NaN`·`Inf` 수치, 음수
 timeout, queue 크기와 PNG compression 범위 오류는 node 시작 시 거부된다.
-실제 차에서는 raised-car 상태에서 Left/Right 조향 부호와 후진 부호를 먼저
+실제 차에서는 raised-car 상태에서 A/D 조향 부호와 후진 부호를 먼저
 확인한 뒤 값을 조정한다.
