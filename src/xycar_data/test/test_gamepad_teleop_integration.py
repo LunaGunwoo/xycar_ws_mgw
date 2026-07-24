@@ -32,7 +32,8 @@ def _joy_message(
     b: bool = False,
 ) -> Joy:
     message = Joy()
-    message.axes = [steering, 0.0, 0.0, 0.0, lt, rt]
+    # Callers provide trigger depth; the vehicle controller reports 0..-1.
+    message.axes = [steering, 0.0, 0.0, 0.0, -lt, -rt]
     message.buttons = [int(a), int(b)]
     return message
 
@@ -122,6 +123,7 @@ def ros_harness(monkeypatch, tmp_path):
         'recording_root': tmp_path / 'teleop',
     }
     assert teleop.motor_topic == MOTOR_TOPIC
+    assert teleop.config.trigger_axis_mode == 'negative'
     yield harness
 
     teleop.shutdown()
@@ -232,7 +234,7 @@ def test_a_waits_for_forward_and_b_saves_all_frames_without_stopping(
     commands = harness['received_commands']
     neutral = _joy_message()
     waiting = _joy_message(a=True)
-    forward = _joy_message(steering=0.25, rt=0.5, a=True)
+    forward = _joy_message(steering=0.25, rt=1.0, a=True)
 
     _spin_for(harness, 0.15, neutral)
     assert teleop._arming_gate.armed
@@ -259,16 +261,16 @@ def test_a_waits_for_forward_and_b_saves_all_frames_without_stopping(
     assert teleop._camera_sequence == 20
 
     commands.clear()
-    finish = _joy_message(steering=0.25, rt=0.5, b=True)
+    finish = _joy_message(steering=0.25, rt=1.0, b=True)
     _spin_for(harness, 0.15, finish)
     _spin_for(
         harness,
         0.75,
-        _joy_message(steering=0.25, rt=0.5),
+        _joy_message(steering=0.25, rt=1.0),
     )
 
     assert teleop._recording_gate.state == RecordingState.IDLE
-    assert any(command[1] == pytest.approx(3.5) for command in commands)
+    assert any(command[1] == pytest.approx(7.0) for command in commands)
     sessions = list(harness['recording_root'].glob('*_session*'))
     assert len(sessions) == 1
     with (sessions[0] / 'samples.csv').open(
@@ -278,7 +280,7 @@ def test_a_waits_for_forward_and_b_saves_all_frames_without_stopping(
         rows = list(csv.DictReader(stream))
     assert len(rows) == 20
     assert {row['angle'] for row in rows} == {'-25.000000'}
-    assert {row['speed'] for row in rows} == {'3.500000'}
+    assert {row['speed'] for row in rows} == {'7.000000'}
     assert {row['input_key'] for row in rows} == {'gamepad'}
     metadata = yaml.safe_load(
         (sessions[0] / 'metadata.yaml').read_text(encoding='utf-8')

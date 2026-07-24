@@ -37,30 +37,30 @@ def test_steering_maps_to_full_angle_range(steering, expected_angle):
 
 
 def test_lt_maps_to_reverse_speed():
-    command = map_joy_axes([0.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+    command = map_joy_axes([0.0, 0.0, 0.0, 0.0, -1.0, 0.0])
     assert command == DriveCommand(0.0, -5.0)
 
 
 def test_rt_maps_to_forward_speed():
-    command = map_joy_axes([0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+    command = map_joy_axes([0.0, 0.0, 0.0, 0.0, 0.0, -1.0])
     assert command == DriveCommand(0.0, 7.0)
 
 
 def test_triggers_are_combined_for_partial_and_simultaneous_input():
-    partial = map_joy_axes([0.0, 0.0, 0.0, 0.0, 0.4, 0.5])
-    both_full = map_joy_axes([0.0, 0.0, 0.0, 0.0, 1.0, 1.0])
+    partial = map_joy_axes([0.0, 0.0, 0.0, 0.0, -0.4, -0.5])
+    both_full = map_joy_axes([0.0, 0.0, 0.0, 0.0, -1.0, -1.0])
     assert partial.speed == pytest.approx(1.5)
     assert both_full.speed == pytest.approx(2.0)
 
 
-def test_negative_trigger_profile_maps_depth_to_signed_speed():
-    config = GamepadConfig(trigger_axis_mode='negative')
+def test_positive_trigger_profile_maps_depth_to_signed_speed():
+    config = GamepadConfig(trigger_axis_mode='positive')
     partial = map_joy_axes(
-        [0.0, 0.0, 0.0, 0.0, -0.4, -0.5],
+        [0.0, 0.0, 0.0, 0.0, 0.4, 0.5],
         config,
     )
     both_full = map_joy_axes(
-        [0.0, 0.0, 0.0, 0.0, -1.0, -1.0],
+        [0.0, 0.0, 0.0, 0.0, 1.0, 1.0],
         config,
     )
     assert partial.speed == pytest.approx(1.5)
@@ -73,7 +73,7 @@ def test_steering_is_preserved_while_speed_is_zero():
 
 
 def test_axes_are_clamped_before_mapping():
-    command = map_joy_axes([2.0, 0.0, 0.0, 0.0, 2.0, -1.0])
+    command = map_joy_axes([2.0, 0.0, 0.0, 0.0, -2.0, 1.0])
     assert command == DriveCommand(-100.0, -5.0)
 
 
@@ -100,7 +100,7 @@ def test_custom_mapping_and_limits_are_supported():
         max_reverse_speed=3.0,
         max_forward_speed=4.0,
     )
-    command = map_joy_axes([0.25, 0.5, -0.5], config)
+    command = map_joy_axes([-0.25, -0.5, -0.5], config)
     assert command == DriveCommand(-15.0, 1.25)
 
 
