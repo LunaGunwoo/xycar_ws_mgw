@@ -37,8 +37,9 @@ Remote Gamepad 휴대폰 앱과 PC 앱을 먼저 연결한다. 차량 바퀴를 
 ros2 launch xycar_data gamepad_teleop.launch.py
 ```
 
-launch는 ROS 2 공식 `joy/game_controller_node`와 `gamepad_teleop`을 함께
-시작하지만 camera driver는 포함하지 않는다. 입력과 출력은 다음과 같다.
+이 한 명령은 camera driver, ROS 2 공식 `joy/game_controller_node`,
+`gamepad_teleop`을 함께 시작한다. 따라서 게임패드 입력, 차량 주행, camera 기반
+데이터 수집을 별도 terminal 없이 모두 수행한다. 입력과 출력은 다음과 같다.
 
 | Gamepad 입력 | 변환 | 범위 |
 | --- | --- | --- |
@@ -77,7 +78,14 @@ node는 실제 Remote 앱 단절과 정상적인 고정 입력을 구분할 수 
 실차 주행 전에 별도로 확인해야 하며, 마지막 값이 계속 갱신되는 환경은 앱
 heartbeat 또는 별도 deadman 없이는 단절 안전이 검증된 것으로 보지 않는다.
 
-`/joy`가 이미 다른 승인된 `Joy` node에서 발행 중일 때는 teleop만 단독 실행할
+이미 `/image_raw` camera가 실행 중이면 중복 장치 접근을 피하도록 camera 자동
+시작을 끌 수 있다.
+
+```bash
+ros2 launch xycar_data gamepad_teleop.launch.py use_camera:=false
+```
+
+`/joy`도 이미 다른 승인된 `Joy` node에서 발행 중일 때는 teleop만 단독 실행할
 수 있다. 이 명령도 `/xycar_motor` publisher를 만들므로 실행 직전 승인이
 필요하다.
 
@@ -120,10 +128,11 @@ ros2 launch xycar_data teleop_sensors.launch.py use_lidar:=false
 `lidar_valid=false`로 저장된다. Terminal `teleop_recorder`는 필요한 headless
 camera를 자체 준비하므로 이 sensor launch를 먼저 실행할 필요가 없다.
 
-Gamepad 녹화를 사용할 때도 `/image_raw`는 이 sensor launch 또는 별도의 승인된
-camera node에서 받아야 한다. camera가 없거나 중간에 끊기면 gamepad 주행과
-녹화 상태는 유지되고 해당 구간의 frame만 저장되지 않는다. camera가 복구되면
-같은 세션에서 새 frame 저장을 계속한다.
+기본 Gamepad launch는 camera를 직접 포함하므로 별도의 sensor launch가 필요하지
+않다. `use_camera:=false`로 실행했다면 `/image_raw`를 기존 camera node에서 받아야
+한다. camera가 없거나 중간에 끊기면 gamepad 주행과 녹화 상태는 유지되고 해당
+구간의 frame만 저장되지 않는다. camera가 복구되면 같은 세션에서 새 frame 저장을
+계속한다.
 
 ## Terminal Teleop과 수집
 

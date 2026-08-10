@@ -5,7 +5,9 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -19,6 +21,8 @@ def generate_launch_description():
     )
     params_file = LaunchConfiguration('params_file')
     device_id = LaunchConfiguration('device_id')
+    use_camera = LaunchConfiguration('use_camera')
+    camera_share = get_package_share_directory('xycar_cam')
 
     return LaunchDescription(
         [
@@ -31,6 +35,21 @@ def generate_launch_description():
                 'device_id',
                 default_value='0',
                 description='SDL game-controller device index.',
+            ),
+            DeclareLaunchArgument(
+                'use_camera',
+                default_value='true',
+                description='Start the camera driver for dataset recording.',
+            ),
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(
+                        camera_share,
+                        'launch',
+                        'xycar_cam.launch.py',
+                    )
+                ),
+                condition=IfCondition(use_camera),
             ),
             Node(
                 package='joy',
