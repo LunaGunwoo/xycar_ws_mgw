@@ -32,7 +32,7 @@ class GamepadConfig:
     steering_axis: int = 0
     lt_axis: int = 4
     rt_axis: int = 5
-    trigger_axis_mode: str = 'negative'
+    trigger_axis_mode: str = 'signed'
     invert_steering: bool = True
     max_angle: float = 100.0
     max_reverse_speed: float = 5.0
@@ -61,7 +61,7 @@ class MappedJoyInput:
 
 @dataclass
 class NeutralArmingGate:
-    """Require neutral triggers once before drive commands may become active."""
+    """Require neutral triggers before drive commands may become active."""
 
     threshold: float
     armed: bool = False
@@ -260,11 +260,15 @@ def _finite_axis(value: float, label: str) -> float:
 
 def _trigger_depth(value: float, label: str, mode: str) -> float:
     result = _finite_axis(value, label)
+    if mode == 'signed':
+        return _clamp((1.0 - result) / 2.0, 0.0, 1.0)
     if mode == 'positive':
         return _clamp(result, 0.0, 1.0)
     if mode == 'negative':
         return _clamp(-result, 0.0, 1.0)
-    raise ValueError("trigger_axis_mode must be 'positive' or 'negative'")
+    raise ValueError(
+        "trigger_axis_mode must be 'signed', 'positive', or 'negative'"
+    )
 
 
 def _validate_finite_positive(label: str, value: float) -> None:
@@ -280,9 +284,9 @@ def _validate_config(config: GamepadConfig) -> None:
     ):
         if index < 0:
             raise ValueError(f'{label} must be non-negative')
-    if config.trigger_axis_mode not in ('positive', 'negative'):
+    if config.trigger_axis_mode not in ('signed', 'positive', 'negative'):
         raise ValueError(
-            "trigger_axis_mode must be 'positive' or 'negative'"
+            "trigger_axis_mode must be 'signed', 'positive', or 'negative'"
         )
     _validate_finite_positive('max_angle', config.max_angle)
     _validate_finite_positive(
@@ -368,7 +372,7 @@ class GamepadTeleopNode(Node):
         self.declare_parameter('steering_axis', 0)
         self.declare_parameter('lt_axis', 4)
         self.declare_parameter('rt_axis', 5)
-        self.declare_parameter('trigger_axis_mode', 'negative')
+        self.declare_parameter('trigger_axis_mode', 'signed')
         self.declare_parameter('invert_steering', True)
         self.declare_parameter('max_angle', 100.0)
         self.declare_parameter('max_reverse_speed', 5.0)
@@ -511,9 +515,10 @@ class GamepadTeleopNode(Node):
             f'angle=axes[{self.config.steering_axis}]*'
             f'{steering_sign}'
             f'{self.config.max_angle:g}, '
-            f'speed=axes[{self.config.rt_axis}]*'
-            f'{self.config.max_forward_speed:g}-axes['
-            f'{self.config.lt_axis}]*{self.config.max_reverse_speed:g}, '
+            f'speed=depth(axes[{self.config.rt_axis}])*'
+            f'{self.config.max_forward_speed:g}-depth(axes['
+            f'{self.config.lt_axis}])*'
+            f'{self.config.max_reverse_speed:g}, '
             f'trigger_axis_mode={self.config.trigger_axis_mode}'
         )
         self.get_logger().info(

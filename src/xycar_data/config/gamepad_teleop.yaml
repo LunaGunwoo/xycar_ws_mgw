@@ -13,11 +13,11 @@ gamepad_teleop:
     camera_topic: /image_raw
 
     # Remote Gamepad mapping observed through joy/game_controller_node.
-    # The vehicle Remote Gamepad reports released..pressed triggers as 0..-1.
+    # The vehicle Remote Gamepad reports released..pressed triggers as +1..-1.
     steering_axis: 0
     lt_axis: 4
     rt_axis: 5
-    trigger_axis_mode: negative
+    trigger_axis_mode: signed
     invert_steering: true
 
     # angle = -steering * max_angle (Xycar motor driver compensation)

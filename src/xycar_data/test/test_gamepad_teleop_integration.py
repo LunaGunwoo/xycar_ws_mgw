@@ -32,8 +32,10 @@ def _joy_message(
     b: bool = False,
 ) -> Joy:
     message = Joy()
-    # Callers provide trigger depth; the vehicle controller reports 0..-1.
-    message.axes = [steering, 0.0, 0.0, 0.0, -lt, -rt]
+    # Callers provide 0..1 depth; the vehicle controller reports +1..-1.
+    lt_axis = 1.0 - (2.0 * lt)
+    rt_axis = 1.0 - (2.0 * rt)
+    message.axes = [steering, 0.0, 0.0, 0.0, lt_axis, rt_axis]
     message.buttons = [int(a), int(b)]
     return message
 
@@ -60,6 +62,20 @@ def _spin_for(harness, duration_sec, joy_message=None):
             harness['joy_publisher'].publish(joy_message)
             next_joy_publish = now + 0.02
         harness['executor'].spin_once(timeout_sec=0.01)
+
+
+def _spin_until(
+    harness,
+    predicate,
+    timeout_sec,
+    joy_message=None,
+):
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        _spin_for(harness, 0.05, joy_message)
+        if predicate():
+            return True
+    return predicate()
 
 
 def _publish_camera_frames(harness, count, joy_message):
@@ -123,7 +139,7 @@ def ros_harness(monkeypatch, tmp_path):
         'recording_root': tmp_path / 'teleop',
     }
     assert teleop.motor_topic == MOTOR_TOPIC
-    assert teleop.config.trigger_axis_mode == 'negative'
+    assert teleop.config.trigger_axis_mode == 'signed'
     yield harness
 
     teleop.shutdown()
@@ -192,18 +208,32 @@ def test_neutral_rearming_repeat_and_graph_fail_safes(ros_harness):
         10,
     )
     commands.clear()
-    _spin_for(harness, 0.15, held_forward)
-    assert teleop._competitors
+    assert _spin_until(
+        harness,
+        lambda: bool(teleop._competitors) and bool(commands),
+        2.0,
+        held_forward,
+    )
     assert commands[-1] == pytest.approx((0.0, 0.0))
     assert not teleop._arming_gate.armed
     harness['peer'].destroy_publisher(competitor)
+    assert _spin_until(
+        harness,
+        lambda: not teleop._competitors,
+        2.0,
+        held_forward,
+    )
 
     # Removing the only motor subscriber also disarms. Recreating it while RT
     # remains held must not resume until another neutral input is observed.
     harness['peer'].destroy_subscription(harness['motor_subscription'])
     harness['motor_subscription'] = None
-    _spin_for(harness, 0.15, held_forward)
-    assert not teleop._has_motor_subscriber
+    assert _spin_until(
+        harness,
+        lambda: not teleop._has_motor_subscriber,
+        2.0,
+        held_forward,
+    )
     assert not teleop._arming_gate.armed
 
     harness['motor_subscription'] = harness['peer'].create_subscription(
@@ -213,8 +243,12 @@ def test_neutral_rearming_repeat_and_graph_fail_safes(ros_harness):
         10,
     )
     commands.clear()
-    _spin_for(harness, 0.20, held_forward)
-    assert teleop._has_motor_subscriber
+    assert _spin_until(
+        harness,
+        lambda: teleop._has_motor_subscriber and bool(commands),
+        2.0,
+        held_forward,
+    )
     assert commands
     assert all(command[1] == 0.0 for command in commands)
     assert not teleop._arming_gate.armed
@@ -263,13 +297,13 @@ def test_a_waits_for_forward_and_b_saves_all_frames_without_stopping(
     commands.clear()
     finish = _joy_message(steering=0.25, rt=1.0, b=True)
     _spin_for(harness, 0.15, finish)
-    _spin_for(
+    assert _spin_until(
         harness,
-        0.75,
+        lambda: teleop._recording_gate.state == RecordingState.IDLE,
+        2.0,
         _joy_message(steering=0.25, rt=1.0),
     )
 
-    assert teleop._recording_gate.state == RecordingState.IDLE
     assert any(command[1] == pytest.approx(7.0) for command in commands)
     sessions = list(harness['recording_root'].glob('*_session*'))
     assert len(sessions) == 1
@@ -307,9 +341,13 @@ def test_nonpositive_speed_discards_fifteen_and_keeps_driving(
     commands.clear()
     reverse_with_a = _joy_message(lt=1.0, a=True)
     _spin_for(harness, 0.20, reverse_with_a)
-    _spin_for(harness, 0.75, reverse_with_a)
+    assert _spin_until(
+        harness,
+        lambda: teleop._recording_gate.state == RecordingState.IDLE,
+        2.0,
+        reverse_with_a,
+    )
 
-    assert teleop._recording_gate.state == RecordingState.IDLE
     assert any(command[1] == pytest.approx(-5.0) for command in commands)
     sessions = list(harness['recording_root'].glob('*_session*'))
     assert len(sessions) == 1
@@ -335,6 +373,10 @@ def test_nonpositive_speed_discards_fifteen_and_keeps_driving(
     _spin_for(harness, 0.15, forward_with_a)
     assert teleop._recording_gate.state == RecordingState.RECORDING
     _spin_for(harness, 0.15, _joy_message(rt=0.5, b=True))
-    _spin_for(harness, 0.30, _joy_message(rt=0.5))
-    assert teleop._recording_gate.state == RecordingState.IDLE
+    assert _spin_until(
+        harness,
+        lambda: teleop._recording_gate.state == RecordingState.IDLE,
+        2.0,
+        _joy_message(rt=0.5),
+    )
     assert len(list(harness['recording_root'].glob('*_session*'))) == 1
