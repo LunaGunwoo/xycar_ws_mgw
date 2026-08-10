@@ -32,9 +32,9 @@ def _joy_message(
     b: bool = False,
 ) -> Joy:
     message = Joy()
-    # Callers provide 0..1 depth; the vehicle controller reports +1..-1.
-    lt_axis = 1.0 - (2.0 * lt)
-    rt_axis = 1.0 - (2.0 * rt)
+    # Callers provide 0..1 depth; the vehicle controller reports 0..-1.
+    lt_axis = -lt
+    rt_axis = -rt
     message.axes = [steering, 0.0, 0.0, 0.0, lt_axis, rt_axis]
     message.buttons = [int(a), int(b)]
     return message
@@ -139,7 +139,7 @@ def ros_harness(monkeypatch, tmp_path):
         'recording_root': tmp_path / 'teleop',
     }
     assert teleop.motor_topic == MOTOR_TOPIC
-    assert teleop.config.trigger_axis_mode == 'signed'
+    assert teleop.config.trigger_axis_mode == 'negative'
     yield harness
 
     teleop.shutdown()

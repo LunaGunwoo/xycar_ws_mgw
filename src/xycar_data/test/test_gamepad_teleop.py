@@ -24,7 +24,7 @@ from xycar_data.gamepad_teleop import (
 
 
 def test_neutral_input_stops_with_centered_steering():
-    axes = [0.0, 0.0, 0.0, 0.0, 1.0, 1.0]
+    axes = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     assert map_joy_axes(axes) == DriveCommand(0.0, 0.0)
 
 
@@ -33,22 +33,22 @@ def test_neutral_input_stops_with_centered_steering():
     [(-1.0, 100.0), (-0.5, 50.0), (0.5, -50.0), (1.0, -100.0)],
 )
 def test_steering_maps_to_full_angle_range(steering, expected_angle):
-    axes = [steering, 0.0, 0.0, 0.0, 1.0, 1.0]
+    axes = [steering, 0.0, 0.0, 0.0, 0.0, 0.0]
     assert map_joy_axes(axes).angle == expected_angle
 
 
 def test_lt_maps_to_reverse_speed():
-    command = map_joy_axes([0.0, 0.0, 0.0, 0.0, -1.0, 1.0])
+    command = map_joy_axes([0.0, 0.0, 0.0, 0.0, -1.0, 0.0])
     assert command == DriveCommand(0.0, -5.0)
 
 
 def test_rt_maps_to_forward_speed():
-    command = map_joy_axes([0.0, 0.0, 0.0, 0.0, 1.0, -1.0])
+    command = map_joy_axes([0.0, 0.0, 0.0, 0.0, 0.0, -1.0])
     assert command == DriveCommand(0.0, 7.0)
 
 
 def test_triggers_are_combined_for_partial_and_simultaneous_input():
-    partial = map_joy_axes([0.0, 0.0, 0.0, 0.0, 0.2, 0.0])
+    partial = map_joy_axes([0.0, 0.0, 0.0, 0.0, -0.4, -0.5])
     both_full = map_joy_axes([0.0, 0.0, 0.0, 0.0, -1.0, -1.0])
     assert partial.speed == pytest.approx(1.5)
     assert both_full.speed == pytest.approx(2.0)
@@ -68,7 +68,11 @@ def test_signed_trigger_profile_uses_full_axis_range(
     raw_axis,
     expected_depth,
 ):
-    command = map_joy_axes([0.0, 0.0, 0.0, 0.0, 1.0, raw_axis])
+    config = GamepadConfig(trigger_axis_mode='signed')
+    command = map_joy_axes(
+        [0.0, 0.0, 0.0, 0.0, 1.0, raw_axis],
+        config,
+    )
     assert command.speed == pytest.approx(7.0 * expected_depth)
 
 
@@ -86,17 +90,13 @@ def test_positive_trigger_profile_maps_depth_to_signed_speed():
     assert both_full.speed == pytest.approx(2.0)
 
 
-def test_negative_trigger_profile_remains_available():
-    config = GamepadConfig(trigger_axis_mode='negative')
-    command = map_joy_axes(
-        [0.0, 0.0, 0.0, 0.0, -0.4, -0.5],
-        config,
-    )
+def test_default_negative_trigger_profile_maps_vehicle_input():
+    command = map_joy_axes([0.0, 0.0, 0.0, 0.0, -0.4, -0.5])
     assert command.speed == pytest.approx(1.5)
 
 
 def test_steering_is_preserved_while_speed_is_zero():
-    command = map_joy_axes([0.75, 0.0, 0.0, 0.0, 1.0, 1.0])
+    command = map_joy_axes([0.75, 0.0, 0.0, 0.0, 0.0, 0.0])
     assert command == DriveCommand(-75.0, 0.0)
 
 
@@ -128,7 +128,7 @@ def test_custom_mapping_and_limits_are_supported():
         max_reverse_speed=3.0,
         max_forward_speed=4.0,
     )
-    command = map_joy_axes([0.5, 0.0, -0.5], config)
+    command = map_joy_axes([-0.25, -0.5, -0.5], config)
     assert command == DriveCommand(-15.0, 1.25)
 
 

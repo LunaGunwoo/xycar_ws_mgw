@@ -49,11 +49,11 @@ ros2 launch xycar_data gamepad_teleop.launch.py
 | A `buttons[0]` | 양수 속도 녹화 대기·시작 | — |
 | B `buttons[1]` | 현재 세션 정상 저장 | — |
 
-차량 Remote Gamepad 실측 기준은 trigger release `+1`, full press `-1`이며
-LT는 `axes[4]`, RT는 `axes[5]`다. 따라서 `trigger_axis_mode: signed`가
-기본값이고 각 depth는 `(1 - raw_axis) / 2`다. raw `+1`, `0`, `-1`은 각각
+차량 Remote Gamepad 실측 기준은 trigger release `0`, full press `-1`이며
+LT는 `axes[4]`, RT는 `axes[5]`다. 따라서 `trigger_axis_mode: negative`가
+기본값이고 각 depth는 `-raw_axis`다. raw `0`, `-0.5`, `-1`은 각각
 depth `0`, `0.5`, `1`로 변환된다. LT와 RT는 합산하므로 둘을 끝까지 누르면
-speed는 `2`다. 두 트리거가 모두 `+1`이면 speed만 0이 되고 angle은 왼쪽
+speed는 `2`다. 두 트리거가 모두 `0`이면 speed만 0이 되고 angle은 왼쪽
 스틱을 계속 따라간다.
 
 A를 누르고 있는 동안 녹화를 대기한다. 실제 `/xycar_motor`에 `speed > 0`이
@@ -101,9 +101,9 @@ ros2 launch xycar_data gamepad_teleop.launch.py device_id:=1
 ```
 
 trigger가 `0`에서 `+1`로 움직이는 controller는 별도 YAML에서 `positive`,
-`0`에서 `-1`로 움직이는 controller는 `negative`로 설정하고 `params_file`
-launch 인자로 전달한다. 차량에서는 LT/RT 축 번호와 `+1`에서 `-1`로 변하는
-raw 입력까지만 확인했다.
+`+1`에서 `-1`로 전체 축 범위를 쓰는 controller는 `signed`로 설정하고
+`params_file` launch 인자로 전달한다. 차량에서는 LT/RT 축 번호와 `0`에서
+`-1`로 변하는 raw 입력을 확인했다.
 조향 `±100`, 전진 `7`, 후진 `-5`의 실제 회전과 motor scale, release·stale·종료
 정지는 raised-car 상태에서 아직 검증되지 않았다. 첫 실차 시험은 낮은 trigger
 깊이부터 시작한다.

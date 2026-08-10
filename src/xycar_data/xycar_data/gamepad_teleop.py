@@ -32,7 +32,7 @@ class GamepadConfig:
     steering_axis: int = 0
     lt_axis: int = 4
     rt_axis: int = 5
-    trigger_axis_mode: str = 'signed'
+    trigger_axis_mode: str = 'negative'
     invert_steering: bool = True
     max_angle: float = 100.0
     max_reverse_speed: float = 5.0
@@ -372,7 +372,7 @@ class GamepadTeleopNode(Node):
         self.declare_parameter('steering_axis', 0)
         self.declare_parameter('lt_axis', 4)
         self.declare_parameter('rt_axis', 5)
-        self.declare_parameter('trigger_axis_mode', 'signed')
+        self.declare_parameter('trigger_axis_mode', 'negative')
         self.declare_parameter('invert_steering', True)
         self.declare_parameter('max_angle', 100.0)
         self.declare_parameter('max_reverse_speed', 5.0)
