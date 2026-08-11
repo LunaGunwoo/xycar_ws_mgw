@@ -72,7 +72,7 @@ def test_small_warp_config_embeds_preprocessing_contract():
     assert contract["geometry"] == (
         "perspective_road_warp_then_bicubic_resize"
     )
-    assert contract["road_warp"]["parameters"]["bev_width"] == 400
+    assert contract["road_warp"]["parameters"]["bev_width"] == 224
     assert len(contract["road_warp"]["sha256"]) == 64
     assert (
         contract["training_augmentation"]["horizontal_flip_after_road_warp"]
