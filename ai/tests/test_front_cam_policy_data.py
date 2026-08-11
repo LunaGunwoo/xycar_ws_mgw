@@ -68,6 +68,45 @@ def test_gamepad_speed_filter_and_fixed_split(tmp_path: Path):
     assert set(splits.manifest()["splits"]) == {"train", "val", "test"}
 
 
+def test_minimum_forward_speed_filter_includes_boundary(tmp_path: Path):
+    data_root = tmp_path / "datasets" / "teleop"
+    expected = [
+        "20260810_130735_027_session",
+        "20260810_130818_255_session",
+    ]
+    write_session(
+        data_root,
+        "20260803_120333_759_session",
+        labels=[(0.0, 15.0)],
+        max_forward_speed=19.999,
+    )
+    write_session(
+        data_root,
+        expected[0],
+        labels=[(0.0, 20.0)],
+        max_forward_speed=20.0,
+    )
+    write_session(
+        data_root,
+        expected[1],
+        labels=[(0.0, 25.0)],
+        max_forward_speed=30.0,
+    )
+    config = DataConfig(
+        root=data_root,
+        split_manifest=tmp_path / "missing-split.yaml",
+        require_all_matching_sessions=True,
+        control_mode="gamepad",
+        max_forward_speed=None,
+        min_forward_speed=20.0,
+        num_workers=0,
+    )
+
+    assert [
+        session.session_id for session in discover_policy_sessions(config)
+    ] == expected
+
+
 def test_split_manifest_rejects_overlap_and_unlisted_session(tmp_path: Path):
     data_root = tmp_path / "datasets" / "teleop"
     names = [
@@ -309,5 +348,6 @@ def _data_config(data_root: Path, manifest: Path) -> DataConfig:
         require_all_matching_sessions=True,
         control_mode="gamepad",
         max_forward_speed=25.0,
+        min_forward_speed=None,
         num_workers=0,
     )

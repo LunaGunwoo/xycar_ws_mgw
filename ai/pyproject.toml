@@ -5,6 +5,7 @@ description = "Reproducible training workspace for Xycar real-car models."
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "numpy>=2.0,<3",
+    "opencv-python>=4.10,<5",
     "pillow>=11,<13",
     "pyyaml>=6,<7",
     "timm>=1.0.28,<1.1",
@@ -16,10 +17,12 @@ dependencies = [
 [project.scripts]
 xycar-export-policy = "xycar_ai.export_front_cam_policy:main"
 xycar-train = "xycar_ai.train_front_cam_policy:main"
+xycar-warp-tuner = "xycar_ai.front_cam_policy_warp_tuner:main"
 
 [dependency-groups]
 dev = [
     "pytest>=9,<10",
+    "ruff>=0.14,<0.15",
 ]
 
 [build-system]

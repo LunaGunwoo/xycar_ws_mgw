@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,12 @@ import yaml
 from conftest import write_session, write_split_manifest
 
 from xycar_ai.config import load_train_config
-from xycar_ai.train_front_cam_policy import main
+from xycar_ai.train_front_cam_policy import (
+    build_preprocessing_contract,
+    load_configured_road_warp,
+    main,
+    validate_resume_payload,
+)
 
 
 def test_ab_configs_only_change_flip_and_run_name():
@@ -28,6 +34,90 @@ def test_ab_configs_only_change_flip_and_run_name():
     candidate["augmentation"]["horizontal_flip_probability"] = 0.0
     candidate["output"]["run_name"] = "baseline_seed20260810"
     assert candidate == baseline
+
+
+def test_small_config_uses_minimum_speed_and_flip():
+    project_root = Path(__file__).parents[1]
+    config = load_train_config(
+        project_root / "config" / "front_cam_policy_train_small.yaml"
+    )
+
+    assert config.model.name == "vit_small_patch16_224.augreg_in21k_ft_in1k"
+    assert config.data.max_forward_speed is None
+    assert config.data.min_forward_speed == 20.0
+    assert config.augmentation.horizontal_flip_probability == 0.5
+    assert config.training.batch_size == 128
+    assert config.output.run_name == "vit_small_hflip_p05_seed20260810"
+    assert config.preprocessing.road_warp_config is None
+
+
+def test_small_warp_config_embeds_preprocessing_contract():
+    project_root = Path(__file__).parents[1]
+    config = load_train_config(
+        project_root / "config" / "front_cam_policy_train_small_warp.yaml"
+    )
+    road_warp = load_configured_road_warp(config)
+
+    assert road_warp is not None
+    contract = build_preprocessing_contract(
+        {
+            "geometry": "full_frame_bicubic_resize",
+            "image_size": 224,
+            "mean": [0.5, 0.5, 0.5],
+            "std": [0.5, 0.5, 0.5],
+        },
+        config=config,
+        road_warp=road_warp,
+    )
+    assert contract["geometry"] == (
+        "perspective_road_warp_then_bicubic_resize"
+    )
+    assert contract["road_warp"]["parameters"]["bev_width"] == 400
+    assert len(contract["road_warp"]["sha256"]) == 64
+    assert (
+        contract["training_augmentation"]["horizontal_flip_after_road_warp"]
+        is True
+    )
+
+    split = {"schema_version": 1, "dataset_snapshot": "synthetic", "splits": {}}
+    checkpoint = {
+        "schema_version": 1,
+        "model_name": config.model.name,
+        "label_contract": {"num_classes": 201},
+        "split_manifest": split,
+        "preprocessing": contract,
+        "config": config.serializable(),
+        "epoch": 1,
+        "model_state": {},
+        "optimizer_state": {},
+        "scheduler_state": {},
+    }
+    validate_resume_payload(
+        checkpoint,
+        config=config,
+        expected_split=split,
+        expected_preprocessing=contract,
+    )
+    changed_contract = copy.deepcopy(contract)
+    changed_contract["road_warp"]["parameters"]["top_y"] = 0.7
+    with pytest.raises(ValueError, match="preprocessing differs"):
+        validate_resume_payload(
+            checkpoint,
+            config=config,
+            expected_split=split,
+            expected_preprocessing=changed_contract,
+        )
+
+
+def test_config_requires_exactly_one_forward_speed_filter(tmp_path: Path):
+    split_path = tmp_path / "config" / "split.yaml"
+    config_path = _write_config(tmp_path, split_path, epochs=1)
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["data"]["min_forward_speed"] = 20.0
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="exactly one"):
+        load_train_config(config_path)
 
 
 @pytest.mark.parametrize("probability", [-0.01, 1.01])
@@ -157,7 +247,7 @@ def _write_config(
     payload = {
         "schema_version": 1,
         "model": {
-            "name": "vit_tiny_patch16_224.augreg_in21k_ft_in1k",
+            "name": "vit_small_patch16_224.augreg_in21k_ft_in1k",
             "pretrained": False,
             "image_size": 32,
         },

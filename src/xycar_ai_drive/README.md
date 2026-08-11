@@ -42,6 +42,13 @@ node는 시작 전에 checksum, 고정 RGB `[1,3,224,224]` input, angle/speed
 thread 8개로 model을 load하고 3회 warm-up한다. artifact 생성과 배포는 개발
 Laptop의 MGW root에서 수행한다.
 
+기존 artifact의 `full_frame_bicubic_resize`와 새
+`perspective_road_warp_then_bicubic_resize` geometry를 모두 지원한다. road-warp
+artifact는 manifest에 정규화 source 사다리꼴, BEV 크기와 destination 경계를
+내장하며 runtime은 학습과 같은 perspective warp를 RGB frame에 적용한 뒤
+224x224로 resize한다. warp parameter가 누락되거나 범위를 벗어나면 node 시작을
+거부한다. parameter 튜닝과 warp 학습 명령은 `ai/README.md`를 따른다.
+
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 /home/xytron/.local/bin/uv run --locked xycar-export-policy \

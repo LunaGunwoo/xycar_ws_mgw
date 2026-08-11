@@ -17,6 +17,7 @@ from torchvision.transforms import InterpolationMode
 from torchvision.transforms import functional as transform_functional
 
 from xycar_ai.config import AugmentationConfig, DataConfig
+from xycar_ai.front_cam_policy_warp import RoadWarpConfig, warp_pil_image
 
 COMMAND_MIN = -100
 COMMAND_MAX = 100
@@ -132,7 +133,7 @@ def discover_policy_sessions(config: DataConfig) -> tuple[PolicySession, ...]:
     if not sessions:
         raise PolicyDatasetError(
             "no completed gamepad sessions match "
-            f"max_forward_speed={config.max_forward_speed} under {root}"
+            f"{_forward_speed_filter_description(config)} under {root}"
         )
     return tuple(sessions)
 
@@ -244,12 +245,14 @@ class FrontCamPolicyDataset(Dataset):
         *,
         transform: object,
         horizontal_flip_probability: float = 0.0,
+        road_warp: RoadWarpConfig | None = None,
     ) -> None:
         if not 0 <= horizontal_flip_probability <= 1:
             raise ValueError("horizontal_flip_probability must be in [0, 1]")
         self.samples = tuple(samples)
         self.transform = transform
         self.horizontal_flip_probability = float(horizontal_flip_probability)
+        self.road_warp = road_warp
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -263,6 +266,8 @@ class FrontCamPolicyDataset(Dataset):
         )
         with Image.open(sample.image_path) as image:
             rgb_image = image.convert("RGB")
+            if self.road_warp is not None:
+                rgb_image = warp_pil_image(rgb_image, self.road_warp)
             if horizontal_flipped:
                 rgb_image = transform_functional.hflip(rgb_image)
             image_tensor = self.transform(rgb_image)
@@ -408,27 +413,51 @@ def _sample_from_row(
     )
 
 
-def _matches_filter(metadata: Mapping[str, object], config: DataConfig) -> bool:
+def metadata_matches_policy_filter(
+    metadata: Mapping[str, object],
+    *,
+    control_mode: str,
+    max_forward_speed: float | None,
+    min_forward_speed: float | None,
+) -> bool:
     if metadata.get("format_version") != 1 or metadata.get("complete") is not True:
         return False
     if metadata.get("dataset_kind") != "camera_first_teleop_behavior_cloning":
         return False
-    if metadata.get("control_mode") != config.control_mode:
+    if metadata.get("control_mode") != control_mode:
         return False
     gamepad = metadata.get("gamepad")
     if not isinstance(gamepad, dict):
         return False
-    max_forward_speed = gamepad.get("max_forward_speed")
-    if isinstance(max_forward_speed, bool) or not isinstance(
-        max_forward_speed, (int, float)
-    ):
+    observed_speed = gamepad.get("max_forward_speed")
+    if isinstance(observed_speed, bool) or not isinstance(observed_speed, (int, float)):
         return False
-    return math.isclose(
-        float(max_forward_speed),
-        config.max_forward_speed,
-        rel_tol=0.0,
-        abs_tol=1e-9,
+    speed = float(observed_speed)
+    if max_forward_speed is not None:
+        return math.isclose(
+            speed,
+            max_forward_speed,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+    if min_forward_speed is not None:
+        return speed >= min_forward_speed
+    raise ValueError("a forward-speed filter is required")
+
+
+def _matches_filter(metadata: Mapping[str, object], config: DataConfig) -> bool:
+    return metadata_matches_policy_filter(
+        metadata,
+        control_mode=config.control_mode,
+        max_forward_speed=config.max_forward_speed,
+        min_forward_speed=config.min_forward_speed,
     )
+
+
+def _forward_speed_filter_description(config: DataConfig) -> str:
+    if config.max_forward_speed is not None:
+        return f"max_forward_speed={config.max_forward_speed}"
+    return f"min_forward_speed>={config.min_forward_speed}"
 
 
 def _load_metadata(path: Path) -> dict[str, object]:

@@ -17,11 +17,16 @@ XYCAR_AI_DEFAULT_VEHICLE_SSH="xytron@xycar"
 XYCAR_AI_VEHICLE_SSH="${XYCAR_AI_VEHICLE_SSH:-${XYCAR_AI_DEFAULT_VEHICLE_SSH}}"
 XYCAR_AI_VEHICLE_DATASET_ROOT="${XYCAR_AI_VEHICLE_DATASET_ROOT:-/home/xytron/xycar_data/teleop}"
 XYCAR_AI_LOCAL_DATASET_ROOT="${XYCAR_AI_LOCAL_DATASET_ROOT:-${XYCAR_AI_BUNDLE_ROOT}/datasets/teleop}"
+XYCAR_AI_WINDOWS_DATASET_ROOT="${XYCAR_AI_WINDOWS_DATASET_ROOT:-/mnt/c/Users/gunwoo/Desktop/teleop}"
+XYCAR_AI_SSD_TELEOP_ROOT="${XYCAR_AI_SSD_TELEOP_ROOT:-/mnt/d/teleop}"
+XYCAR_AI_MIN_FORWARD_SPEED="${XYCAR_AI_MIN_FORWARD_SPEED:-20.0}"
 XYCAR_AI_LOCAL_ARTIFACT_ROOT="${XYCAR_AI_LOCAL_ARTIFACT_ROOT:-${XYCAR_AI_BUNDLE_ROOT}/artifacts/models}"
 XYCAR_AI_VEHICLE_ARTIFACT_ROOT="${XYCAR_AI_VEHICLE_ARTIFACT_ROOT:-/home/xytron/xycar_ws_mgw/artifacts/models}"
 XYCAR_AI_UV_VERSION="${XYCAR_AI_UV_VERSION:-0.11.24}"
 XYCAR_AI_SHARED_MARKER_NAME=".xycar-ai-dataset-share"
 XYCAR_AI_SHARED_MARKER_CONTENT="xycar-ai-dataset-share-v1"
+XYCAR_AI_LOCAL_DATASET_MARKER_NAME=".xycar-ai-local-dataset"
+XYCAR_AI_LOCAL_DATASET_MARKER_CONTENT="xycar-ai-local-dataset-v1"
 
 xycar_ai_die() {
   printf 'error: %s\n' "$*" >&2
@@ -94,6 +99,28 @@ xycar_ai_verify_shared_marker() {
     xycar_ai_die "shared dataset marker is missing: ${marker}"
   [[ "$(<"${marker}")" == "${XYCAR_AI_SHARED_MARKER_CONTENT}" ]] ||
     xycar_ai_die "shared dataset marker has unexpected content: ${marker}"
+}
+
+xycar_ai_verify_local_dataset_marker() {
+  local root="${1:-${XYCAR_AI_LOCAL_DATASET_ROOT}}"
+  local marker="${root}/${XYCAR_AI_LOCAL_DATASET_MARKER_NAME}"
+  [[ -f "${marker}" ]] ||
+    xycar_ai_die "local dataset marker is missing: ${marker}"
+  [[ "$(<"${marker}")" == "${XYCAR_AI_LOCAL_DATASET_MARKER_CONTENT}" ]] ||
+    xycar_ai_die "local dataset marker has unexpected content: ${marker}"
+}
+
+xycar_ai_validate_external_windows_mount_values() {
+  local filesystem_type="$1"
+  local mount_target="$2"
+  [[ "${filesystem_type}" == "9p" || "${filesystem_type}" == "drvfs" ]] ||
+    xycar_ai_die \
+      "direct SSD source must be on a WSL Windows mount: ${filesystem_type}"
+  [[ "${mount_target}" =~ ^/mnt/[A-Za-z]$ ]] ||
+    xycar_ai_die \
+      "direct SSD source must use a drive mount such as /mnt/d: ${mount_target}"
+  [[ "${mount_target,,}" != "/mnt/c" ]] ||
+    xycar_ai_die "direct SSD source must not use the Windows C: drive"
 }
 
 xycar_ai_validate_ssh_target() {

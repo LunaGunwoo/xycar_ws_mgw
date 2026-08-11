@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from xycar_ai_drive.artifact import load_policy_artifact
+from xycar_ai_drive.artifact import RoadWarpParameters, load_policy_artifact
 from xycar_ai_drive.control import DriveCommand, decode_class_ids
 
 
@@ -81,6 +81,7 @@ class TorchScriptPolicy:
             image_size=self.artifact.image_size,
             mean=self._mean,
             std=self._std,
+            road_warp=self.artifact.road_warp,
         )
         tensor = self._torch.from_numpy(chw).unsqueeze(0)
         started = time.perf_counter()
@@ -123,6 +124,7 @@ def preprocess_rgb_frame(
     image_size: int,
     mean: np.ndarray,
     std: np.ndarray,
+    road_warp: RoadWarpParameters | None = None,
 ) -> np.ndarray:
     if (
         not isinstance(rgb_frame, np.ndarray)
@@ -135,14 +137,23 @@ def preprocess_rgb_frame(
         raise PolicyRuntimeError('camera frame must be a non-empty uint8 RGB image')
     if image_size < 1:
         raise PolicyRuntimeError('image_size must be positive')
+    if road_warp is not None and (
+        rgb_frame.shape[0] < 2 or rgb_frame.shape[1] < 2
+    ):
+        raise PolicyRuntimeError('road warp requires a frame of at least 2x2')
     if mean.shape != (1, 1, 3) or std.shape != (1, 1, 3):
         raise PolicyRuntimeError('normalization arrays must have shape [1,1,3]')
     if not np.isfinite(mean).all() or not np.isfinite(std).all():
         raise PolicyRuntimeError('normalization arrays must be finite')
     if np.any(std <= 0.0):
         raise PolicyRuntimeError('normalization std must be positive')
+    geometry_image = (
+        _warp_road_image(rgb_frame, road_warp)
+        if road_warp is not None
+        else rgb_frame
+    )
     resized = cv2.resize(
-        rgb_frame,
+        geometry_image,
         (image_size, image_size),
         interpolation=cv2.INTER_CUBIC,
     )
@@ -151,3 +162,43 @@ def preprocess_rgb_frame(
     if chw.shape != (3, image_size, image_size) or not np.isfinite(chw).all():
         raise PolicyRuntimeError('preprocessed image is invalid')
     return chw
+
+
+def _warp_road_image(
+    rgb_frame: np.ndarray,
+    config: RoadWarpParameters,
+) -> np.ndarray:
+    height, width = rgb_frame.shape[:2]
+    max_x = float(width - 1)
+    max_y = float(height - 1)
+    source = np.asarray(
+        [
+            [config.bottom_left_x * max_x, config.bottom_y * max_y],
+            [config.top_left_x * max_x, config.top_y * max_y],
+            [config.top_right_x * max_x, config.top_y * max_y],
+            [config.bottom_right_x * max_x, config.bottom_y * max_y],
+        ],
+        dtype=np.float32,
+    )
+    output_max_x = float(config.bev_width - 1)
+    output_max_y = float(config.bev_height - 1)
+    left = config.dst_left_x * output_max_x
+    right = config.dst_right_x * output_max_x
+    destination = np.asarray(
+        [
+            [left, output_max_y],
+            [left, 0.0],
+            [right, 0.0],
+            [right, output_max_y],
+        ],
+        dtype=np.float32,
+    )
+    transform = cv2.getPerspectiveTransform(source, destination)
+    return cv2.warpPerspective(
+        rgb_frame,
+        transform,
+        (config.bev_width, config.bev_height),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0),
+    )

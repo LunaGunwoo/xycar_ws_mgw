@@ -24,7 +24,8 @@ class DataConfig:
     split_manifest: Path
     require_all_matching_sessions: bool
     control_mode: str
-    max_forward_speed: float
+    max_forward_speed: float | None
+    min_forward_speed: float | None
     num_workers: int
 
 
@@ -35,6 +36,11 @@ class AugmentationConfig:
     saturation: float
     hue: float
     horizontal_flip_probability: float
+
+
+@dataclass(frozen=True)
+class PreprocessingConfig:
+    road_warp_config: Path | None
 
 
 @dataclass(frozen=True)
@@ -85,6 +91,7 @@ class TrainConfig:
     project_root: Path
     model: ModelConfig
     data: DataConfig
+    preprocessing: PreprocessingConfig
     augmentation: AugmentationConfig
     optimizer: OptimizerConfig
     scheduler: SchedulerConfig
@@ -116,6 +123,7 @@ def load_train_config(path: str | Path) -> TrainConfig:
             "output",
         },
         "training config",
+        optional={"preprocessing"},
     )
     if _integer(payload, "schema_version") != CONFIG_SCHEMA_VERSION:
         raise ValueError(f"unsupported training config schema_version in {config_path}")
@@ -123,6 +131,9 @@ def load_train_config(path: str | Path) -> TrainConfig:
     project_root = config_path.parent.parent
     model_payload = _mapping(payload, "model")
     data_payload = _mapping(payload, "data")
+    preprocessing_payload = (
+        _mapping(payload, "preprocessing") if "preprocessing" in payload else None
+    )
     augmentation_payload = _mapping(payload, "augmentation")
     optimizer_payload = _mapping(payload, "optimizer")
     scheduler_payload = _mapping(payload, "scheduler")
@@ -131,18 +142,13 @@ def load_train_config(path: str | Path) -> TrainConfig:
     output_payload = _mapping(payload, "output")
 
     _expect_keys(model_payload, {"name", "pretrained", "image_size"}, "model")
-    _expect_keys(
-        data_payload,
-        {
-            "root",
-            "split_manifest",
-            "require_all_matching_sessions",
-            "control_mode",
-            "max_forward_speed",
-            "num_workers",
-        },
-        "data",
-    )
+    _expect_data_keys(data_payload)
+    if preprocessing_payload is not None:
+        _expect_keys(
+            preprocessing_payload,
+            {"road_warp_config"},
+            "preprocessing",
+        )
     _expect_keys(
         augmentation_payload,
         {
@@ -206,8 +212,27 @@ def load_train_config(path: str | Path) -> TrainConfig:
                 data_payload, "require_all_matching_sessions"
             ),
             control_mode=_string(data_payload, "control_mode"),
-            max_forward_speed=_number(data_payload, "max_forward_speed"),
+            max_forward_speed=(
+                _number(data_payload, "max_forward_speed")
+                if "max_forward_speed" in data_payload
+                else None
+            ),
+            min_forward_speed=(
+                _number(data_payload, "min_forward_speed")
+                if "min_forward_speed" in data_payload
+                else None
+            ),
             num_workers=_integer(data_payload, "num_workers"),
+        ),
+        preprocessing=PreprocessingConfig(
+            road_warp_config=(
+                _resolve_project_path(
+                    project_root,
+                    _string(preprocessing_payload, "road_warp_config"),
+                )
+                if preprocessing_payload is not None
+                else None
+            ),
         ),
         augmentation=AugmentationConfig(
             brightness=_number(augmentation_payload, "brightness"),
@@ -262,8 +287,14 @@ def _validate(config: TrainConfig) -> None:
         raise ValueError("the selected pretrained ViT requires image_size 224")
     if config.data.num_workers < 0:
         raise ValueError("data.num_workers must be >= 0")
-    if not -100.0 <= config.data.max_forward_speed <= 100.0:
+    if config.data.max_forward_speed is not None and not (
+        -100.0 <= config.data.max_forward_speed <= 100.0
+    ):
         raise ValueError("data.max_forward_speed must be in [-100, 100]")
+    if config.data.min_forward_speed is not None and not (
+        -100.0 <= config.data.min_forward_speed <= 100.0
+    ):
+        raise ValueError("data.min_forward_speed must be in [-100, 100]")
     for field_name, value in asdict(config.augmentation).items():
         if value < 0:
             raise ValueError(f"augmentation.{field_name} must be >= 0")
@@ -317,13 +348,41 @@ def _load_yaml_mapping(path: Path) -> dict[str, object]:
     return dict(payload)
 
 
-def _expect_keys(payload: Mapping[str, object], expected: set[str], label: str) -> None:
+def _expect_keys(
+    payload: Mapping[str, object],
+    expected: set[str],
+    label: str,
+    *,
+    optional: set[str] | None = None,
+) -> None:
+    optional = optional or set()
     actual = set(payload)
     missing = expected - actual
-    extra = actual - expected
+    extra = actual - expected - optional
     if missing or extra:
         raise ValueError(
             f"{label} keys mismatch; missing={sorted(missing)}, extra={sorted(extra)}"
+        )
+
+
+def _expect_data_keys(payload: Mapping[str, object]) -> None:
+    required = {
+        "root",
+        "split_manifest",
+        "require_all_matching_sessions",
+        "control_mode",
+        "num_workers",
+    }
+    filters = {"max_forward_speed", "min_forward_speed"}
+    actual = set(payload)
+    missing = required - actual
+    extra = actual - required - filters
+    selected_filters = actual & filters
+    if missing or extra or len(selected_filters) != 1:
+        raise ValueError(
+            "data keys mismatch; "
+            f"missing={sorted(missing)}, extra={sorted(extra)}, "
+            "exactly one of max_forward_speed or min_forward_speed is required"
         )
 
 

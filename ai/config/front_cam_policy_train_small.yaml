@@ -1,0 +1,53 @@
+schema_version: 1
+
+model:
+  name: vit_small_patch16_224.augreg_in21k_ft_in1k
+  pretrained: true
+  image_size: 224
+
+data:
+  root: datasets/teleop
+  split_manifest: config/front_cam_policy_split_min_speed20.yaml
+  require_all_matching_sessions: true
+  control_mode: gamepad
+  min_forward_speed: 20.0
+  num_workers: 8
+
+augmentation:
+  brightness: 0.12
+  contrast: 0.12
+  saturation: 0.08
+  hue: 0.02
+  horizontal_flip_probability: 0.5
+
+optimizer:
+  name: adamw
+  learning_rate: 0.0003
+  weight_decay: 0.05
+
+scheduler:
+  name: cosine
+  warmup_epochs: 1
+
+training:
+  epochs: 20
+  batch_size: 128
+  grad_clip: 1.0
+  seed: 20260810
+  device: cuda
+  amp: true
+  deterministic: true
+
+loss:
+  angle_label_smoothing: 0.02
+  speed_label_smoothing: 0.02
+  angle_class_weighting: sqrt_inverse_frequency
+  speed_class_weighting: sqrt_inverse_frequency
+  min_class_weight: 0.5
+  max_class_weight: 3.0
+  speed_loss_weight: 0.5
+  emd_loss_weight: 0.2
+
+output:
+  root: artifacts/runs/front_cam_policy
+  run_name: vit_small_hflip_p05_seed20260810

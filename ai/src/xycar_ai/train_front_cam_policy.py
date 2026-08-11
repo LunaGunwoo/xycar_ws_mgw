@@ -39,6 +39,11 @@ from xycar_ai.front_cam_policy_metrics import (
     selection_score,
 )
 from xycar_ai.front_cam_policy_model import TaskTokenViTPolicy
+from xycar_ai.front_cam_policy_warp import (
+    ROAD_WARP_GEOMETRY,
+    RoadWarpConfig,
+    load_road_warp_config,
+)
 
 DEFAULT_CONFIG = "config/front_cam_policy_train.yaml"
 CHECKPOINT_SCHEMA_VERSION = 1
@@ -47,6 +52,7 @@ CHECKPOINT_SCHEMA_VERSION = 1
 def main(argv: Iterable[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     config = load_train_config(args.config)
+    road_warp = load_configured_road_warp(config)
     splits = build_policy_data_splits(config.data)
     split_manifest = splits.manifest()
     dataset_stats = policy_dataset_stats(splits)
@@ -68,20 +74,17 @@ def main(argv: Iterable[str] | None = None) -> int:
         pretrained=config.model.pretrained,
         image_size=config.model.image_size,
     ).to(device)
-    preprocessing = {
-        **model.preprocessing_contract(),
-        "training_augmentation": {
-            "horizontal_flip_probability": (
-                config.augmentation.horizontal_flip_probability
-            ),
-            "horizontal_flip_before_resize": True,
-        },
-    }
+    preprocessing = build_preprocessing_contract(
+        model.preprocessing_contract(),
+        config=config,
+        road_warp=road_warp,
+    )
     loaders = make_loaders(
         splits=splits,
         config=config,
         model_data_config=model.model_data_config,
         device=device,
+        road_warp=road_warp,
     )
 
     train_samples = splits.train_samples
@@ -125,6 +128,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         resume=args.resume,
         device=device,
         expected_split=split_manifest,
+        expected_preprocessing=preprocessing,
     )
     write_yaml(run_dir / "resolved_config.yaml", config.serializable())
     write_json(run_dir / "split.json", split_manifest)
@@ -298,6 +302,7 @@ def make_loaders(
     config: TrainConfig,
     model_data_config: Mapping[str, object],
     device: torch.device,
+    road_warp: RoadWarpConfig | None = None,
 ) -> dict[str, DataLoader]:
     groups = {
         "train": splits.train_samples,
@@ -318,6 +323,7 @@ def make_loaders(
             horizontal_flip_probability=(
                 config.augmentation.horizontal_flip_probability if training else 0.0
             ),
+            road_warp=road_warp,
         )
         generator = torch.Generator()
         generator.manual_seed(config.training.seed + offset)
@@ -468,6 +474,7 @@ def prepare_run_directory(
     resume: str,
     device: torch.device,
     expected_split: dict[str, object],
+    expected_preprocessing: dict[str, object],
 ) -> tuple[Path, dict[str, object] | None]:
     if resume:
         checkpoint_path = Path(resume).expanduser().resolve()
@@ -476,7 +483,12 @@ def prepare_run_directory(
                 f"resume checkpoint does not exist: {checkpoint_path}"
             )
         payload = load_checkpoint(checkpoint_path, device)
-        validate_resume_payload(payload, config=config, expected_split=expected_split)
+        validate_resume_payload(
+            payload,
+            config=config,
+            expected_split=expected_split,
+            expected_preprocessing=expected_preprocessing,
+        )
         return checkpoint_path.parent, payload
 
     run_name = config.output.run_name or datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
@@ -490,6 +502,7 @@ def validate_resume_payload(
     *,
     config: TrainConfig,
     expected_split: dict[str, object],
+    expected_preprocessing: dict[str, object] | None = None,
 ) -> None:
     if payload.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("resume checkpoint schema is incompatible")
@@ -500,6 +513,15 @@ def validate_resume_payload(
         raise ValueError("resume checkpoint label contract is incompatible")
     if payload.get("split_manifest") != expected_split:
         raise ValueError("resume checkpoint dataset split differs from the config")
+    checkpoint_preprocessing = payload.get("preprocessing")
+    if expected_preprocessing is not None and (
+        not isinstance(checkpoint_preprocessing, Mapping)
+        or _resume_geometry_contract(checkpoint_preprocessing)
+        != _resume_geometry_contract(expected_preprocessing)
+    ):
+        raise ValueError(
+            "resume checkpoint preprocessing differs from the current warp config"
+        )
     checkpoint_config = payload.get("config")
     checkpoint_augmentation = (
         checkpoint_config.get("augmentation")
@@ -523,6 +545,43 @@ def validate_resume_payload(
     missing = required - set(payload)
     if missing:
         raise ValueError(f"resume checkpoint fields are missing: {sorted(missing)}")
+
+
+def load_configured_road_warp(config: TrainConfig) -> RoadWarpConfig | None:
+    path = config.preprocessing.road_warp_config
+    return load_road_warp_config(path) if path is not None else None
+
+
+def _resume_geometry_contract(
+    preprocessing: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        "geometry": preprocessing.get("geometry"),
+        "road_warp": preprocessing.get("road_warp"),
+    }
+
+
+def build_preprocessing_contract(
+    model_contract: Mapping[str, object],
+    *,
+    config: TrainConfig,
+    road_warp: RoadWarpConfig | None,
+) -> dict[str, object]:
+    contract = dict(model_contract)
+    training_augmentation: dict[str, object] = {
+        "horizontal_flip_probability": (
+            config.augmentation.horizontal_flip_probability
+        ),
+        "horizontal_flip_before_resize": True,
+    }
+    if road_warp is not None:
+        contract["geometry"] = ROAD_WARP_GEOMETRY
+        contract["road_warp"] = road_warp.contract(
+            source_path=config.preprocessing.road_warp_config
+        )
+        training_augmentation["horizontal_flip_after_road_warp"] = True
+    contract["training_augmentation"] = training_augmentation
+    return contract
 
 
 def load_checkpoint(path: Path, device: torch.device) -> dict[str, object]:

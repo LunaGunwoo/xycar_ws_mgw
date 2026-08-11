@@ -27,6 +27,21 @@ def test_task_token_vit_tiny_output_shapes():
     assert model.preprocessing_contract()["geometry"] == "full_frame_bicubic_resize"
 
 
+def test_task_token_vit_small_output_shapes():
+    model = TaskTokenViTPolicy(
+        model_name="vit_small_patch16_224.augreg_in21k_ft_in1k",
+        pretrained=False,
+        image_size=224,
+    )
+    model.eval()
+    with torch.no_grad():
+        outputs = model(torch.zeros(1, 3, 224, 224))
+
+    assert tuple(outputs["angle_logits"].shape) == (1, 201)
+    assert tuple(outputs["speed_logits"].shape) == (1, 201)
+    assert sum(parameter.numel() for parameter in model.parameters()) == 21_823_506
+
+
 def test_ordinal_emd_tracks_class_distance_and_combines_losses():
     logits = torch.full((3, 201), -1000.0)
     logits[0, 100] = 1000.0

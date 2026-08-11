@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 from collections.abc import Mapping
@@ -21,6 +22,20 @@ class ArtifactContractError(ValueError):
 
 
 @dataclass(frozen=True)
+class RoadWarpParameters:
+    top_y: float
+    bottom_y: float
+    top_left_x: float
+    top_right_x: float
+    bottom_left_x: float
+    bottom_right_x: float
+    bev_width: int
+    bev_height: int
+    dst_left_x: float
+    dst_right_x: float
+
+
+@dataclass(frozen=True)
 class PolicyArtifact:
     root: Path
     artifact_id: str
@@ -28,6 +43,7 @@ class PolicyArtifact:
     image_size: int
     mean: tuple[float, float, float]
     std: tuple[float, float, float]
+    road_warp: RoadWarpParameters | None
 
 
 def load_policy_artifact(root: str | Path) -> PolicyArtifact:
@@ -90,7 +106,11 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
         'preprocessing',
         'manifest',
     )
-    if preprocessing.get('geometry') != 'full_frame_bicubic_resize':
+    geometry = preprocessing.get('geometry')
+    if geometry not in {
+        'full_frame_bicubic_resize',
+        'perspective_road_warp_then_bicubic_resize',
+    }:
         raise ArtifactContractError('unsupported preprocessing geometry')
     if preprocessing.get('image_size') != image_size:
         raise ArtifactContractError('preprocessing image_size mismatch')
@@ -98,6 +118,13 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
     std = _three_finite_floats(preprocessing, 'std')
     if any(value <= 0.0 for value in std):
         raise ArtifactContractError('preprocessing std values must be positive')
+    road_warp = None
+    if geometry == 'perspective_road_warp_then_bicubic_resize':
+        road_warp = _road_warp_parameters(preprocessing)
+    elif 'road_warp' in preprocessing:
+        raise ArtifactContractError(
+            'full-frame preprocessing must not define road_warp'
+        )
 
     label_contract = _required_mapping(
         manifest,
@@ -116,7 +143,99 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
         image_size=image_size,
         mean=mean,
         std=std,
+        road_warp=road_warp,
     )
+
+
+def _road_warp_parameters(
+    preprocessing: Mapping[str, object],
+) -> RoadWarpParameters:
+    contract = _required_mapping(preprocessing, 'road_warp', 'preprocessing')
+    if contract.get('schema_version') != 1:
+        raise ArtifactContractError('unsupported road_warp schema_version')
+    if contract.get('source_point_order') != [
+        'bottom_left',
+        'top_left',
+        'top_right',
+        'bottom_right',
+    ]:
+        raise ArtifactContractError('unsupported road_warp source point order')
+    if contract.get('coordinate_space') != 'normalized_input_frame':
+        raise ArtifactContractError('unsupported road_warp coordinate space')
+    if contract.get('interpolation') != 'bilinear':
+        raise ArtifactContractError('unsupported road_warp interpolation')
+    parameters = _required_mapping(contract, 'parameters', 'road_warp')
+    expected = {
+        'top_y',
+        'bottom_y',
+        'top_left_x',
+        'top_right_x',
+        'bottom_left_x',
+        'bottom_right_x',
+        'bev_width',
+        'bev_height',
+        'dst_left_x',
+        'dst_right_x',
+    }
+    if set(parameters) != expected:
+        raise ArtifactContractError('road_warp parameter keys are incompatible')
+    expected_sha256 = contract.get('sha256')
+    if not isinstance(expected_sha256, str) or not re.fullmatch(
+        r'[0-9a-f]{64}', expected_sha256
+    ):
+        raise ArtifactContractError('road_warp sha256 is invalid')
+    try:
+        canonical = json.dumps(
+            {'schema_version': 1, 'warp': dict(parameters)},
+            sort_keys=True,
+            separators=(',', ':'),
+            allow_nan=False,
+        ).encode('utf-8')
+    except (TypeError, ValueError) as exc:
+        raise ArtifactContractError(
+            'road_warp parameters are not serializable'
+        ) from exc
+    if hashlib.sha256(canonical).hexdigest() != expected_sha256:
+        raise ArtifactContractError('road_warp sha256 mismatch')
+    result = RoadWarpParameters(
+        top_y=_finite_number(parameters, 'top_y'),
+        bottom_y=_finite_number(parameters, 'bottom_y'),
+        top_left_x=_finite_number(parameters, 'top_left_x'),
+        top_right_x=_finite_number(parameters, 'top_right_x'),
+        bottom_left_x=_finite_number(parameters, 'bottom_left_x'),
+        bottom_right_x=_finite_number(parameters, 'bottom_right_x'),
+        bev_width=_positive_integer(parameters, 'bev_width'),
+        bev_height=_positive_integer(parameters, 'bev_height'),
+        dst_left_x=_finite_number(parameters, 'dst_left_x'),
+        dst_right_x=_finite_number(parameters, 'dst_right_x'),
+    )
+    ratios = (
+        result.top_y,
+        result.bottom_y,
+        result.top_left_x,
+        result.top_right_x,
+        result.bottom_left_x,
+        result.bottom_right_x,
+        result.dst_left_x,
+        result.dst_right_x,
+    )
+    if not all(0.0 <= value <= 1.0 for value in ratios):
+        raise ArtifactContractError('road_warp ratios must be in [0,1]')
+    if result.bottom_y - result.top_y < 0.02:
+        raise ArtifactContractError('road_warp vertical range is too small')
+    if result.top_right_x - result.top_left_x < 0.02:
+        raise ArtifactContractError('road_warp top edge is too narrow')
+    if result.bottom_right_x - result.bottom_left_x < 0.02:
+        raise ArtifactContractError('road_warp bottom edge is too narrow')
+    if not 80 <= result.bev_width <= 1920:
+        raise ArtifactContractError('road_warp bev_width is outside limits')
+    if not 60 <= result.bev_height <= 1080:
+        raise ArtifactContractError('road_warp bev_height is outside limits')
+    if not 0.0 <= result.dst_left_x <= 0.49:
+        raise ArtifactContractError('road_warp dst_left_x is outside limits')
+    if not 0.51 <= result.dst_right_x <= 1.0:
+        raise ArtifactContractError('road_warp dst_right_x is outside limits')
+    return result
 
 
 def _verify_checksums(root: Path) -> None:
@@ -216,6 +335,25 @@ def _three_finite_floats(
             f'preprocessing.{key} must contain finite values'
         )
     return result[0], result[1], result[2]
+
+
+def _finite_number(payload: Mapping[str, object], key: str) -> float:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ArtifactContractError(f'road_warp.{key} must be numeric')
+    result = float(value)
+    if not math.isfinite(result):
+        raise ArtifactContractError(f'road_warp.{key} must be finite')
+    return result
+
+
+def _positive_integer(payload: Mapping[str, object], key: str) -> int:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ArtifactContractError(
+            f'road_warp.{key} must be a positive integer'
+        )
+    return value
 
 
 def _validate_relative_path(relative: str) -> None:

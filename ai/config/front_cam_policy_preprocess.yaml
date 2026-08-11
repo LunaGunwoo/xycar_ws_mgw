@@ -1,0 +1,15 @@
+schema_version: 1
+
+# All source coordinates are normalized to the original camera frame.
+# The four source points form the road trapezoid shown by the tuning GUI.
+warp:
+  top_y: 0.605
+  bottom_y: 1.0
+  top_left_x: 0.34
+  top_right_x: 0.66
+  bottom_left_x: 0.0
+  bottom_right_x: 1.0
+  bev_width: 400
+  bev_height: 200
+  dst_left_x: 0.16
+  dst_right_x: 0.84
