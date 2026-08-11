@@ -73,13 +73,12 @@ destination은 marker가 있는 ext4 directory여야 하며 system root, Windows
 ### 현재 T7 `D:\teleop`에서 직접 pull
 
 학습 환경은 WSL2로 고정하며 T7을 C:에 다시 복사하지 않는다. Windows에서
-`D:\teleop`은 WSL의 `/mnt/d/teleop`으로 접근하고, 필요한 session만 내부 ext4
-`datasets/teleop`으로 증분 복사한다. 실제 학습은 `/mnt/d`가 아니라 ext4
-작업본에서 수행한다.
+`D:\teleop`은 WSL의 `/mnt/d/teleop`으로 접근하고, 전체 또는 선별한 session을
+내부 ext4 `datasets/teleop`으로 증분 복사한다. 실제 학습은 `/mnt/d`가 아니라
+ext4 작업본에서 수행한다.
 
-현재 확인된 T7 exFAT volume은 물리 disk는 Healthy지만 filesystem이
-`Warning / Full Repair Needed`다. 중요한 데이터를 먼저 다른 곳에 백업하고,
-Windows의 관리자 PowerShell에서 검사·복구한 뒤 `Healthy / OK`를 확인한다.
+T7 exFAT volume은 사용 전에 `Healthy / OK`인지 확인한다. 다른 상태라면 중요한
+데이터를 먼저 다른 곳에 백업하고 Windows의 관리자 PowerShell에서 검사·복구한다.
 복구 명령은 파일 entry를 변경할 수 있으므로 백업 전에 실행하지 않는다.
 
 ```powershell
@@ -101,8 +100,22 @@ findmnt -T /mnt/d/teleop
 ```
 
 direct 모드의 기본 source는 `/mnt/d/teleop`이다. drive letter가 바뀌면 예를 들어
-`XYCAR_AI_SSD_TELEOP_ROOT=/mnt/e/teleop`으로 덮어쓴다. 인자 없는 direct 명령은
-dry-run이고 `--apply`만 새 파일과 변경 파일을 복사한다. 완료된 gamepad session
+`XYCAR_AI_SSD_TELEOP_ROOT=/mnt/e/teleop`으로 덮어쓴다. SSD의 모든 session을
+metadata 조건 없이 내부 ext4에 보관하려면 `--direct --all`을 사용한다. 기본은
+dry-run이며 `--apply`만 새 파일과 변경 파일을 복사한다. `_recording_*`과 rsync
+partial만 제외하고 WSL-only 파일은 보존한다. `--all`은 삭제를 수행하는
+`--mirror`와 함께 사용할 수 없다.
+
+```bash
+cd /home/xytron/xycar_ws/apps/xycar_ws_mgw
+./scripts/ai/pull_dataset_ssd.sh --direct --all
+./scripts/ai/pull_dataset_ssd.sh --direct --all --apply
+./scripts/ai/pull_dataset_ssd.sh --direct --all --checksum
+./scripts/ai/pull_dataset_ssd.sh --direct --all --checksum --apply
+```
+
+학습 조건에 맞는 session만 작업본에 넣고 싶을 때는 `--all` 없이 실행한다.
+인자 없는 direct 명령은 dry-run이고 `--apply`만 복사한다. 완료된 gamepad session
 중 `max_forward_speed >= 20`만 선택하며 WSL-only 파일과 session은 보존한다.
 
 ```bash

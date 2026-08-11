@@ -6,6 +6,7 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
 XYCAR_APPLY=0
 XYCAR_CHECKSUM=0
 XYCAR_DIRECT=0
+XYCAR_ALL=0
 XYCAR_MIRROR=0
 XYCAR_DIRECT_MIN_FORWARD_SPEED="20.0"
 while (($#)); do
@@ -19,12 +20,17 @@ while (($#)); do
     --direct)
       XYCAR_DIRECT=1
       ;;
+    --all)
+      XYCAR_ALL=1
+      ;;
     --mirror)
       XYCAR_MIRROR=1
       ;;
     -h|--help)
-      printf 'usage: %s [--direct] [--mirror] [--apply] [--checksum]\n' "$0"
+      printf 'usage: %s [--direct] [--all] [--mirror] [--apply] [--checksum]\n' "$0"
       printf 'default: dry-run; --direct reads a mounted D:\\teleop-style SSD source\n'
+      printf '%s\n' \
+        '--direct --all copies every non-active source entry without metadata filtering'
       printf 'direct mode preserves local-only files unless --mirror is specified\n'
       exit 0
       ;;
@@ -37,6 +43,10 @@ done
 
 ((!XYCAR_MIRROR || XYCAR_DIRECT)) ||
   xycar_ai_die "--mirror is available only with --direct"
+((!XYCAR_ALL || XYCAR_DIRECT)) ||
+  xycar_ai_die "--all is available only with --direct"
+((!XYCAR_ALL || !XYCAR_MIRROR)) ||
+  xycar_ai_die "--all cannot be combined with --mirror"
 
 xycar_ai_require_authoring_checkout
 xycar_ai_require_command rsync
@@ -162,6 +172,24 @@ xycar_ai_pull_direct_dataset() {
     xycar_ai_die \
       "local dataset destination must be on ext4: ${destination_filesystem}"
   xycar_ai_verify_local_dataset_marker "${destination_real}"
+
+  if ((XYCAR_ALL)); then
+    printf 'Selecting all non-active content without metadata filtering\n'
+    xycar_ai_build_rsync_args
+    XYCAR_RSYNC_ARGS+=(
+      --exclude="/${XYCAR_AI_LOCAL_DATASET_MARKER_NAME}"
+    )
+    rsync "${XYCAR_RSYNC_ARGS[@]}" \
+      "${source_real}/" \
+      "${destination_real}/"
+    if ((XYCAR_APPLY)); then
+      printf 'Direct SSD all-content pull applied: %s -> %s\n' \
+        "${source_real}" "${destination_real}"
+    else
+      printf 'Direct SSD all-content dry-run complete; rerun with --apply to copy changes.\n'
+    fi
+    return
+  fi
 
   xycar_ai_select_direct_sessions "${source_real}" 0
   local -a source_sessions=("${XYCAR_SELECTED_SESSIONS[@]}")

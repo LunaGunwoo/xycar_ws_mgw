@@ -253,6 +253,8 @@ mkdir -p "${XYCAR_DIRECT_SOURCE}/20260811_020207_001_session"
 : >"${XYCAR_DIRECT_SOURCE}/20260811_020207_001_session/metadata.yaml"
 printf 'partial\n' \
   >"${XYCAR_DIRECT_SOURCE}/20260811_020201_001_session/frame.part"
+printf 'unexpected-source-marker\n' \
+  >"${XYCAR_DIRECT_SOURCE}/${XYCAR_AI_LOCAL_DATASET_MARKER_NAME}"
 
 printf '%s\n' "${XYCAR_AI_LOCAL_DATASET_MARKER_CONTENT}" \
   >"${XYCAR_DIRECT_DESTINATION}/${XYCAR_AI_LOCAL_DATASET_MARKER_NAME}"
@@ -286,9 +288,20 @@ env \
   ! -name "${XYCAR_AI_LOCAL_DATASET_MARKER_NAME}" -print -quit)" ]]
 "${XYCAR_AI_SCRIPT_DIR}/pull_dataset_ssd.sh" --help |
   grep -q -- '--direct'
+"${XYCAR_AI_SCRIPT_DIR}/pull_dataset_ssd.sh" --help |
+  grep -q -- '--all'
 if "${XYCAR_AI_SCRIPT_DIR}/pull_dataset_ssd.sh" --mirror \
   >/dev/null 2>&1; then
   xycar_ai_die "marker-based SSD pull accepted --mirror without --direct"
+fi
+if "${XYCAR_AI_SCRIPT_DIR}/pull_dataset_ssd.sh" --all \
+  >/dev/null 2>&1; then
+  xycar_ai_die "marker-based SSD pull accepted --all without --direct"
+fi
+if "${XYCAR_DIRECT_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/pull_dataset_ssd.sh" --direct --all --mirror \
+  >/dev/null 2>&1; then
+  xycar_ai_die "direct all-content pull accepted destructive mirror mode"
 fi
 if (xycar_ai_validate_external_windows_mount_values 9p /mnt/c) \
   >/dev/null 2>&1; then
@@ -343,6 +356,34 @@ fi
 [[ ! -e "${XYCAR_DIRECT_DESTINATION}/20260811_020207_001_session" ]]
 [[ ! -e \
   "${XYCAR_DIRECT_DESTINATION}/20260811_020201_001_session/frame.part" ]]
+
+XYCAR_DIRECT_ALL_DESTINATION="${XYCAR_TEST_ROOT}/direct-all-local-teleop"
+mkdir -p "${XYCAR_DIRECT_ALL_DESTINATION}"
+printf '%s\n' "${XYCAR_AI_LOCAL_DATASET_MARKER_CONTENT}" \
+  >"${XYCAR_DIRECT_ALL_DESTINATION}/${XYCAR_AI_LOCAL_DATASET_MARKER_NAME}"
+printf 'local-only\n' >"${XYCAR_DIRECT_ALL_DESTINATION}/local-only"
+XYCAR_DIRECT_ALL_ENV=(
+  env
+  XYCAR_AI_ALLOW_ANY_CHECKOUT=1
+  XYCAR_AI_ALLOW_NON_WINDOWS_SOURCE=1
+  XYCAR_AI_SSD_TELEOP_ROOT="${XYCAR_DIRECT_SOURCE}"
+  XYCAR_AI_LOCAL_DATASET_ROOT="${XYCAR_DIRECT_ALL_DESTINATION}"
+)
+"${XYCAR_DIRECT_ALL_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/pull_dataset_ssd.sh" --direct --all >/dev/null
+[[ ! -e "${XYCAR_DIRECT_ALL_DESTINATION}/20260811_020203_001_session" ]]
+"${XYCAR_DIRECT_ALL_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/pull_dataset_ssd.sh" --direct --all --apply >/dev/null
+[[ -d "${XYCAR_DIRECT_ALL_DESTINATION}/20260811_020203_001_session" ]]
+[[ -d "${XYCAR_DIRECT_ALL_DESTINATION}/20260811_020204_001_session" ]]
+[[ -d "${XYCAR_DIRECT_ALL_DESTINATION}/20260811_020205_001_session" ]]
+[[ -f "${XYCAR_DIRECT_ALL_DESTINATION}/20260811_020207_001_session/metadata.yaml" ]]
+[[ ! -e "${XYCAR_DIRECT_ALL_DESTINATION}/_recording_20260811_020206_001" ]]
+[[ ! -e \
+  "${XYCAR_DIRECT_ALL_DESTINATION}/20260811_020201_001_session/frame.part" ]]
+[[ -f "${XYCAR_DIRECT_ALL_DESTINATION}/local-only" ]]
+[[ "$(<"${XYCAR_DIRECT_ALL_DESTINATION}/${XYCAR_AI_LOCAL_DATASET_MARKER_NAME}")" \
+  == "${XYCAR_AI_LOCAL_DATASET_MARKER_CONTENT}" ]]
 
 XYCAR_DIRECT_SOURCE_IMAGE="${XYCAR_DIRECT_SOURCE}/20260811_020201_001_session/Images/1.png"
 XYCAR_DIRECT_DESTINATION_IMAGE="${XYCAR_DIRECT_DESTINATION}/20260811_020201_001_session/Images/1.png"
