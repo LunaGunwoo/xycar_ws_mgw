@@ -59,6 +59,7 @@ class SchedulerConfig:
 @dataclass(frozen=True)
 class TrainingConfig:
     epochs: int
+    early_stopping_patience: int | None
     batch_size: int
     grad_clip: float
     seed: int
@@ -178,6 +179,7 @@ def load_train_config(path: str | Path) -> TrainConfig:
             "deterministic",
         },
         "training",
+        optional={"early_stopping_patience"},
     )
     _expect_keys(
         loss_payload,
@@ -254,6 +256,11 @@ def load_train_config(path: str | Path) -> TrainConfig:
         ),
         training=TrainingConfig(
             epochs=_integer(training_payload, "epochs"),
+            early_stopping_patience=(
+                _integer(training_payload, "early_stopping_patience")
+                if "early_stopping_patience" in training_payload
+                else None
+            ),
             batch_size=_integer(training_payload, "batch_size"),
             grad_clip=_number(training_payload, "grad_clip"),
             seed=_integer(training_payload, "seed"),
@@ -315,6 +322,11 @@ def _validate(config: TrainConfig) -> None:
     training = config.training
     if training.epochs <= 0:
         raise ValueError("training.epochs must be > 0")
+    if (
+        training.early_stopping_patience is not None
+        and training.early_stopping_patience <= 0
+    ):
+        raise ValueError("training.early_stopping_patience must be > 0")
     if training.batch_size <= 0:
         raise ValueError("training.batch_size must be > 0")
     if training.grad_clip < 0:

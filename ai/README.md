@@ -353,6 +353,9 @@ artifacts/runs/front_cam_policy/<run-id>/
 best checkpoint 선택식은 `val_angle_mae + 0.25 * val_speed_mae`다. A/B winner도
 두 `summary.json`의 `best_score`가 더 낮은 run으로 정하고 동률이면 baseline을
 선택한다. test 결과는 winner를 validation으로 고른 뒤 최종 확인에만 사용한다.
+tiny A/B 설정은 validation best score가 5 epochs 연속 개선되지 않으면 조기
+종료한다. `last.pt`에 연속 미개선 횟수를 저장하므로 resume에서도 patience가
+이어지며, `summary.json`에 최대/완료 epoch와 조기 종료 여부를 기록한다.
 metrics에는 train의 실제 flip 비율과 hard-left/left/near-zero/right/hard-right별
 angle MAE와 within-10 accuracy가 포함된다. 실제 차량은 Ryzen 7 7730U CPU-only
 환경이다. epoch 6 baseline의 synthetic memory-frame benchmark는 전처리 포함

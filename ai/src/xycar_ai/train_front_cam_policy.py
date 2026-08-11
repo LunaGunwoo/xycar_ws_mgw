@@ -137,6 +137,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     start_epoch = 1
     best_score = math.inf
     best_epoch = 0
+    epochs_without_improvement = 0
     if resume_payload is not None:
         model.load_state_dict(resume_payload["model_state"])
         optimizer.load_state_dict(resume_payload["optimizer_state"])
@@ -147,6 +148,12 @@ def main(argv: Iterable[str] | None = None) -> int:
         start_epoch = int(resume_payload["epoch"]) + 1
         best_score = float(resume_payload.get("best_score", math.inf))
         best_epoch = int(resume_payload.get("best_epoch", 0))
+        epochs_without_improvement = int(
+            resume_payload.get(
+                "epochs_without_improvement",
+                max(int(resume_payload["epoch"]) - best_epoch, 0),
+            )
+        )
     if start_epoch > config.training.epochs:
         raise ValueError(
             f"resume epoch {start_epoch - 1} already reaches configured "
@@ -204,20 +211,31 @@ def main(argv: Iterable[str] | None = None) -> int:
         )
         current_lr = float(optimizer.param_groups[0]["lr"])
         scheduler.step()
+        current_score = selection_score(val_metrics)
+        is_best = current_score < best_score
+        if is_best:
+            best_score = current_score
+            best_epoch = epoch
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+        should_stop = early_stopping_triggered(
+            epochs_without_improvement,
+            config.training.early_stopping_patience,
+        )
         row: dict[str, float | int | str] = {
             "epoch": epoch,
             "lr": current_lr,
+            "val_selection_score": current_score,
+            "best_score": best_score,
+            "epochs_without_improvement": epochs_without_improvement,
+            "early_stopping_triggered": int(should_stop),
             **train_metrics,
             **val_metrics,
         }
         metrics_rows.append(row)
         write_metrics_csv(metrics_path, metrics_rows)
 
-        current_score = selection_score(val_metrics)
-        is_best = current_score < best_score
-        if is_best:
-            best_score = current_score
-            best_epoch = epoch
         checkpoint = checkpoint_payload(
             epoch=epoch,
             model=model,
@@ -232,11 +250,19 @@ def main(argv: Iterable[str] | None = None) -> int:
             source_state=source_state,
             best_score=best_score,
             best_epoch=best_epoch,
+            epochs_without_improvement=epochs_without_improvement,
             metrics=row,
         )
         atomic_torch_save(checkpoint, run_dir / "last.pt")
         if is_best:
             atomic_torch_save(checkpoint, run_dir / "best.pt")
+        if should_stop:
+            print(
+                "early_stopping "
+                f"epoch={epoch} patience={config.training.early_stopping_patience} "
+                f"best_epoch={best_epoch} best_score={best_score:.4f}"
+            )
+            break
 
     best_path = run_dir / "best.pt"
     if not best_path.is_file():
@@ -266,6 +292,12 @@ def main(argv: Iterable[str] | None = None) -> int:
         "last_checkpoint": str(run_dir / "last.pt"),
         "best_epoch": best_epoch,
         "best_score": best_score,
+        "completed_epochs": int(metrics_rows[-1]["epoch"]),
+        "max_epochs": config.training.epochs,
+        "early_stopping_patience": config.training.early_stopping_patience,
+        "stopped_early": bool(
+            metrics_rows[-1].get("early_stopping_triggered", 0)
+        ),
         "device": str(device),
         "amp": amp_enabled,
         "source": source_state,
@@ -445,6 +477,7 @@ def checkpoint_payload(
     source_state: dict[str, object],
     best_score: float,
     best_epoch: int,
+    epochs_without_improvement: int,
     metrics: dict[str, object],
 ) -> dict[str, object]:
     return {
@@ -464,6 +497,7 @@ def checkpoint_payload(
         "source": source_state,
         "best_score": best_score,
         "best_epoch": best_epoch,
+        "epochs_without_improvement": epochs_without_improvement,
         "metrics": metrics,
     }
 
@@ -535,6 +569,20 @@ def validate_resume_payload(
     ):
         raise ValueError(
             "resume checkpoint horizontal flip probability differs from the config"
+        )
+    checkpoint_training = (
+        checkpoint_config.get("training")
+        if isinstance(checkpoint_config, dict)
+        else None
+    )
+    checkpoint_patience = (
+        checkpoint_training.get("early_stopping_patience")
+        if isinstance(checkpoint_training, dict)
+        else None
+    )
+    if checkpoint_patience != config.training.early_stopping_patience:
+        raise ValueError(
+            "resume checkpoint early stopping patience differs from the config"
         )
     required = {
         "epoch",
@@ -651,6 +699,13 @@ def resolve_device(requested: str) -> torch.device:
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable")
     return device
+
+
+def early_stopping_triggered(
+    epochs_without_improvement: int,
+    patience: int | None,
+) -> bool:
+    return patience is not None and epochs_without_improvement >= patience
 
 
 def cosine_lr_factor(epochs: int, warmup_epochs: int):

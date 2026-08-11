@@ -12,6 +12,7 @@ from conftest import write_session, write_split_manifest
 from xycar_ai.config import load_train_config
 from xycar_ai.train_front_cam_policy import (
     build_preprocessing_contract,
+    early_stopping_triggered,
     load_configured_road_warp,
     main,
     validate_resume_payload,
@@ -31,9 +32,17 @@ def test_ab_configs_only_change_flip_and_run_name():
     assert baseline["augmentation"]["horizontal_flip_probability"] == 0.0
     assert candidate["output"]["run_name"] == "hflip_p05_seed20260810"
     assert baseline["output"]["run_name"] == "baseline_seed20260810"
+    assert candidate["training"]["early_stopping_patience"] == 5
+    assert baseline["training"]["early_stopping_patience"] == 5
     candidate["augmentation"]["horizontal_flip_probability"] = 0.0
     candidate["output"]["run_name"] = "baseline_seed20260810"
     assert candidate == baseline
+
+
+def test_early_stopping_patience_counts_consecutive_non_improvements():
+    assert not early_stopping_triggered(100, None)
+    assert not early_stopping_triggered(4, 5)
+    assert early_stopping_triggered(5, 5)
 
 
 def test_small_config_uses_minimum_speed_and_flip():

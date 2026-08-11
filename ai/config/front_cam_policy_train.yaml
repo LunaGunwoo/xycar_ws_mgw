@@ -31,6 +31,7 @@ scheduler:
 
 training:
   epochs: 20
+  early_stopping_patience: 5
   batch_size: 128
   grad_clip: 1.0
   seed: 20260810
