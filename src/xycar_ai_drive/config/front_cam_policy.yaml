@@ -26,6 +26,13 @@ front_cam_policy:
     graph_check_period_sec: 0.5
     stop_publish_count: 5
 
+    # Keep local/cpu for the legacy vehicle. The Jetson wrapper overrides
+    # these with unix/cuda and refuses to fall back when the server is absent.
+    inference_backend: local
+    inference_device: cpu
+    inference_socket_path: /run/user/1000/xycar-ai/policy.sock
+    inference_rpc_timeout_sec: 0.20
+
     # Ryzen 7 7730U vehicle settings validated by the standalone benchmark.
     torch_num_threads: 8
     warmup_count: 3

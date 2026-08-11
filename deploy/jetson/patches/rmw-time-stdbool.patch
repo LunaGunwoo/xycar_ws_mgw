@@ -1,0 +1,6 @@
+diff --git a/rmw/include/rmw/time.h b/rmw/include/rmw/time.h
+--- a/rmw/include/rmw/time.h
++++ b/rmw/include/rmw/time.h
+@@ -21,1 +21,2 @@
++#include <stdbool.h>
+ #include <stdint.h>

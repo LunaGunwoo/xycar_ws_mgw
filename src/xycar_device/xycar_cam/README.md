@@ -24,7 +24,8 @@ export ROS_NAMESPACE=xycar
 ros2 launch xycar_cam xycar_cam.launch.py
 ```
 
-기본 `usb_cam` parameter로 640x480, 30 Hz, `rgb8` `/image_raw`를 발행한다.
+Humble `usb_cam` package의 `params.yaml`/`params_1.yaml` layout을 모두 지원하고,
+udev alias `/dev/videoCAM`을 사용해 640x480, 30 Hz, `rgb8` `/image_raw`를 발행한다.
 publisher plugin은 `image_transport/raw`만 활성화한다. RGB frame을 depth 전용
 `compressedDepth` plugin으로 보내면서 발생하는 반복 compression 오류를 막고,
 recorder가 사용하는 raw topic 계약을 유지하기 위한 설정이다.

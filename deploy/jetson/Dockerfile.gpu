@@ -1,0 +1,14 @@
+ARG NVIDIA_PYTORCH_IMAGE
+FROM ${NVIDIA_PYTORCH_IMAGE}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-opencv \
+    python3-yaml \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY xycar_ai_drive /opt/xycar_ai_drive/xycar_ai_drive
+ENV PYTHONPATH=/opt/xycar_ai_drive
+
+RUN python3 -c "import cv2, numpy, torch, yaml; print(torch.__version__)"
+
+ENTRYPOINT ["python3", "-m", "xycar_ai_drive.policy_ipc"]

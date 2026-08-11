@@ -25,6 +25,7 @@ from xycar_ai_drive.control import (
     ToggleDriveGate,
     is_fresh,
 )
+from xycar_ai_drive.policy_ipc import UnixSocketPolicyClient
 from xycar_ai_drive.policy_runtime import TorchScriptPolicy
 
 PolicyFactory = Callable[..., object]
@@ -88,11 +89,7 @@ class FrontCamPolicyNode(Node):
         self.publish_stop_burst()
         self._publish_enabled(False)
 
-        self._policy = policy_factory(
-            artifact_dir=self.artifact_dir,
-            torch_num_threads=self.torch_num_threads,
-            warmup_count=self.warmup_count,
-        )
+        self._policy = self._create_policy(policy_factory)
         self._worker = threading.Thread(
             target=self._inference_worker,
             name='front-cam-policy-inference',
@@ -125,6 +122,8 @@ class FrontCamPolicyNode(Node):
             f'artifact={self.artifact_dir}, camera={self.camera_topic}, '
             f'joy={self.joy_topic}, motor={self.motor_topic}, '
             f'publish_rate={self.publish_rate_hz:g} Hz, '
+            f'inference_backend={self.inference_backend}, '
+            f'inference_device={self.inference_device}, '
             f'A=buttons[{self.a_button_index}], '
             f'allow_motion={self.allow_motion}'
         )
@@ -146,6 +145,13 @@ class FrontCamPolicyNode(Node):
         self.declare_parameter('inference_timeout_sec', 0.25)
         self.declare_parameter('graph_check_period_sec', 0.5)
         self.declare_parameter('stop_publish_count', 5)
+        self.declare_parameter('inference_backend', 'local')
+        self.declare_parameter('inference_device', 'cpu')
+        self.declare_parameter(
+            'inference_socket_path',
+            '/run/user/1000/xycar-ai/policy.sock',
+        )
+        self.declare_parameter('inference_rpc_timeout_sec', 0.20)
         self.declare_parameter('torch_num_threads', 8)
         self.declare_parameter('warmup_count', 3)
 
@@ -177,6 +183,18 @@ class FrontCamPolicyNode(Node):
         self.stop_publish_count = int(
             self.get_parameter('stop_publish_count').value
         )
+        self.inference_backend = str(
+            self.get_parameter('inference_backend').value
+        )
+        self.inference_device = str(
+            self.get_parameter('inference_device').value
+        )
+        self.inference_socket_path = str(
+            self.get_parameter('inference_socket_path').value
+        )
+        self.inference_rpc_timeout_sec = float(
+            self.get_parameter('inference_rpc_timeout_sec').value
+        )
         self.torch_num_threads = int(
             self.get_parameter('torch_num_threads').value
         )
@@ -190,6 +208,7 @@ class FrontCamPolicyNode(Node):
             ('motor_topic', self.motor_topic),
             ('prediction_topic', self.prediction_topic),
             ('enabled_topic', self.enabled_topic),
+            ('inference_socket_path', self.inference_socket_path),
         ):
             if not value:
                 raise ValueError(f'{label} must not be empty')
@@ -199,6 +218,7 @@ class FrontCamPolicyNode(Node):
             ('publish_rate_hz', self.publish_rate_hz),
             ('joy_timeout_sec', self.joy_timeout_sec),
             ('inference_timeout_sec', self.inference_timeout_sec),
+            ('inference_rpc_timeout_sec', self.inference_rpc_timeout_sec),
             ('graph_check_period_sec', self.graph_check_period_sec),
         ):
             if not np.isfinite(value) or value <= 0.0:
@@ -209,6 +229,37 @@ class FrontCamPolicyNode(Node):
             raise ValueError('torch_num_threads must be positive')
         if self.warmup_count < 0:
             raise ValueError('warmup_count must be non-negative')
+        if self.inference_backend not in {'local', 'unix'}:
+            raise ValueError('inference_backend must be local or unix')
+        if self.inference_device not in {'cpu', 'cuda'}:
+            raise ValueError('inference_device must be cpu or cuda')
+        if (
+            self.inference_backend == 'local'
+            and self.inference_device != 'cpu'
+        ):
+            raise ValueError('local inference currently requires cpu')
+        if (
+            self.inference_backend == 'unix'
+            and self.inference_rpc_timeout_sec > self.inference_timeout_sec
+        ):
+            raise ValueError(
+                'inference_rpc_timeout_sec must not exceed '
+                'inference_timeout_sec'
+            )
+
+    def _create_policy(self, policy_factory: PolicyFactory):
+        if self.inference_backend == 'unix':
+            return UnixSocketPolicyClient(
+                artifact_dir=self.artifact_dir,
+                socket_path=self.inference_socket_path,
+                timeout_sec=self.inference_rpc_timeout_sec,
+                required_device=self.inference_device,
+            )
+        return policy_factory(
+            artifact_dir=self.artifact_dir,
+            torch_num_threads=self.torch_num_threads,
+            warmup_count=self.warmup_count,
+        )
 
     def _on_joy(self, message: Joy) -> None:
         now = time.monotonic()
@@ -425,6 +476,9 @@ class FrontCamPolicyNode(Node):
         self._publish_enabled(False)
         if self._worker.is_alive():
             self._worker.join(timeout=2.0)
+        close_policy = getattr(self._policy, 'close', None)
+        if close_policy is not None:
+            close_policy()
         self.publish_stop_burst()
 
 

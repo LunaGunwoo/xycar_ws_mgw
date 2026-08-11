@@ -1,0 +1,72 @@
+ARG ROS_NOETIC_IMAGE
+FROM ${ROS_NOETIC_IMAGE}
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG ROS2_REPOS_URL
+ARG ROS2_REPOS_SHA256
+ARG RMW_HUMBLE_COMMIT
+ARG ROS1_BRIDGE_COMMIT
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    curl \
+    git \
+    locales \
+    python3-colcon-common-extensions \
+    python3-rosdep \
+    python3-vcstool \
+    && locale-gen en_US.UTF-8 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
+
+RUN curl -fsSL "${ROS2_REPOS_URL}" -o /tmp/ros2.repos \
+    && echo "${ROS2_REPOS_SHA256}  /tmp/ros2.repos" | sha256sum -c - \
+    && mkdir -p /opt/ros1_bridge_ws/src \
+    && vcs import /opt/ros1_bridge_ws/src < /tmp/ros2.repos \
+    && rm /tmp/ros2.repos
+
+COPY patches/rmw-time-stdbool.patch /tmp/rmw-time-stdbool.patch
+RUN test "$(git -C /opt/ros1_bridge_ws/src/ros2/rmw rev-parse HEAD)" \
+      = "${RMW_HUMBLE_COMMIT}" \
+    && git -C /opt/ros1_bridge_ws/src/ros2/rmw \
+       apply --check /tmp/rmw-time-stdbool.patch \
+    && git -C /opt/ros1_bridge_ws/src/ros2/rmw \
+       apply /tmp/rmw-time-stdbool.patch \
+    && rm /tmp/rmw-time-stdbool.patch
+
+RUN git clone https://github.com/ros2/ros1_bridge.git \
+      /opt/ros1_bridge_ws/src/ros1_bridge \
+    && cd /opt/ros1_bridge_ws/src/ros1_bridge \
+    && git checkout "${ROS1_BRIDGE_COMMIT}"
+
+RUN source /opt/ros/noetic/setup.bash \
+    && cd /opt/ros1_bridge_ws \
+    && mapfile -t bridge_paths \
+       < <(colcon list --base-paths src \
+            --packages-up-to ros1_bridge --paths-only) \
+    && rosdep update \
+    && apt-get update \
+    && rosdep install --from-paths "${bridge_paths[@]}" \
+       --ignore-src --rosdistro humble -r -y \
+       --dependency-types=build \
+       --dependency-types=buildtool \
+       --dependency-types=build_export \
+       --dependency-types=buildtool_export \
+       --dependency-types=exec \
+       --skip-keys "fastcdr rti-connext-dds-6.0.1 urdfdom_headers" \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN source /opt/ros/noetic/setup.bash \
+    && cd /opt/ros1_bridge_ws \
+    && CMAKE_BUILD_PARALLEL_LEVEL=4 colcon build --merge-install \
+       --install-base /opt/ros1_bridge \
+       --packages-up-to ros1_bridge \
+       --parallel-workers 4 \
+       --cmake-args -DBUILD_TESTING=OFF
+
+COPY bridge_entrypoint.sh /opt/xycar/bridge_entrypoint.sh
+ENTRYPOINT ["/opt/xycar/bridge_entrypoint.sh"]
+CMD ["/opt/ros1_bridge/lib/ros1_bridge/dynamic_bridge"]

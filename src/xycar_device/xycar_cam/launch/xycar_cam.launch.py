@@ -24,12 +24,15 @@ def generate_launch_description():
 
     usb_cam_dir = get_package_share_directory('usb_cam')
 
-    # get path to params file
-    params_path = os.path.join(
-        usb_cam_dir,
-        'config',
-        'params.yaml'
-    )
+    # usb_cam package revisions in Humble use either params.yaml or
+    # params_1.yaml.  Keep the vehicle launch compatible with both layouts.
+    params_path = next((
+        os.path.join(usb_cam_dir, 'config', filename)
+        for filename in ('params.yaml', 'params_1.yaml')
+        if os.path.isfile(os.path.join(usb_cam_dir, 'config', filename))
+    ), None)
+    if params_path is None:
+        raise RuntimeError('usb_cam parameter file was not found')
 
     print(params_path)
 
@@ -41,6 +44,7 @@ def generate_launch_description():
         parameters=[
             params_path,
             {
+                'video_device': '/dev/videoCAM',
                 'image_raw.enable_pub_plugins': [
                     'image_transport/raw',
                 ],

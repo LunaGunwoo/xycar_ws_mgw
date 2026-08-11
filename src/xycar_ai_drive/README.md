@@ -116,3 +116,41 @@ ros2 run xycar_ai_drive front_cam_policy --ros-args \
 
 다른 versioned artifact를 선택할 때만 `artifact_id:=<id>`를 지정한다. 종료는
 `Ctrl+C`이며 node는 종료 경로에서 정지 command를 반복 발행한다.
+
+## Jetson CUDA inference
+
+기존 차량의 기본 계약은 `inference_backend=local`, `inference_device=cpu`다.
+Jetson에서는 ROS 2 Humble node를 host에 유지하고, NVIDIA PyTorch container의
+CUDA policy server와 권한 `0600` Unix socket으로 RGB frame과 prediction을
+교환한다. 새 parameter 계약은 다음과 같다.
+
+- `inference_backend`: `local` 또는 `unix`
+- `inference_device`: `cpu` 또는 `cuda`; server handshake와 반드시 일치
+- `inference_socket_path`: policy server Unix socket
+- `inference_rpc_timeout_sec`: 기본 0.20초이며 inference timeout보다 클 수 없음
+
+artifact checksum·ID 또는 device가 다르거나 socket이 끊기고 응답이 timeout되면
+CPU로 fallback하지 않는다. node는 inference failure로 처리해 motion OFF와
+`[0,0]`을 발행한다. image build와 host 설치는
+`deploy/jetson/README.md`를 따른다.
+
+container image의 entrypoint와 같은 server를 직접 진단할 때의 executable은
+아래와 같다. 실제 Jetson 운용은 device와 mount를 제한하는 wrapper를 사용한다.
+
+```bash
+ros2 run xycar_ai_drive front_cam_policy_gpu_server -- \
+  --artifact-dir /artifacts/<artifact-id> \
+  --socket-path /run/user/1000/xycar-ai/policy.sock \
+  --device cuda
+```
+
+아래 wrapper는 camera, gamepad와 motor publisher를 시작할 수 있으므로 매 실행
+직전 실차 승인이 필요하다. 바퀴 지지, 모터 전원 차단 수단, `Ctrl+C` 종료와
+경쟁 publisher 부재를 먼저 확인한다.
+
+```bash
+cd /home/xytron/xycar_ws_mgw
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+xycar-ai-gpu
+```

@@ -1,0 +1,23 @@
+ARG ROS_NOETIC_IMAGE
+FROM ${ROS_NOETIC_IMAGE}
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-catkin-tools \
+    python3-serial \
+    python-is-python3 \
+    ros-noetic-ackermann-msgs \
+    ros-noetic-nodelet \
+    ros-noetic-pluginlib \
+    ros-noetic-serial \
+    ros-noetic-tf \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY ros1_safety /opt/xycar_safety_ws/src/xycar_motor_safety
+RUN rm /opt/xycar_safety_ws/src/xycar_motor_safety/COLCON_IGNORE \
+    && source /opt/ros/noetic/setup.bash \
+    && cd /opt/xycar_safety_ws \
+    && catkin_make -DCMAKE_BUILD_TYPE=Release
+
+CMD ["bash"]

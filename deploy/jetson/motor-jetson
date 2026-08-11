@@ -1,0 +1,89 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_PATH=$(readlink -f -- "${BASH_SOURCE[0]}")
+SCRIPT_DIR=$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd)
+source "${SCRIPT_DIR}/images.lock.env"
+
+MOTOR_CONTAINER=ros1_container
+BRIDGE_CONTAINER=ros1_bridge_container
+NOETIC_WS=/home/xytron/noetic_ws
+
+cleanup() {
+    set +e
+    if docker ps --format '{{.Names}}' | grep -Fxq "${MOTOR_CONTAINER}"; then
+        for _ in 1 2 3 4 5; do
+            docker exec "${MOTOR_CONTAINER}" bash -lc \
+                "source /opt/ros/noetic/setup.bash; rostopic pub -1 /xycar_motor std_msgs/Float32MultiArray 'data: [0.0, 0.0]'" \
+                >/dev/null 2>&1
+            sleep 0.05
+        done
+    fi
+    docker stop --time 3 "${BRIDGE_CONTAINER}" >/dev/null 2>&1
+    docker stop --time 3 "${MOTOR_CONTAINER}" >/dev/null 2>&1
+    docker rm -f "${BRIDGE_CONTAINER}" >/dev/null 2>&1
+    docker rm -f "${MOTOR_CONTAINER}" >/dev/null 2>&1
+}
+trap cleanup EXIT INT TERM
+
+if [ ! -L /dev/ttyMOTOR ] && [ ! -c /dev/ttyMOTOR ]; then
+    echo "[ERROR] /dev/ttyMOTOR 장치를 찾을 수 없습니다." >&2
+    exit 1
+fi
+motor_device=$(readlink -f /dev/ttyMOTOR)
+if [ ! -c "${motor_device}" ]; then
+    echo "[ERROR] ttyMOTOR 대상이 character device가 아닙니다." >&2
+    exit 1
+fi
+for container in "${MOTOR_CONTAINER}" "${BRIDGE_CONTAINER}"; do
+    if docker ps -a --format '{{.Names}}' | grep -Fxq "${container}"; then
+        echo "[ERROR] 기존 ${container}를 먼저 정상 종료하세요." >&2
+        exit 1
+    fi
+done
+
+dialout_gid=$(getent group dialout | cut -d: -f3)
+docker run --detach \
+    --name "${MOTOR_CONTAINER}" \
+    --network host \
+    --device "${motor_device}:/dev/ttyMOTOR" \
+    --group-add "${dialout_gid}" \
+    --env ROS_MASTER_URI=http://127.0.0.1:11311 \
+    --volume "${NOETIC_WS}:/root/noetic_ws:ro" \
+    "${MOTOR_IMAGE}" \
+    bash -lc 'source /opt/ros/noetic/setup.bash; source /root/noetic_ws/devel/setup.bash; source /opt/xycar_safety_ws/devel/setup.bash --extend; exec roslaunch xycar_motor_safety motor.launch'
+
+motor_ready=false
+for _ in $(seq 1 30); do
+    if docker exec "${MOTOR_CONTAINER}" bash -lc \
+        'source /opt/ros/noetic/setup.bash; nodes=$(rosnode list); grep -qx /xycar_motor_watchdog <<<"${nodes}" && grep -qx /xycar_motor <<<"${nodes}" && grep -qx /vesc_driver <<<"${nodes}"' \
+        >/dev/null 2>&1; then
+        motor_ready=true
+        break
+    fi
+    sleep 0.2
+done
+if [ "${motor_ready}" != true ]; then
+    docker logs "${MOTOR_CONTAINER}" >&2 || true
+    exit 1
+fi
+
+docker run --detach \
+    --name "${BRIDGE_CONTAINER}" \
+    --network host \
+    --env ROS_MASTER_URI=http://127.0.0.1:11311 \
+    --env ROS_DOMAIN_ID=7 \
+    --env RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
+    --env FASTDDS_BUILTIN_TRANSPORTS=UDPv4 \
+    "${BRIDGE_IMAGE}" \
+    /opt/ros1_bridge/lib/ros1_bridge/parameter_bridge \
+    /ros1_bridge/topics
+
+sleep 1
+if ! docker ps --format '{{.Names}}' | grep -Fxq "${BRIDGE_CONTAINER}"; then
+    docker logs "${BRIDGE_CONTAINER}" >&2 || true
+    exit 1
+fi
+
+echo "모터 bridge가 시작되었습니다. 종료하려면 Ctrl+C를 누르세요."
+docker logs --follow "${MOTOR_CONTAINER}"

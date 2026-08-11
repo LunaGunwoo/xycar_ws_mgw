@@ -38,6 +38,10 @@ setup(
                 'front_cam_policy = '
                 'xycar_ai_drive.front_cam_policy_node:main'
             ),
+            (
+                'front_cam_policy_gpu_server = '
+                'xycar_ai_drive.policy_ipc:main'
+            ),
         ],
     },
 )

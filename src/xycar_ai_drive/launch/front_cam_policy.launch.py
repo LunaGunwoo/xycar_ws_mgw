@@ -21,6 +21,12 @@ def generate_launch_description():
     use_camera = LaunchConfiguration('use_camera')
     use_gamepad = LaunchConfiguration('use_gamepad')
     allow_motion = LaunchConfiguration('allow_motion')
+    inference_backend = LaunchConfiguration('inference_backend')
+    inference_device = LaunchConfiguration('inference_device')
+    inference_socket_path = LaunchConfiguration('inference_socket_path')
+    inference_rpc_timeout_sec = LaunchConfiguration(
+        'inference_rpc_timeout_sec'
+    )
     device_id = LaunchConfiguration('device_id')
     camera_share = get_package_share_directory('xycar_cam')
 
@@ -67,6 +73,26 @@ def generate_launch_description():
                 default_value='0',
                 description='SDL game-controller device index.',
             ),
+            DeclareLaunchArgument(
+                'inference_backend',
+                default_value='local',
+                description='Policy backend: local or unix.',
+            ),
+            DeclareLaunchArgument(
+                'inference_device',
+                default_value='cpu',
+                description='Required policy device: cpu or cuda.',
+            ),
+            DeclareLaunchArgument(
+                'inference_socket_path',
+                default_value='/run/user/1000/xycar-ai/policy.sock',
+                description='Unix socket for the isolated policy server.',
+            ),
+            DeclareLaunchArgument(
+                'inference_rpc_timeout_sec',
+                default_value='0.20',
+                description='Fail-closed policy RPC timeout.',
+            ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
                     os.path.join(
@@ -110,6 +136,13 @@ def generate_launch_description():
                         'allow_motion': ParameterValue(
                             allow_motion,
                             value_type=bool,
+                        ),
+                        'inference_backend': inference_backend,
+                        'inference_device': inference_device,
+                        'inference_socket_path': inference_socket_path,
+                        'inference_rpc_timeout_sec': ParameterValue(
+                            inference_rpc_timeout_sec,
+                            value_type=float,
                         ),
                     },
                 ],
