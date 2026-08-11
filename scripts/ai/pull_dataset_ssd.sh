@@ -15,7 +15,7 @@ while (($#)); do
       ;;
     -h|--help)
       printf 'usage: %s [--apply] [--checksum]\n' "$0"
-      printf 'default: dry-run; --apply copies vehicle data into the local AI dataset\n'
+      printf 'default: dry-run; --apply pulls SSD data into the local AI dataset\n'
       exit 0
       ;;
     *)
@@ -27,13 +27,15 @@ done
 
 xycar_ai_require_authoring_checkout
 xycar_ai_require_command rsync
-xycar_ai_require_command ssh
-xycar_ai_validate_ssh_target "${XYCAR_AI_VEHICLE_SSH}" "vehicle SSH target"
-xycar_ai_validate_absolute_path \
-  "${XYCAR_AI_VEHICLE_DATASET_ROOT}" "vehicle dataset root"
+xycar_ai_require_shared_dataset_root
+xycar_ai_require_shared_mount
+xycar_ai_verify_shared_marker
 xycar_ai_validate_absolute_path \
   "${XYCAR_AI_LOCAL_DATASET_ROOT}" "local dataset root"
 
+XYCAR_SHARED_TELEOP="${XYCAR_AI_SHARED_DATASET_ROOT}/teleop"
+[[ -d "${XYCAR_SHARED_TELEOP}" ]] ||
+  xycar_ai_die "shared teleop directory is missing: ${XYCAR_SHARED_TELEOP}"
 if ((XYCAR_APPLY)); then
   mkdir -p "${XYCAR_AI_LOCAL_DATASET_ROOT}"
 elif [[ ! -d "${XYCAR_AI_LOCAL_DATASET_ROOT}" ]]; then
@@ -42,13 +44,14 @@ elif [[ ! -d "${XYCAR_AI_LOCAL_DATASET_ROOT}" ]]; then
 fi
 
 XYCAR_RSYNC_ARGS=(
-  -a
+  -rt
+  --modify-window=1
+  --omit-dir-times
   --human-readable
   --itemize-changes
   --info=progress2
   --partial
   --partial-dir=.rsync-partial
-  --protect-args
   --filter="merge ${XYCAR_AI_SCRIPT_DIR}/dataset-rsync-filter.rules"
 )
 if ((!XYCAR_APPLY)); then
@@ -59,15 +62,12 @@ if ((XYCAR_CHECKSUM)); then
 fi
 
 rsync "${XYCAR_RSYNC_ARGS[@]}" \
-  -e 'ssh -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=2' \
-  "${XYCAR_AI_VEHICLE_SSH}:${XYCAR_AI_VEHICLE_DATASET_ROOT}/" \
+  "${XYCAR_SHARED_TELEOP}/" \
   "${XYCAR_AI_LOCAL_DATASET_ROOT}/"
 
 if ((XYCAR_APPLY)); then
-  printf 'Dataset sync applied: %s:%s -> %s\n' \
-    "${XYCAR_AI_VEHICLE_SSH}" \
-    "${XYCAR_AI_VEHICLE_DATASET_ROOT}" \
-    "${XYCAR_AI_LOCAL_DATASET_ROOT}"
+  printf 'Dataset pull applied: %s -> %s\n' \
+    "${XYCAR_SHARED_TELEOP}" "${XYCAR_AI_LOCAL_DATASET_ROOT}"
 else
-  printf 'Dataset dry-run complete; rerun with --apply to copy changes.\n'
+  printf 'Dataset pull dry-run complete; rerun with --apply to copy changes.\n'
 fi

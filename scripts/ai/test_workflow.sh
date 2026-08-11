@@ -6,6 +6,10 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
 xycar_ai_require_command mktemp
 xycar_ai_require_command mkfifo
 xycar_ai_require_command rsync
+[[ "${XYCAR_AI_DEFAULT_VEHICLE_SSH}" == "xytron@xycar" ]] ||
+  xycar_ai_die "unexpected default vehicle Tailscale SSH target"
+xycar_ai_validate_ssh_target \
+  "${XYCAR_AI_DEFAULT_VEHICLE_SSH}" "default vehicle SSH target"
 
 XYCAR_TEST_ROOT="$(mktemp -d)"
 xycar_ai_cleanup_test() {
@@ -17,66 +21,84 @@ xycar_ai_cleanup_test() {
 trap xycar_ai_cleanup_test EXIT
 
 mkdir -p \
-  "${XYCAR_TEST_ROOT}/code-source/.venv" \
-  "${XYCAR_TEST_ROOT}/code-source/datasets" \
-  "${XYCAR_TEST_ROOT}/code-source/artifacts" \
-  "${XYCAR_TEST_ROOT}/code-destination/.venv" \
-  "${XYCAR_TEST_ROOT}/code-destination/datasets" \
-  "${XYCAR_TEST_ROOT}/code-destination/artifacts"
-printf 'new\n' >"${XYCAR_TEST_ROOT}/code-source/current.txt"
-printf 'source-venv\n' >"${XYCAR_TEST_ROOT}/code-source/.venv/ignore"
-printf 'source-dataset\n' >"${XYCAR_TEST_ROOT}/code-source/datasets/ignore"
-printf 'source-artifact\n' >"${XYCAR_TEST_ROOT}/code-source/artifacts/ignore"
-printf 'old\n' >"${XYCAR_TEST_ROOT}/code-destination/stale.txt"
-printf 'venv\n' >"${XYCAR_TEST_ROOT}/code-destination/.venv/keep"
-printf 'dataset\n' >"${XYCAR_TEST_ROOT}/code-destination/datasets/keep"
-printf 'artifact\n' >"${XYCAR_TEST_ROOT}/code-destination/artifacts/keep"
-
-rsync -a --delete \
-  --filter="merge ${XYCAR_AI_SCRIPT_DIR}/code-rsync-filter.rules" \
-  "${XYCAR_TEST_ROOT}/code-source/" \
-  "${XYCAR_TEST_ROOT}/code-destination/"
-
-[[ -f "${XYCAR_TEST_ROOT}/code-destination/current.txt" ]]
-[[ ! -e "${XYCAR_TEST_ROOT}/code-destination/stale.txt" ]]
-[[ -f "${XYCAR_TEST_ROOT}/code-destination/.venv/keep" ]]
-[[ -f "${XYCAR_TEST_ROOT}/code-destination/datasets/keep" ]]
-[[ -f "${XYCAR_TEST_ROOT}/code-destination/artifacts/keep" ]]
-[[ ! -e "${XYCAR_TEST_ROOT}/code-destination/.venv/ignore" ]]
-[[ ! -e "${XYCAR_TEST_ROOT}/code-destination/datasets/ignore" ]]
-[[ ! -e "${XYCAR_TEST_ROOT}/code-destination/artifacts/ignore" ]]
-
-mkdir -p \
   "${XYCAR_TEST_ROOT}/dataset-source/20260724_010101_001_session" \
   "${XYCAR_TEST_ROOT}/dataset-source/20260724_010102_001_session_2" \
   "${XYCAR_TEST_ROOT}/dataset-source/20260724_010103_001_incomplete" \
-  "${XYCAR_TEST_ROOT}/dataset-source/_recording_20260724_010104_001" \
-  "${XYCAR_TEST_ROOT}/dataset-destination"
+  "${XYCAR_TEST_ROOT}/dataset-source/_recording_20260724_010104_001"
 for directory in "${XYCAR_TEST_ROOT}"/dataset-source/*; do
   printf 'sample\n' >"${directory}/samples.csv"
 done
+printf 'partial\n' \
+  >"${XYCAR_TEST_ROOT}/dataset-source/20260724_010101_001_session/frame.part"
 
-rsync -a \
-  --filter="merge ${XYCAR_AI_SCRIPT_DIR}/dataset-rsync-filter.rules" \
-  "${XYCAR_TEST_ROOT}/dataset-source/" \
-  "${XYCAR_TEST_ROOT}/dataset-destination/"
+XYCAR_TEST_ENV=(
+  env
+  XYCAR_AI_ALLOW_ANY_CHECKOUT=1
+  XYCAR_AI_ALLOW_ROOT_FILESYSTEM_SHARED=1
+  XYCAR_AI_LOCAL_DATASET_ROOT="${XYCAR_TEST_ROOT}/dataset-source"
+  XYCAR_AI_SHARED_DATASET_ROOT="${XYCAR_TEST_ROOT}/shared-dataset"
+)
 
-[[ -d "${XYCAR_TEST_ROOT}/dataset-destination/20260724_010101_001_session" ]]
-[[ -d "${XYCAR_TEST_ROOT}/dataset-destination/20260724_010102_001_session_2" ]]
-[[ -d "${XYCAR_TEST_ROOT}/dataset-destination/20260724_010103_001_incomplete" ]]
-[[ ! -e "${XYCAR_TEST_ROOT}/dataset-destination/_recording_20260724_010104_001" ]]
+if "${XYCAR_TEST_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/publish_dataset_ssd.sh" --apply \
+  >/dev/null 2>&1; then
+  xycar_ai_die "publish accepted a missing SSD marker without --init"
+fi
+"${XYCAR_TEST_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/publish_dataset_ssd.sh" --init >/dev/null
+[[ ! -e "${XYCAR_TEST_ROOT}/shared-dataset" ]]
+"${XYCAR_TEST_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/publish_dataset_ssd.sh" --init --apply >/dev/null
 
-printf 'changed\n' \
-  >"${XYCAR_TEST_ROOT}/dataset-source/20260724_010101_001_session/samples.csv"
+XYCAR_SHARED_DESTINATION="${XYCAR_TEST_ROOT}/shared-dataset/teleop"
+[[ -f "${XYCAR_TEST_ROOT}/shared-dataset/.xycar-ai-dataset-share" ]]
+[[ -d "${XYCAR_SHARED_DESTINATION}/20260724_010101_001_session" ]]
+[[ -d "${XYCAR_SHARED_DESTINATION}/20260724_010102_001_session_2" ]]
+[[ -d "${XYCAR_SHARED_DESTINATION}/20260724_010103_001_incomplete" ]]
+[[ ! -e "${XYCAR_SHARED_DESTINATION}/_recording_20260724_010104_001" ]]
+[[ ! -e \
+  "${XYCAR_SHARED_DESTINATION}/20260724_010101_001_session/frame.part" ]]
+
 printf 'destination-only\n' \
-  >"${XYCAR_TEST_ROOT}/dataset-destination/preserved-local-file"
-rsync -a \
-  --filter="merge ${XYCAR_AI_SCRIPT_DIR}/dataset-rsync-filter.rules" \
-  "${XYCAR_TEST_ROOT}/dataset-source/" \
-  "${XYCAR_TEST_ROOT}/dataset-destination/"
-grep -qx 'changed' \
-  "${XYCAR_TEST_ROOT}/dataset-destination/20260724_010101_001_session/samples.csv"
-[[ -f "${XYCAR_TEST_ROOT}/dataset-destination/preserved-local-file" ]]
+  >"${XYCAR_SHARED_DESTINATION}/preserved-ssd-file"
+printf 'new\n' >"${XYCAR_TEST_ROOT}/dataset-source/new-file"
+"${XYCAR_TEST_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/publish_dataset_ssd.sh" >/dev/null
+[[ ! -e "${XYCAR_SHARED_DESTINATION}/new-file" ]]
+"${XYCAR_TEST_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/publish_dataset_ssd.sh" --apply >/dev/null
+[[ -f "${XYCAR_SHARED_DESTINATION}/new-file" ]]
+[[ -f "${XYCAR_SHARED_DESTINATION}/preserved-ssd-file" ]]
+
+mkdir -p "${XYCAR_TEST_ROOT}/dataset-pulled"
+XYCAR_PULL_ENV=(
+  env
+  XYCAR_AI_ALLOW_ANY_CHECKOUT=1
+  XYCAR_AI_ALLOW_ROOT_FILESYSTEM_SHARED=1
+  XYCAR_AI_LOCAL_DATASET_ROOT="${XYCAR_TEST_ROOT}/dataset-pulled"
+  XYCAR_AI_SHARED_DATASET_ROOT="${XYCAR_TEST_ROOT}/shared-dataset"
+)
+"${XYCAR_PULL_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/pull_dataset_ssd.sh" >/dev/null
+[[ ! -e "${XYCAR_TEST_ROOT}/dataset-pulled/new-file" ]]
+"${XYCAR_PULL_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/pull_dataset_ssd.sh" --apply >/dev/null
+[[ -f "${XYCAR_TEST_ROOT}/dataset-pulled/new-file" ]]
+printf 'local-only\n' >"${XYCAR_TEST_ROOT}/dataset-pulled/preserved-local-file"
+"${XYCAR_PULL_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/pull_dataset_ssd.sh" --apply >/dev/null
+[[ -f "${XYCAR_TEST_ROOT}/dataset-pulled/preserved-local-file" ]]
+
+mkdir -p "${XYCAR_TEST_ROOT}/missing-marker"
+if env \
+  XYCAR_AI_ALLOW_ANY_CHECKOUT=1 \
+  XYCAR_AI_ALLOW_ROOT_FILESYSTEM_SHARED=1 \
+  XYCAR_AI_LOCAL_DATASET_ROOT="${XYCAR_TEST_ROOT}/dataset-pulled" \
+  XYCAR_AI_SHARED_DATASET_ROOT="${XYCAR_TEST_ROOT}/missing-marker" \
+  "${XYCAR_AI_SCRIPT_DIR}/pull_dataset_ssd.sh" --apply \
+  >/dev/null 2>&1; then
+  xycar_ai_die "pull accepted a missing SSD marker"
+fi
 
 mkdir -p "${XYCAR_TEST_ROOT}/artifact"
 printf 'schema_version: 1\nartifact_id: fixture\n' \

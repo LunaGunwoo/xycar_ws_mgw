@@ -1,2 +1,5 @@
 - /_recording_*/
 - /.rsync-partial/
+- *.partial
+- *.part
+- *.tmp

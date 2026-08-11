@@ -2,12 +2,12 @@
 
 실차 LiDAR 라바콘 인식 결과와 중앙 경로를 GUI로 확인하고, 같은 창에서 Space
 키로 저속 실차 주행을 켜고 끄는 ROS 2 디버그 패키지다. 모든 실행 방법은 실제
-차량 `xytron@10.42.0.1:/home/xytron/xycar_ws_mgw`를 기준으로 한다.
+차량 `xytron@xycar:/home/xytron/xycar_ws_mgw`를 기준으로 한다.
 
 ## SSH 접속, 빌드와 환경 적용
 
 ```bash
-ssh -X xytron@10.42.0.1
+ssh -X xytron@xycar
 cd /home/xytron/xycar_ws_mgw
 source /opt/ros/humble/setup.bash
 git pull --ff-only

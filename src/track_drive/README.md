@@ -7,7 +7,7 @@ Python 라이브러리다. ROS node, motor publisher, `console_scripts` 또는 l
 ## 빌드
 
 ```bash
-ssh xytron@10.42.0.1
+ssh xytron@xycar
 cd /home/xytron/xycar_ws_mgw
 colcon build --symlink-install --packages-select track_drive
 source install/setup.bash

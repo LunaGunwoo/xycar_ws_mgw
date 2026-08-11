@@ -13,7 +13,11 @@ XYCAR_USER_HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"
 XYCAR_LOCAL_BIN="${XYCAR_USER_HOME}/.local/bin"
 XYCAR_LOCAL_UV="${XYCAR_LOCAL_BIN}/uv"
 
-if [[ ! -x "${XYCAR_LOCAL_UV}" ]]; then
+XYCAR_INSTALLED_UV_VERSION=""
+if [[ -x "${XYCAR_LOCAL_UV}" ]]; then
+  XYCAR_INSTALLED_UV_VERSION="$("${XYCAR_LOCAL_UV}" --version | awk '{print $2}')"
+fi
+if [[ "${XYCAR_INSTALLED_UV_VERSION}" != "${XYCAR_AI_UV_VERSION}" ]]; then
   printf 'Installing uv %s in %s\n' \
     "${XYCAR_AI_UV_VERSION}" "${XYCAR_LOCAL_BIN}"
   curl -LsSf \
@@ -33,7 +37,14 @@ cd -- "${XYCAR_AI_BUNDLE_ROOT}"
 "${XYCAR_LOCAL_UV}" python install 3.12
 "${XYCAR_LOCAL_UV}" lock --check
 "${XYCAR_LOCAL_UV}" sync --locked --managed-python
-"${XYCAR_LOCAL_UV}" run --locked python -c \
-  'import sys; assert sys.version_info[:2] == (3, 12)'
+mkdir -p \
+  "${XYCAR_AI_LOCAL_DATASET_ROOT}" \
+  "${XYCAR_AI_LOCAL_ARTIFACT_ROOT}"
+"${XYCAR_LOCAL_UV}" run --locked python -c 'import sys, torch
+assert sys.version_info[:2] == (3, 12), sys.version
+assert torch.cuda.is_available(), "CUDA is unavailable"
+name = torch.cuda.get_device_name(0)
+print(f"Python {sys.version.split()[0]}; torch {torch.__version__}; GPU {name}")'
 
-printf 'uv environment ready: %s/.venv\n' "${XYCAR_AI_BUNDLE_ROOT}"
+printf 'Local CUDA training environment ready: %s/.venv\n' \
+  "${XYCAR_AI_BUNDLE_ROOT}"

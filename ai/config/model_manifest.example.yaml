@@ -1,14 +1,56 @@
 schema_version: 1
 artifact_id: replace-with-artifact-id
-created_at: "YYYY-MM-DDTHH:MM:SSZ"
+created_at: "YYYY-MM-DDTHH:MM:SS+00:00"
 source:
   mgw_commit: replace-with-full-commit
-  source_dirty: false
+  dirty: true
   uv_lock_sha256: replace-with-sha256
+  checkpoint_sha256: replace-with-sha256
+  checkpoint_epoch: 1
+  best_epoch: 1
+  best_score: 0.0
 dataset:
-  root: datasets/teleop
-  snapshot: replace-with-session-list-or-snapshot-id
+  snapshot: replace-with-dataset-snapshot
 model:
-  format: replace-with-model-format
-  input_contract: replace-with-input-contract
-  output_contract: replace-with-output-contract
+  format: torchscript
+  file: model.ts
+  name: vit_tiny_patch16_224.augreg_in21k_ft_in1k
+  input:
+    name: images
+    color_space: RGB
+    dtype: float32
+    shape: [1, 3, 224, 224]
+  output:
+    kind: tuple
+    order: [angle_logits, speed_logits]
+    shapes: [[1, 201], [1, 201]]
+preprocessing:
+  source: timm.resolve_model_data_config
+  geometry: full_frame_bicubic_resize
+  image_size: 224
+  input_size: [3, 224, 224]
+  interpolation: bicubic
+  crop_pct: 0.9
+  crop_mode: center
+  mean: [0.5, 0.5, 0.5]
+  std: [0.5, 0.5, 0.5]
+  training_augmentation:
+    horizontal_flip_probability: 0.0
+    horizontal_flip_before_resize: true
+label_contract:
+  schema_version: 1
+  output_keys: [angle_logits, speed_logits]
+  num_classes: 201
+  command_min: -100
+  command_max: 100
+  class_id_mapping: int(round(clamp(value, -100, 100))) + 100
+  decode_mapping: class_id - 100
+  horizontal_flip_mapping:
+    angle_raw: -angle_raw
+    angle: -angle
+    angle_class_id: 200 - angle_class_id
+    speed: unchanged
+    speed_class_id: unchanged
+runtime:
+  torch_num_threads: 8
+  warmup_count: 3

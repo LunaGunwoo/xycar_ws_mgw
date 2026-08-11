@@ -5,11 +5,11 @@ xycar_lidar is a new ros package, which is designed to gradually become the stan
 
 ## Xycar MGW 실제 차량 사용
 
-이 저장소의 실행 기준은 `xytron@10.42.0.1:/home/xytron/xycar_ws_mgw`다. 기본
+이 저장소의 실행 기준은 `xytron@xycar:/home/xytron/xycar_ws_mgw`다. 기본
 설정은 `/dev/ttyLIDAR`, 512000 baud, 10 Hz이며 `/scan`을 publish한다.
 
 ```bash
-ssh xytron@10.42.0.1
+ssh xytron@xycar
 cd /home/xytron/xycar_ws_mgw
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install --packages-select xycar_lidar
@@ -208,7 +208,6 @@ More paramters details, see [here](details.md)
 ![Development Path](images/EAI.png)
 
 If you have any extra questions, please feel free to [contact us](http://www.ydlidar.cn/cn/contact)
-
 
 
 

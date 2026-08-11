@@ -47,7 +47,7 @@ Space로 실제 주행을 ON/OFF 합니다. ON 상태의 양쪽 경계는 speed 
 필요합니다.
 
 실행 문서와 경로는 실제 차량
-`xytron@10.42.0.1:/home/xytron/xycar_ws_mgw`를 기준으로 관리합니다.
+`xytron@xycar:/home/xytron/xycar_ws_mgw`를 기준으로 관리합니다.
 
 ## 전체 구조 요약
 

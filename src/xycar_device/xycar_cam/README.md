@@ -1,7 +1,7 @@
 # xycar_cam
 
 `xycar_cam`은 차량 USB camera의 RGB 영상을 `/image_raw`로 발행한다. 모든 명령은
-차량 `xytron@10.42.0.1:/home/xytron/xycar_ws_mgw`에 SSH 접속한 상태를 기준으로
+차량 `xytron@xycar:/home/xytron/xycar_ws_mgw`에 Tailscale SSH로 접속한 상태를 기준으로
 한다.
 
 camera 장치를 여는 명령이므로 매 실행 직전에 사용자 승인을 받고, 다른 camera

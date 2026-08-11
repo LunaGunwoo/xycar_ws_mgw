@@ -1,0 +1,31 @@
+game_controller_node:
+  ros__parameters:
+    device_id: 0
+    deadzone: 0.05
+    autorepeat_rate: 20.0
+    sticky_buttons: false
+    coalesce_interval_ms: 1
+
+front_cam_policy:
+  ros__parameters:
+    camera_topic: /image_raw
+    joy_topic: /joy
+    motor_topic: /xycar_motor
+    prediction_topic: /front_cam_policy/prediction
+    enabled_topic: /front_cam_policy/enabled
+
+    # Remote Gamepad A button, verified through game_controller_node.
+    a_button_index: 0
+    allow_motion: true
+
+    # Inference runs on every available latest frame. Motor commands and
+    # disabled-state [0, 0] commands are published by this 20 Hz timer.
+    publish_rate_hz: 20.0
+    joy_timeout_sec: 0.25
+    inference_timeout_sec: 0.25
+    graph_check_period_sec: 0.5
+    stop_publish_count: 5
+
+    # Ryzen 7 7730U vehicle settings validated by the standalone benchmark.
+    torch_num_threads: 8
+    warmup_count: 3

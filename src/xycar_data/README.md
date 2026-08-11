@@ -6,7 +6,7 @@ behavior-cloning 모델 학습용 데이터를 수집하는 패키지다. 두 Te
 `angle`, `speed`를 label로 저장한다. 게임패드 주행은 카메라가 없어도 유지되며
 녹화 중 누락된 camera frame만 건너뛴다.
 
-모든 명령은 실제 차량 `xytron@10.42.0.1:/home/xytron/xycar_ws_mgw` 기준이다.
+모든 명령은 실제 차량 `xytron@xycar:/home/xytron/xycar_ws_mgw` 기준이다.
 카메라·LiDAR driver 또는 motor publisher를 시작하므로 각각 실행 직전에 별도
 승인을 받고, 차량 지지 상태·비상 정지 공간·기존 motor publisher 종료 상태를
 확인해야 한다.
@@ -14,7 +14,7 @@ behavior-cloning 모델 학습용 데이터를 수집하는 패키지다. 두 Te
 ## SSH, 빌드와 환경 적용
 
 ```bash
-ssh -t xytron@10.42.0.1
+ssh -t xytron@xycar
 cd /home/xytron/xycar_ws_mgw
 source /opt/ros/humble/setup.bash
 git pull --ff-only

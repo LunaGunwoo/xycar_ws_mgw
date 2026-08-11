@@ -1,0 +1,335 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import re
+import shutil
+from collections.abc import Iterable, Mapping
+from datetime import UTC, datetime
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+import torch
+import yaml
+from torch import nn
+
+from xycar_ai.front_cam_policy_model import TaskTokenViTPolicy
+
+ARTIFACT_SCHEMA_VERSION = 1
+ARTIFACT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+DEFAULT_OUTPUT_ROOT = Path("artifacts/models")
+MODEL_FILENAME = "model.ts"
+MANIFEST_FILENAME = "manifest.yaml"
+CHECKSUM_FILENAME = "SHA256SUMS"
+
+
+class PolicyExportError(ValueError):
+    """Raised when a checkpoint cannot produce a safe runtime artifact."""
+
+
+class _TupleOutputPolicy(nn.Module):
+    def __init__(self, policy: nn.Module) -> None:
+        super().__init__()
+        self.policy = policy
+
+    def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        outputs = self.policy(images)
+        return outputs["angle_logits"], outputs["speed_logits"]
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Export a front-camera policy checkpoint as TorchScript."
+    )
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--artifact-id", required=True)
+    parser.add_argument(
+        "--output-root",
+        default=str(DEFAULT_OUTPUT_ROOT),
+        help="Artifact parent directory (default: artifacts/models).",
+    )
+    return parser
+
+
+def main(argv: Iterable[str] | None = None) -> int:
+    args = build_arg_parser().parse_args(argv)
+    artifact_dir = export_checkpoint(
+        checkpoint_path=Path(args.checkpoint),
+        artifact_id=args.artifact_id,
+        output_root=Path(args.output_root),
+    )
+    print(f"exported policy artifact: {artifact_dir}")
+    return 0
+
+
+def export_checkpoint(
+    *,
+    checkpoint_path: Path,
+    artifact_id: str,
+    output_root: Path,
+) -> Path:
+    _validate_artifact_id(artifact_id)
+    checkpoint_path = checkpoint_path.expanduser().resolve()
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"checkpoint does not exist: {checkpoint_path}")
+    output_root = output_root.expanduser().resolve()
+    artifact_dir = output_root / artifact_id
+    if artifact_dir.exists():
+        raise FileExistsError(f"artifact already exists: {artifact_dir}")
+
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    checkpoint = _checkpoint_mapping(payload)
+    model_config = _mapping(checkpoint, "config", "checkpoint")
+    model_config = _mapping(model_config, "model", "checkpoint.config")
+    model_name = _string(model_config, "name", "checkpoint.config.model")
+    image_size = _integer(
+        model_config,
+        "image_size",
+        "checkpoint.config.model",
+    )
+    if image_size <= 0:
+        raise PolicyExportError("checkpoint image_size must be positive")
+    model_state = checkpoint.get("model_state")
+    if not isinstance(model_state, Mapping):
+        raise PolicyExportError("checkpoint.model_state must be a mapping")
+
+    policy = TaskTokenViTPolicy(
+        model_name=model_name,
+        pretrained=False,
+        image_size=image_size,
+    )
+    policy.load_state_dict(model_state, strict=True)
+    policy.eval()
+    wrapper = _TupleOutputPolicy(policy).eval()
+    sample = torch.zeros(1, 3, image_size, image_size, dtype=torch.float32)
+    with torch.inference_mode():
+        eager_outputs = wrapper(sample)
+        traced = torch.jit.trace(wrapper, sample, strict=True)
+        traced_outputs = traced(sample)
+    _validate_outputs(eager_outputs)
+    _validate_outputs(traced_outputs)
+    for eager, exported in zip(eager_outputs, traced_outputs, strict=True):
+        if not torch.allclose(eager, exported, atol=1e-5, rtol=1e-5):
+            raise PolicyExportError("TorchScript output differs from eager output")
+
+    output_root.mkdir(parents=True, exist_ok=True)
+    temporary_dir = output_root / f".incoming-{artifact_id}-{os.getpid()}"
+    if temporary_dir.exists():
+        raise FileExistsError(f"temporary artifact path exists: {temporary_dir}")
+    temporary_dir.mkdir()
+    try:
+        model_path = temporary_dir / MODEL_FILENAME
+        traced.save(str(model_path))
+        reloaded = torch.jit.load(str(model_path), map_location="cpu").eval()
+        with torch.inference_mode():
+            reloaded_outputs = reloaded(sample)
+        _validate_outputs(reloaded_outputs)
+        for eager, exported in zip(eager_outputs, reloaded_outputs, strict=True):
+            if not torch.allclose(eager, exported, atol=1e-5, rtol=1e-5):
+                raise PolicyExportError(
+                    "reloaded TorchScript output differs from eager output"
+                )
+
+        manifest = _build_manifest(
+            artifact_id=artifact_id,
+            checkpoint_path=checkpoint_path,
+            checkpoint=checkpoint,
+            model_name=model_name,
+            image_size=image_size,
+        )
+        manifest_path = temporary_dir / MANIFEST_FILENAME
+        manifest_path.write_text(
+            yaml.safe_dump(manifest, sort_keys=False),
+            encoding="utf-8",
+        )
+        checksums = [MODEL_FILENAME, MANIFEST_FILENAME]
+        checksum_path = temporary_dir / CHECKSUM_FILENAME
+        checksum_path.write_text(
+            "".join(
+                f"{sha256_file(temporary_dir / relative)}  {relative}\n"
+                for relative in checksums
+            ),
+            encoding="utf-8",
+        )
+        verify_artifact(temporary_dir)
+        temporary_dir.rename(artifact_dir)
+    except BaseException:
+        if temporary_dir.is_dir():
+            shutil.rmtree(temporary_dir)
+        raise
+    return artifact_dir
+
+
+def verify_artifact(artifact_dir: Path) -> None:
+    artifact_dir = artifact_dir.expanduser()
+    if artifact_dir.is_symlink():
+        raise PolicyExportError("artifact directory must not be a symlink")
+    artifact_dir = artifact_dir.resolve()
+    manifest_path = artifact_dir / MANIFEST_FILENAME
+    checksum_path = artifact_dir / CHECKSUM_FILENAME
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        raise PolicyExportError("artifact manifest is missing or unsafe")
+    if not checksum_path.is_file() or checksum_path.is_symlink():
+        raise PolicyExportError("artifact checksum file is missing or unsafe")
+    expected: dict[str, str] = {}
+    for line in checksum_path.read_text(encoding="utf-8").splitlines():
+        parts = line.split(maxsplit=1)
+        if len(parts) != 2:
+            raise PolicyExportError("invalid SHA256SUMS line")
+        digest, relative = parts
+        relative = relative.removeprefix("*")
+        _validate_relative_artifact_path(relative)
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise PolicyExportError("invalid SHA-256 digest")
+        if relative in expected:
+            raise PolicyExportError(f"duplicate checksum path: {relative}")
+        expected[relative] = digest
+
+    actual_files = {
+        path.relative_to(artifact_dir).as_posix()
+        for path in artifact_dir.rglob("*")
+        if path.is_file() and path.name != CHECKSUM_FILENAME
+    }
+    if actual_files != set(expected):
+        raise PolicyExportError("SHA256SUMS file list does not match artifact contents")
+    for relative, digest in expected.items():
+        path = artifact_dir / relative
+        if path.is_symlink() or not path.is_file():
+            raise PolicyExportError(f"artifact file is missing or unsafe: {relative}")
+        if sha256_file(path) != digest:
+            raise PolicyExportError(f"artifact checksum mismatch: {relative}")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _build_manifest(
+    *,
+    artifact_id: str,
+    checkpoint_path: Path,
+    checkpoint: Mapping[str, Any],
+    model_name: str,
+    image_size: int,
+) -> dict[str, object]:
+    preprocessing = _mapping(checkpoint, "preprocessing", "checkpoint")
+    label_contract = _mapping(checkpoint, "label_contract", "checkpoint")
+    source = checkpoint.get("source")
+    if not isinstance(source, Mapping):
+        source = {"mgw_commit": "unknown", "dirty": True}
+    dataset_stats = checkpoint.get("dataset_stats")
+    dataset_snapshot = "unknown"
+    if isinstance(dataset_stats, Mapping):
+        snapshot = dataset_stats.get("dataset_snapshot")
+        if isinstance(snapshot, str) and snapshot:
+            dataset_snapshot = snapshot
+    return {
+        "schema_version": ARTIFACT_SCHEMA_VERSION,
+        "artifact_id": artifact_id,
+        "created_at": datetime.now(UTC).isoformat(),
+        "source": {
+            **dict(source),
+            "checkpoint_sha256": sha256_file(checkpoint_path),
+            "checkpoint_epoch": int(checkpoint.get("epoch", 0)),
+            "best_epoch": int(checkpoint.get("best_epoch", 0)),
+            "best_score": float(checkpoint.get("best_score", float("inf"))),
+        },
+        "dataset": {"snapshot": dataset_snapshot},
+        "model": {
+            "format": "torchscript",
+            "file": MODEL_FILENAME,
+            "name": model_name,
+            "input": {
+                "name": "images",
+                "color_space": "RGB",
+                "dtype": "float32",
+                "shape": [1, 3, image_size, image_size],
+            },
+            "output": {
+                "kind": "tuple",
+                "order": ["angle_logits", "speed_logits"],
+                "shapes": [[1, 201], [1, 201]],
+            },
+        },
+        "preprocessing": dict(preprocessing),
+        "label_contract": dict(label_contract),
+        "runtime": {"torch_num_threads": 8, "warmup_count": 3},
+    }
+
+
+def _checkpoint_mapping(payload: object) -> Mapping[str, Any]:
+    if not isinstance(payload, Mapping):
+        raise PolicyExportError("checkpoint must contain a mapping")
+    required = {"config", "model_state", "preprocessing", "label_contract"}
+    missing = required - set(payload)
+    if missing:
+        raise PolicyExportError(f"checkpoint fields are missing: {sorted(missing)}")
+    return payload
+
+
+def _mapping(
+    payload: Mapping[str, Any],
+    key: str,
+    context: str,
+) -> Mapping[str, Any]:
+    value = payload.get(key)
+    if not isinstance(value, Mapping):
+        raise PolicyExportError(f"{context}.{key} must be a mapping")
+    return value
+
+
+def _string(payload: Mapping[str, Any], key: str, context: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value:
+        raise PolicyExportError(f"{context}.{key} must be a non-empty string")
+    return value
+
+
+def _integer(payload: Mapping[str, Any], key: str, context: str) -> int:
+    value = payload.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise PolicyExportError(f"{context}.{key} must be an integer")
+    return value
+
+
+def _validate_outputs(outputs: object) -> None:
+    if not isinstance(outputs, tuple) or len(outputs) != 2:
+        raise PolicyExportError("policy output must be a two-tensor tuple")
+    for name, output in zip(
+        ("angle_logits", "speed_logits"),
+        outputs,
+        strict=True,
+    ):
+        if not isinstance(output, torch.Tensor):
+            raise PolicyExportError(f"{name} must be a tensor")
+        if tuple(output.shape) != (1, 201):
+            raise PolicyExportError(
+                f"{name} must have shape [1, 201], got {tuple(output.shape)}"
+            )
+        if not torch.isfinite(output).all():
+            raise PolicyExportError(f"{name} contains a non-finite value")
+
+
+def _validate_artifact_id(artifact_id: str) -> None:
+    if not ARTIFACT_ID_PATTERN.fullmatch(artifact_id):
+        raise PolicyExportError(f"invalid artifact id: {artifact_id}")
+
+
+def _validate_relative_artifact_path(relative: str) -> None:
+    path = PurePosixPath(relative)
+    if (
+        not relative
+        or path.is_absolute()
+        or ".." in path.parts
+        or not re.fullmatch(r"[A-Za-z0-9._/-]+", relative)
+    ):
+        raise PolicyExportError(f"unsafe artifact path: {relative}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

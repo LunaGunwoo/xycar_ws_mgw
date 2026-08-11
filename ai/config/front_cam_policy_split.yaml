@@ -1,0 +1,17 @@
+schema_version: 1
+dataset_snapshot: "gamepad-max-forward-25-20260810"
+splits:
+  train:
+    - 20260803_150534_000_session
+    - 20260810_130735_027_session
+    - 20260810_130818_255_session
+    - 20260810_130857_726_session
+    - 20260810_130938_647_session
+    - 20260810_131011_524_session
+    - 20260810_131116_609_session
+  val:
+    - 20260803_150428_657_session
+    - 20260810_131250_029_session
+  test:
+    - 20260805_144222_487_session
+    - 20260810_131214_144_session
