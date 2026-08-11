@@ -222,6 +222,11 @@ GUI는 ROS, camera device와 motor를 열지 않고 WSL ext4 dataset의 저장�
 읽는다. 왼쪽에서 원본 ROI와 warped 결과를 확인하고 slider를 움직인다. 변경은
 preview에만 적용되며 **Save YAML** 버튼이나 `S`를 눌러야 파일에 기록된다.
 Reset/`R`은 마지막 저장값으로 되돌리고 화살표 또는 `P`/`N`으로 sample을 바꾼다.
+오른쪽의 **Image number (1-based)**에 전체 dataset 기준 사진 번호를 입력하고
+**Go** 또는 Enter를 누르면 멀리 떨어진 다른 session의 image로 바로 이동한다.
+`bev_width`와 `bev_height`는 slider 옆 입력칸에 `224`처럼 정확한 정수를
+입력하고 Enter를 눌러 적용할 수도 있다. warp 출력은 이 크기로 생성된 뒤 ViT
+입력 직전에 `224×224`로 resize된다.
 
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai

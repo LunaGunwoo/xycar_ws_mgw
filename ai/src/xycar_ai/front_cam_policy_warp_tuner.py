@@ -87,6 +87,8 @@ class WarpTunerApplication:
         self.root.geometry("1420x860")
         self.root.minsize(1100, 720)
         self.variables: dict[str, tk.DoubleVar | tk.IntVar] = {}
+        self.dimension_inputs: dict[str, tk.StringVar] = {}
+        self.image_number = tk.StringVar(value=str(self.image_index + 1))
         self._original_photo: ImageTk.PhotoImage | None = None
         self._warped_photo: ImageTk.PhotoImage | None = None
         self._build_layout()
@@ -152,9 +154,20 @@ class WarpTunerApplication:
                 command=lambda _value, field_name=name: self._parameter_changed(
                     field_name
                 ),
-                length=235,
+                length=185 if name in INTEGER_PARAMETERS else 235,
             )
             scale.pack(side=tk.RIGHT, fill=tk.X, expand=True)
+            if name in INTEGER_PARAMETERS:
+                dimension_input = tk.StringVar()
+                self.dimension_inputs[name] = dimension_input
+                entry = ttk.Entry(row, textvariable=dimension_input, width=6)
+                entry.pack(side=tk.RIGHT, padx=(4, 0))
+                entry.bind(
+                    "<Return>",
+                    lambda _event, field_name=name: self._dimension_changed(
+                        field_name
+                    ),
+                )
 
         action_row = ttk.Frame(controls)
         action_row.pack(fill=tk.X, pady=(12, 4))
@@ -172,6 +185,17 @@ class WarpTunerApplication:
         ttk.Button(image_row, text="Next ▶", command=self.next_image).pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=(8, 0)
         )
+        jump_row = ttk.Frame(controls)
+        jump_row.pack(fill=tk.X, pady=4)
+        ttk.Label(jump_row, text="Image number (1-based)").pack(side=tk.LEFT)
+        self.image_number_entry = ttk.Entry(
+            jump_row,
+            textvariable=self.image_number,
+            width=9,
+        )
+        self.image_number_entry.pack(side=tk.LEFT, padx=(8, 4))
+        self.image_number_entry.bind("<Return>", lambda _event: self.go_to_image())
+        ttk.Button(jump_row, text="Go", command=self.go_to_image).pack(side=tk.LEFT)
         ttk.Button(controls, text="Quit", command=self.root.destroy).pack(
             fill=tk.X, pady=(4, 8)
         )
@@ -196,6 +220,8 @@ class WarpTunerApplication:
     def _sync_controls_from_state(self) -> None:
         for name, value in self.state.pending_values.items():
             self.variables[name].set(value)
+            if name in self.dimension_inputs:
+                self.dimension_inputs[name].set(str(value))
 
     def _parameter_changed(self, field_name: str) -> None:
         variable = self.variables[field_name]
@@ -205,10 +231,31 @@ class WarpTunerApplication:
         else:
             value = float(variable.get())
         self.state.set_value(field_name, value)
+        if field_name in self.dimension_inputs:
+            self.dimension_inputs[field_name].set(str(value))
+        self.refresh_preview()
+
+    def _dimension_changed(self, field_name: str) -> None:
+        input_variable = self.dimension_inputs[field_name]
+        minimum, maximum, _resolution = INTEGER_PARAMETERS[field_name]
+        try:
+            value = int(input_variable.get().strip())
+        except ValueError:
+            value = -1
+        if not minimum <= value <= maximum:
+            messagebox.showerror(
+                "Invalid warp dimension",
+                f"{field_name} must be a whole number from {minimum} to {maximum}.",
+            )
+            input_variable.set(str(self.state.pending_values[field_name]))
+            return
+        self.variables[field_name].set(value)
+        self.state.set_value(field_name, value)
         self.refresh_preview()
 
     def refresh_preview(self) -> None:
         path = self.image_paths[self.image_index]
+        self.image_number.set(str(self.image_index + 1))
         try:
             config = self.state.pending_config()
             with Image.open(path) as source:
@@ -248,6 +295,27 @@ class WarpTunerApplication:
 
     def next_image(self) -> None:
         self.image_index = (self.image_index + 1) % len(self.image_paths)
+        self.refresh_preview()
+
+    def go_to_image(self) -> None:
+        raw_number = self.image_number.get().strip()
+        try:
+            image_number = int(raw_number)
+        except ValueError:
+            messagebox.showerror(
+                "Invalid image number",
+                f"Enter a whole number from 1 to {len(self.image_paths)}.",
+            )
+            self.image_number.set(str(self.image_index + 1))
+            return
+        if not 1 <= image_number <= len(self.image_paths):
+            messagebox.showerror(
+                "Invalid image number",
+                f"Image number must be from 1 to {len(self.image_paths)}.",
+            )
+            self.image_number.set(str(self.image_index + 1))
+            return
+        self.image_index = image_number - 1
         self.refresh_preview()
 
 
