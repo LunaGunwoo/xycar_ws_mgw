@@ -25,6 +25,43 @@ from std_msgs.msg import Float32MultiArray
 from xycar_data.session_writer import AsyncSessionWriter, CameraSample
 
 
+_DDS_GUID_PREFIX_SIZE = 12
+_UNKNOWN_NODE_NAME = '_NODE_NAME_UNKNOWN_'
+_UNKNOWN_NODE_NAMESPACE = '_NODE_NAMESPACE_UNKNOWN_'
+
+
+def _endpoint_participant_prefix(endpoint) -> bytes | None:
+    """Return the DDS participant portion of a topic endpoint GID."""
+    try:
+        gid = bytes(endpoint.endpoint_gid)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if len(gid) < _DDS_GUID_PREFIX_SIZE:
+        return None
+    return gid[:_DDS_GUID_PREFIX_SIZE]
+
+
+def _is_unnamed_endpoint(endpoint) -> bool:
+    return (
+        endpoint.node_name == _UNKNOWN_NODE_NAME
+        and endpoint.node_namespace == _UNKNOWN_NODE_NAMESPACE
+    )
+
+
+def _is_paired_unnamed_relay(endpoint, subscriptions) -> bool:
+    """Match the unnamed publisher half of one DDS bridge participant."""
+    if not _is_unnamed_endpoint(endpoint):
+        return False
+    participant = _endpoint_participant_prefix(endpoint)
+    if participant is None:
+        return False
+    return any(
+        _is_unnamed_endpoint(subscription)
+        and _endpoint_participant_prefix(subscription) == participant
+        for subscription in subscriptions
+    )
+
+
 @dataclass(frozen=True)
 class GamepadConfig:
     """Axis mapping and output limits for the Remote Gamepad controller."""
@@ -382,6 +419,10 @@ class GamepadTeleopNode(Node):
         self.declare_parameter('graph_check_period_sec', 0.5)
         self.declare_parameter('neutral_trigger_threshold', 0.05)
         self.declare_parameter('stop_publish_count', 5)
+        self.declare_parameter(
+            'allowed_motor_relay_nodes',
+            ['/ros_bridge'],
+        )
         self.declare_parameter('record_start_button', 0)
         self.declare_parameter('record_stop_button', 1)
         self.declare_parameter(
@@ -428,6 +469,12 @@ class GamepadTeleopNode(Node):
         )
         self.stop_publish_count = int(
             self.get_parameter('stop_publish_count').value
+        )
+        self.allowed_motor_relay_nodes = tuple(
+            str(value)
+            for value in self.get_parameter(
+                'allowed_motor_relay_nodes'
+            ).value
         )
         self.record_start_button = int(
             self.get_parameter('record_start_button').value
@@ -554,6 +601,12 @@ class GamepadTeleopNode(Node):
                 self.recording_min_free_space_mb
             ),
         )
+        for node in self.allowed_motor_relay_nodes:
+            if not node.startswith('/') or node.endswith('/'):
+                raise ValueError(
+                    'allowed_motor_relay_nodes entries must be fully '
+                    'qualified node names without a trailing slash'
+                )
 
     def _on_joy(self, message: Joy) -> None:
         now = time.monotonic()
@@ -873,6 +926,10 @@ class GamepadTeleopNode(Node):
             now_monotonic + self.graph_check_period_sec
         )
         topic = self.resolve_topic_name(self.motor_topic)
+        subscriptions = self.get_subscriptions_info_by_topic(topic)
+        allow_unnamed_bridge = (
+            '/ros_bridge' in self.allowed_motor_relay_nodes
+        )
         competitors = []
         for publisher in self.get_publishers_info_by_topic(topic):
             if (
@@ -880,13 +937,20 @@ class GamepadTeleopNode(Node):
                 and publisher.node_namespace == self.get_namespace()
             ):
                 continue
-            competitors.append(
-                _node_label(publisher.node_namespace, publisher.node_name)
+            label = _node_label(
+                publisher.node_namespace,
+                publisher.node_name,
             )
+            if label in self.allowed_motor_relay_nodes:
+                continue
+            if allow_unnamed_bridge and _is_paired_unnamed_relay(
+                publisher,
+                subscriptions,
+            ):
+                continue
+            competitors.append(label)
         self._competitors = tuple(sorted(set(competitors)))
-        self._has_motor_subscriber = bool(
-            self.get_subscriptions_info_by_topic(topic)
-        )
+        self._has_motor_subscriber = bool(subscriptions)
 
     def _publish_stop_for_reason(self, reason: str) -> None:
         self._publish(STOP_COMMAND)

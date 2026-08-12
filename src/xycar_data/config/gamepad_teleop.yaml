@@ -31,6 +31,9 @@ gamepad_teleop:
     graph_check_period_sec: 0.5
     neutral_trigger_threshold: 0.05
     stop_publish_count: 5
+    # Accept the local ROS 1 bridge only when its unnamed DDS publisher and
+    # subscriber share one participant GID.
+    allowed_motor_relay_nodes: ['/ros_bridge']
 
     # Hold A while stopped to wait; recording begins only after the node
     # actually publishes a positive speed. B saves without stopping the car.

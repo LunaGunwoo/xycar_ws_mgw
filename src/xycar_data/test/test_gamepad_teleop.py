@@ -16,11 +16,46 @@ from xycar_data.gamepad_teleop import (
     RecordingGate,
     RecordingState,
     _PendingRecordingFinish,
+    _is_paired_unnamed_relay,
     _validate_recording_parameters,
     _validate_runtime_parameters,
     is_input_fresh,
     map_joy_axes,
 )
+
+
+def _endpoint(participant: bytes, entity: bytes, *, named: bool = False):
+    return SimpleNamespace(
+        endpoint_gid=list(participant + entity),
+        node_name='publisher' if named else '_NODE_NAME_UNKNOWN_',
+        node_namespace='/' if named else '_NODE_NAMESPACE_UNKNOWN_',
+    )
+
+
+def test_only_matching_unnamed_dds_pair_is_a_motor_relay():
+    participant = bytes(range(12))
+    publisher = _endpoint(participant, b'\x00\x00\x12\x03')
+    matching_subscription = _endpoint(
+        participant,
+        b'\x00\x00\x13\x04',
+    )
+    other_subscription = _endpoint(
+        bytes(reversed(range(12))),
+        b'\x00\x00\x13\x04',
+    )
+
+    assert _is_paired_unnamed_relay(
+        publisher,
+        [matching_subscription],
+    )
+    assert not _is_paired_unnamed_relay(
+        publisher,
+        [other_subscription],
+    )
+    assert not _is_paired_unnamed_relay(
+        _endpoint(participant, b'\x00\x00\x12\x03', named=True),
+        [matching_subscription],
+    )
 
 
 def test_neutral_input_stops_with_centered_steering():

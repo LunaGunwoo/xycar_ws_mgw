@@ -23,6 +23,7 @@ colcon build --symlink-install \
 source /home/xytron/xycar_ws_mgw/install/setup.bash
 export ROS_DOMAIN_ID=7
 export ROS_NAMESPACE=xycar
+export ROS_LOCALHOST_ONLY=1
 ```
 
 `teleop_recorder`는 GUI나 창을 만들지 않는 CLI 전용 node다. 키보드 TTY가
@@ -39,7 +40,9 @@ ros2 launch xycar_data gamepad_teleop.launch.py
 
 이 한 명령은 camera driver, ROS 2 공식 `joy/game_controller_node`,
 `gamepad_teleop`을 함께 시작한다. 따라서 게임패드 입력, 차량 주행, camera 기반
-데이터 수집을 별도 terminal 없이 모두 수행한다. 입력과 출력은 다음과 같다.
+데이터 수집을 별도 terminal 없이 모두 수행한다. launch도 각 child process에
+`ROS_LOCALHOST_ONLY=1`을 강제해 같은 Wi-Fi의 다른 ROS 2 participant를 발견하지
+않는다. 입력과 출력은 다음과 같다.
 
 | Gamepad 입력 | 변환 | 범위 |
 | --- | --- | --- |
@@ -68,8 +71,12 @@ A를 누르고 있는 동안 녹화를 대기한다. 실제 `/xycar_motor`에 `s
 A를 한 번 놓았다가 다시 눌러야 새 세션을 시작한다.
 
 `/joy`가 0.25초 이상 끊기거나, 축 배열이 잘못됐거나, motor subscriber가 없거나,
-다른 motor publisher가 발견되면 `[0, 0]`을 발행한다. 종료할 때도 정지 명령을
-5회 발행한다. 시작할 때와 위 안전 정지에서 복구할 때는 LT와 RT가 모두
+다른 motor publisher가 발견되면 `[0, 0]`을 발행한다. Fast DDS가 로컬 ROS 1
+motor bridge 이름을 `UNKNOWN`으로 표시할 때는 동일 DDS participant GID의 이름
+없는 publisher/subscriber 쌍만 필수 relay로 인정한다. 이름 있는 다른 publisher,
+짝 없는 이름 없는 publisher와 participant가 다른 쌍은 계속 정지 조건이다.
+종료할 때도 정지 명령을 5회 발행한다. 시작할 때와 위 안전 정지에서 복구할 때는
+LT와 RT가 모두
 `neutral_trigger_threshold` 이하인 입력을 한 번 확인해야 다시 주행할 수 있다.
 연결이 유효하고 `/joy`가 갱신되는 동안 마지막 유효 명령은 20 Hz로 반복된다.
 
