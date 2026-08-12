@@ -1,16 +1,20 @@
 # Copyright 2026 Gunwoo Moon
 # Licensed under the Apache License, Version 2.0
 
+from pathlib import Path
+
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
+    OpaqueFunction,
     SetEnvironmentVariable,
 )
 from launch.substitutions import LaunchConfiguration
 
 
 def generate_launch_description():
+    params_file = LaunchConfiguration('params_file')
     artifact_id = LaunchConfiguration('artifact_id')
     artifact_root = LaunchConfiguration('artifact_root')
     use_camera = LaunchConfiguration('use_camera')
@@ -24,11 +28,16 @@ def generate_launch_description():
     return LaunchDescription(
         [
             DeclareLaunchArgument(
-                'artifact_id',
+                'params_file',
                 default_value=(
-                    'front-cam-policy-warp-angle-mean5-ar4-shared-'
-                    'e14-20260811'
+                    '/home/xytron/.config/xycar/'
+                    'guided_stateless_collection.yaml'
                 ),
+                description='External guided collection parameter YAML.',
+            ),
+            DeclareLaunchArgument(
+                'artifact_id',
+                description='Schema v1 stateless artifact ID.',
             ),
             DeclareLaunchArgument(
                 'artifact_root',
@@ -36,10 +45,20 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument('use_camera', default_value='true'),
             DeclareLaunchArgument('use_gamepad', default_value='true'),
-            DeclareLaunchArgument('allow_motion', default_value='true'),
+            DeclareLaunchArgument(
+                'allow_motion',
+                description='Explicit motion authorization for this run.',
+            ),
             DeclareLaunchArgument('device_id', default_value='0'),
-            DeclareLaunchArgument('curriculum_generation', default_value='1'),
-            DeclareLaunchArgument('speed_cap', default_value='27.0'),
+            DeclareLaunchArgument(
+                'curriculum_generation',
+                description='Explicit guided dataset generation.',
+            ),
+            DeclareLaunchArgument(
+                'speed_cap',
+                description='Explicit maximum executed forward speed.',
+            ),
+            OpaqueFunction(function=_require_params_file),
             SetEnvironmentVariable('ARTIFACT_ID', artifact_id),
             SetEnvironmentVariable('ARTIFACT_ROOT', artifact_root),
             SetEnvironmentVariable(
@@ -49,6 +68,7 @@ def generate_launch_description():
             ExecuteProcess(
                 cmd=[
                     wrapper,
+                    ['params_file:=', params_file],
                     ['use_camera:=', use_camera],
                     ['use_gamepad:=', use_gamepad],
                     ['allow_motion:=', allow_motion],
@@ -61,3 +81,12 @@ def generate_launch_description():
             ),
         ]
     )
+
+
+def _require_params_file(context):
+    configured = Path(LaunchConfiguration('params_file').perform(context))
+    if not configured.is_absolute() or not configured.is_file():
+        raise RuntimeError(
+            f'params_file must be an existing absolute YAML file: {configured}'
+        )
+    return []

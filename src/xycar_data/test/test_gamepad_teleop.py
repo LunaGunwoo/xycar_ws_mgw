@@ -2,9 +2,11 @@
 # Licensed under the Apache License, Version 2.0
 
 import math
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from xycar_data.gamepad_teleop import (
     DriveCommand,
@@ -371,3 +373,19 @@ def test_recording_buttons_must_be_distinct():
             recording_queue_size=128,
             recording_min_free_space_mb=0,
         )
+
+
+def test_stateless_manual_template_keeps_initial_speed_and_separate_root():
+    package_root = Path(__file__).parents[1]
+    config = yaml.safe_load(
+        (
+            package_root / 'config' / 'gamepad_stateless_manual.yaml'
+        ).read_text(encoding='utf-8')
+    )['gamepad_teleop']['ros__parameters']
+    launch_text = (
+        package_root / 'launch' / 'gamepad_teleop.launch.py'
+    ).read_text(encoding='utf-8')
+
+    assert config['max_forward_speed'] == 7.0
+    assert config['recording_root_dir'].endswith('/stateless_manual')
+    assert "'collection_profile_path': ParameterValue(" in launch_text

@@ -6,7 +6,9 @@ behavior-cloning 모델 학습용 데이터를 수집하는 패키지다. 두 Te
 `angle`, `speed`를 label로 저장한다. 게임패드 주행은 카메라가 없어도 유지되며
 녹화 중 누락된 camera frame만 건너뛴다.
 
-모든 명령은 실제 차량 `xytron@xycar:/home/xytron/xycar_ws_mgw` 기준이다.
+새 수집 명령은 활성 Jetson 차량
+`xytron@xycar-gpu:/home/xytron/xycar_ws_mgw` 기준이다. 기존 `xytron@xycar`는
+CPU inference rollback 재현에만 사용한다.
 카메라·LiDAR driver 또는 motor publisher를 시작하므로 각각 실행 직전에 별도
 승인을 받고, 차량 지지 상태·비상 정지 공간·기존 motor publisher 종료 상태를
 확인해야 한다.
@@ -33,6 +35,20 @@ export ROS_LOCALHOST_ONLY=1
 
 Remote Gamepad 휴대폰 앱과 PC 앱을 먼저 연결한다. 차량 바퀴를 지면에서 띄우고
 다른 `/xycar_motor` publisher가 없는지 확인한 뒤 다음 launch를 실행한다.
+
+새 stateless generation 0 수집은 설치 시 한 번 생성되는 외부 profile을 사용한다.
+`install_runtime.sh`는 이 파일이 이미 있으면 덮어쓰지 않는다. profile의 기본
+전진 최고속도는 `7`, 저장 root는
+`/home/xytron/xycar_data/stateless_manual`이다. 각 session metadata에는 profile의
+절대 경로와 SHA-256, 실제 적용된 gamepad·recording·timeout 값이 기록된다.
+
+```bash
+ros2 launch xycar_data gamepad_teleop.launch.py \
+  params_file:=/home/xytron/.config/xycar/gamepad_stateless_manual.yaml
+```
+
+아래 인자 없는 명령은 기존 `/home/xytron/xycar_data/teleop` 호환 profile을 쓰는
+rollback용이다.
 
 ```bash
 ros2 launch xycar_data gamepad_teleop.launch.py
@@ -220,8 +236,9 @@ WASD 명령과 최신 camera frame이 동시에 있을 때만 파일을 저장�
 
 ## 데이터 형식
 
-기본 저장 위치는 저장소 밖의 `/home/xytron/xycar_data/teleop`이며
-터미널은 `config/teleop_recorder.yaml`, gamepad는
+새 gamepad stateless 저장 위치는
+`/home/xytron/xycar_data/stateless_manual`이다. 터미널과 기존 호환 profile의
+기본값 `/home/xytron/xycar_data/teleop`은 각각 `config/teleop_recorder.yaml`,
 `config/gamepad_teleop.yaml`에서 바꿀 수 있다. 첫 유효 sample 전에는
 directory를 만들지 않으므로 빈 세션은 남지 않는다.
 
@@ -251,7 +268,10 @@ atomic rename한다. 쓰기 실패나 경쟁 motor publisher로 중단되면
 
 ## 튜닝
 
-`config/teleop_recorder.yaml`과 `config/gamepad_teleop.yaml`은 다음을 분리한다.
+새 수집은 외부 `~/.config/xycar/gamepad_stateless_manual.yaml`을 조정한다.
+tracked seed는 `config/gamepad_stateless_manual.yaml`이다. 기존
+`config/teleop_recorder.yaml`과 `config/gamepad_teleop.yaml`도 다음 계약을
+같은 방식으로 분리한다.
 
 - camera, LiDAR, motor topic
 - WASD angle step, 즉시 speed와 boost, 20 Hz publish rate, key timeout,

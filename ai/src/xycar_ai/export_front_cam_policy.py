@@ -68,6 +68,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=str(DEFAULT_OUTPUT_ROOT),
         help="Artifact parent directory (default: artifacts/models).",
     )
+    parser.add_argument(
+        "--require-schema-version",
+        type=int,
+        choices=(LEGACY_ARTIFACT_SCHEMA_VERSION, AR_ARTIFACT_SCHEMA_VERSION),
+        help="Reject export unless the artifact has this schema version.",
+    )
     return parser
 
 
@@ -77,6 +83,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         checkpoint_path=Path(args.checkpoint),
         artifact_id=args.artifact_id,
         output_root=Path(args.output_root),
+        require_schema_version=args.require_schema_version,
     )
     print(f"exported policy artifact: {artifact_dir}")
     return 0
@@ -87,6 +94,7 @@ def export_checkpoint(
     checkpoint_path: Path,
     artifact_id: str,
     output_root: Path,
+    require_schema_version: int | None = None,
 ) -> Path:
     _validate_artifact_id(artifact_id)
     checkpoint_path = checkpoint_path.expanduser().resolve()
@@ -103,6 +111,19 @@ def export_checkpoint(
     model_config = _mapping(model_config, "model", "checkpoint.config")
     model_name = _string(model_config, "name", "checkpoint.config.model")
     architecture = str(model_config.get("architecture", "task_tokens"))
+    schema_version = (
+        AR_ARTIFACT_SCHEMA_VERSION
+        if architecture == AR_CONTROL_TOKEN_ARCHITECTURE
+        else LEGACY_ARTIFACT_SCHEMA_VERSION
+    )
+    if (
+        require_schema_version is not None
+        and schema_version != require_schema_version
+    ):
+        raise PolicyExportError(
+            "checkpoint would export artifact schema_version "
+            f"{schema_version}, required {require_schema_version}"
+        )
     image_size = _integer(
         model_config,
         "image_size",
@@ -210,7 +231,10 @@ def export_checkpoint(
             ),
             encoding="utf-8",
         )
-        verify_artifact(temporary_dir)
+        verify_artifact(
+            temporary_dir,
+            require_schema_version=require_schema_version,
+        )
         temporary_dir.rename(artifact_dir)
     except BaseException:
         if temporary_dir.is_dir():
@@ -219,7 +243,9 @@ def export_checkpoint(
     return artifact_dir
 
 
-def verify_artifact(artifact_dir: Path) -> None:
+def verify_artifact(
+    artifact_dir: Path, *, require_schema_version: int | None = None
+) -> None:
     artifact_dir = artifact_dir.expanduser()
     if artifact_dir.is_symlink():
         raise PolicyExportError("artifact directory must not be a symlink")
@@ -230,6 +256,18 @@ def verify_artifact(artifact_dir: Path) -> None:
         raise PolicyExportError("artifact manifest is missing or unsafe")
     if not checksum_path.is_file() or checksum_path.is_symlink():
         raise PolicyExportError("artifact checksum file is missing or unsafe")
+    if require_schema_version is not None:
+        try:
+            manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as exc:
+            raise PolicyExportError("artifact manifest is invalid YAML") from exc
+        if not isinstance(manifest, Mapping):
+            raise PolicyExportError("artifact manifest must be a mapping")
+        if manifest.get("schema_version") != require_schema_version:
+            raise PolicyExportError(
+                "artifact schema_version differs from required "
+                f"{require_schema_version}"
+            )
     expected: dict[str, str] = {}
     for line in checksum_path.read_text(encoding="utf-8").splitlines():
         parts = line.split(maxsplit=1)

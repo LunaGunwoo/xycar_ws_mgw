@@ -10,7 +10,7 @@ from conftest import write_session, write_split_manifest
 from PIL import Image
 from torchvision import transforms
 
-from xycar_ai.config import DataConfig
+from xycar_ai.config import DataConfig, DataSourceConfig
 from xycar_ai.front_cam_policy_data import (
     FrontCamPolicyDataset,
     PolicyDatasetError,
@@ -143,6 +143,108 @@ def test_split_manifest_rejects_overlap_and_unlisted_session(tmp_path: Path):
     with pytest.raises(PolicyDatasetError, match="absent from the split manifest"):
         build_policy_data_splits(_data_config(data_root, manifest))
 
+
+def test_multi_source_split_qualifies_colliding_names_and_generation_contracts(
+    tmp_path: Path,
+):
+    manual_root = tmp_path / "datasets" / "stateless_manual"
+    guided_root = tmp_path / "datasets" / "stateless_guided"
+    shared_name = "20260810_130735_027_session"
+    val_name = "20260810_130818_255_session"
+    test_name = "20260810_130857_726_session"
+    write_session(
+        manual_root,
+        shared_name,
+        labels=[(1.0, 7.0)],
+        generation=9,
+    )
+    write_session(
+        guided_root,
+        shared_name,
+        labels=[(2.0, 9.0)],
+        control_mode="guided_policy",
+        generation=1,
+    )
+    write_session(
+        manual_root,
+        val_name,
+        labels=[(3.0, 7.0)],
+    )
+    write_session(
+        guided_root,
+        test_name,
+        labels=[(4.0, 9.0)],
+        control_mode="guided_policy",
+        generation=1,
+    )
+    manifest = write_split_manifest(
+        tmp_path / "config" / "split.yaml",
+        train=[f"manual/{shared_name}", f"guided/{shared_name}"],
+        val=[f"manual/{val_name}"],
+        test=[f"guided/{test_name}"],
+        schema_version=2,
+    )
+    config = _multi_source_data_config(manual_root, guided_root, manifest)
+
+    splits = build_policy_data_splits(config)
+
+    assert [sample.session_id for sample in splits.train_samples] == [
+        f"manual/{shared_name}",
+        f"guided/{shared_name}",
+    ]
+    assert [sample.source_id for sample in splits.train_samples] == [
+        "manual",
+        "guided",
+    ]
+    assert [sample.generation for sample in splits.train_samples] == [0, 1]
+    assert splits.manifest()["schema_version"] == 2
+    assert splits.train_samples[0].relative_image.startswith("manual/")
+    assert splits.train_samples[1].relative_image.startswith("guided/")
+
+
+def test_multi_source_guided_requires_generation_and_source_manifest_schema(
+    tmp_path: Path,
+):
+    manual_root = tmp_path / "datasets" / "stateless_manual"
+    guided_root = tmp_path / "datasets" / "stateless_guided"
+    manual_name = "20260810_130735_027_session"
+    guided_name = "20260810_130818_255_session"
+    test_name = "20260810_130857_726_session"
+    write_session(manual_root, manual_name, labels=[(0.0, 7.0)])
+    write_session(
+        guided_root,
+        guided_name,
+        labels=[(0.0, 9.0)],
+        control_mode="guided_policy",
+    )
+    write_session(manual_root, test_name, labels=[(0.0, 7.0)])
+    manifest = write_split_manifest(
+        tmp_path / "config" / "split.yaml",
+        train=[f"manual/{manual_name}"],
+        val=[f"guided/{guided_name}"],
+        test=[f"manual/{test_name}"],
+        schema_version=2,
+    )
+    config = _multi_source_data_config(manual_root, guided_root, manifest)
+
+    with pytest.raises(PolicyDatasetError, match="curriculum.generation is required"):
+        build_policy_data_splits(config)
+
+    metadata_path = guided_root / guided_name / "metadata.yaml"
+    metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
+    metadata["curriculum"] = {"generation": 1}
+    metadata_path.write_text(
+        yaml.safe_dump(metadata, sort_keys=True), encoding="utf-8"
+    )
+    write_split_manifest(
+        manifest,
+        train=[f"manual/{manual_name}"],
+        val=[f"guided/{guided_name}"],
+        test=[f"manual/{test_name}"],
+        schema_version=1,
+    )
+    with pytest.raises(PolicyDatasetError, match="schema_version must be 2"):
+        build_policy_data_splits(config)
 
 @pytest.mark.parametrize("invalid_value", ["nan", "inf", "-inf", "101"])
 def test_dataset_rejects_invalid_label(tmp_path: Path, invalid_value: str):
@@ -525,6 +627,17 @@ def test_generation_weights_assign_ema_mass_uniformly_within_generation():
     )
 
 
+def test_generation_weights_require_current_training_samples():
+    samples = [_policy_sample(generation=0, angle_class_id=100)]
+
+    with pytest.raises(PolicyDatasetError, match="no samples for current_generation=1"):
+        generation_sampling_weights(
+            samples,
+            current_generation=1,
+            generation_decay=0.5,
+        )
+
+
 def test_initial_class_validation_rejects_a_session_mismatch(tmp_path: Path):
     data_root = tmp_path / "datasets" / "teleop"
     names = [
@@ -606,6 +719,37 @@ def _data_config(data_root: Path, manifest: Path) -> DataConfig:
         max_forward_speed=25.0,
         min_forward_speed=None,
         num_workers=0,
+    )
+
+
+def _multi_source_data_config(
+    manual_root: Path, guided_root: Path, manifest: Path
+) -> DataConfig:
+    return DataConfig(
+        root=None,
+        split_manifest=manifest,
+        require_all_matching_sessions=True,
+        control_mode="",
+        max_forward_speed=None,
+        min_forward_speed=None,
+        num_workers=0,
+        current_generation=1,
+        generation_decay=0.5,
+        ema_sampling=True,
+        sources=(
+            DataSourceConfig(
+                source_id="manual",
+                root=manual_root,
+                control_modes=("gamepad",),
+                fixed_generation=0,
+            ),
+            DataSourceConfig(
+                source_id="guided",
+                root=guided_root,
+                control_modes=("guided_policy",),
+                require_curriculum_generation=True,
+            ),
+        ),
     )
 
 

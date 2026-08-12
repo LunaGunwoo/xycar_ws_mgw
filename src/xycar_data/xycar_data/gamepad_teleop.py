@@ -7,7 +7,9 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import asdict, dataclass
 from enum import Enum
+import hashlib
 import math
+from pathlib import Path
 import signal
 import time
 from typing import Optional, Sequence
@@ -406,6 +408,7 @@ class GamepadTeleopNode(Node):
         self.declare_parameter('joy_topic', '/joy')
         self.declare_parameter('motor_topic', '/xycar_motor')
         self.declare_parameter('camera_topic', '/image_raw')
+        self.declare_parameter('collection_profile_path', '')
         self.declare_parameter('steering_axis', 0)
         self.declare_parameter('lt_axis', 4)
         self.declare_parameter('rt_axis', 5)
@@ -437,6 +440,9 @@ class GamepadTeleopNode(Node):
         self.joy_topic = str(self.get_parameter('joy_topic').value)
         self.motor_topic = str(self.get_parameter('motor_topic').value)
         self.camera_topic = str(self.get_parameter('camera_topic').value)
+        self.collection_profile_path = str(
+            self.get_parameter('collection_profile_path').value
+        )
         self.config = GamepadConfig(
             steering_axis=int(self.get_parameter('steering_axis').value),
             lt_axis=int(self.get_parameter('lt_axis').value),
@@ -498,6 +504,9 @@ class GamepadTeleopNode(Node):
             self.get_parameter('recording_min_free_space_mb').value
         )
         self._validate_parameters()
+        self.collection_profile_metadata = _collection_profile_metadata(
+            self.collection_profile_path
+        )
 
         self.bridge = CvBridge()
         self._command = STOP_COMMAND
@@ -581,6 +590,7 @@ class GamepadTeleopNode(Node):
             raise ValueError('joy_topic must not be empty')
         if not self.motor_topic:
             raise ValueError('motor_topic must not be empty')
+        _validate_collection_profile(self.collection_profile_path)
         _validate_config(self.config)
         _validate_runtime_parameters(
             self.publish_rate_hz,
@@ -732,6 +742,19 @@ class GamepadTeleopNode(Node):
                 'min_free_space_mb': self.recording_min_free_space_mb,
                 'emergency_discard_frames': (
                     self.emergency_discard_frames
+                ),
+            },
+            'collection_profile': dict(self.collection_profile_metadata),
+            'runtime_safety': {
+                'publish_rate_hz': self.publish_rate_hz,
+                'joy_timeout_sec': self.joy_timeout_sec,
+                'graph_check_period_sec': self.graph_check_period_sec,
+                'neutral_trigger_threshold': (
+                    self.neutral_trigger_threshold
+                ),
+                'stop_publish_count': self.stop_publish_count,
+                'allowed_motor_relay_nodes': list(
+                    self.allowed_motor_relay_nodes
                 ),
             },
         }
@@ -1006,6 +1029,27 @@ def _node_label(namespace: str, name: str) -> str:
     prefix = namespace.rstrip('/')
     label = f'{prefix}/{name}'
     return label if label.startswith('/') else f'/{label}'
+
+
+def _validate_collection_profile(configured_path: str) -> None:
+    if not configured_path:
+        return
+    path = Path(configured_path)
+    if not path.is_absolute() or not path.is_file():
+        raise ValueError(
+            'collection_profile_path must be an existing absolute file'
+        )
+
+
+def _collection_profile_metadata(configured_path: str) -> dict[str, object]:
+    if not configured_path:
+        return {'path': None, 'sha256': None}
+    path = Path(configured_path)
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return {'path': configured_path, 'sha256': digest.hexdigest()}
 
 
 def main(args: Optional[Sequence[str]] = None) -> None:

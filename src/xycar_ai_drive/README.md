@@ -18,6 +18,8 @@ ROS 2 패키지다.
   추론 실패 또는 성공한 추론 사이가 0.25초 이상 벌어지면 초기 history로 reset한다.
 - A 버튼으로 ON이 되는 순간에도 AR history와 저장된 예측을 reset한다. reset 뒤
   새 camera frame의 첫 예측이 완료될 때까지 motor output은 `[0, 0]`을 유지한다.
+- 새 증분 수집 기본은 schema v1 stateless artifact다. AR schema v2/v3 경로는
+  rollback 호환성만 유지하며 새 split이나 기본 실행 예시에 사용하지 않는다.
 - angle은 `angle_class_id - 100`이다. speed는
   `max(0, speed_class_id - 100)`이므로 reverse는 금지하지만 양수 예측에는 별도
   cap을 적용하지 않아 label 계약의 최대 `100`까지 전달한다.
@@ -74,9 +76,9 @@ executed_speed = clamp(model_speed + RT * 2 - LT * 5, 0, speed_cap)
 `executed_angle/executed_speed`이며 model prediction, stick/trigger depth, residual,
 사람 개입 여부와 inference latency도 함께 저장한다. angle/speed는 공통 ViT
 backbone과 별도 출력 head를 공유하므로 한 번의 수집과 학습에서 동시에 다룬다.
-첫 generation의 기본 `speed_cap=27`은 기존 speed 25 모델에 RT `+2`를 허용하기
-위한 값이다. 다른 base model이면 그 모델의 검증된 속도와 이번 라운드의 증분에
-맞춰 명시적으로 낮추거나 올린다.
+첫 guided round는 generation 1, `speed_cap=9`, RT `+2`, LT `-5`로 시작한다.
+다음 cap은 이전 라운드의 실차 결과를 검토한 뒤 명시적으로만 바꾸며 자동으로
+증가하지 않는다.
 
 - Y: DRIVE ON/OFF. 시작은 OFF이며 stick과 trigger를 중립으로 놓고 release 후
   눌러야 ON이 된다.
@@ -90,6 +92,11 @@ backbone과 별도 출력 head를 공유하므로 한 번의 수집과 학습에
 raw session은 `recording_root_dir`에 모두 보존한다. `curriculum_generation`은 이
 session을 어느 학습 세대로 취급할지 나타내며, `speed_cap`은 해당 라운드에서
 사람과 모델이 합성한 전진 명령의 상한이다. 두 값은 launch 인자로 지정한다.
+외부 profile `/home/xytron/.config/xycar/guided_stateless_collection.yaml`에는
+residual gain, trigger 증감, deadzone, 버튼, timeout과
+`/home/xytron/xycar_data/stateless_guided` 저장 root를 둔다. session metadata는
+profile 경로·SHA-256과 최종 적용된 보정, inference, recording, 안전 parameter를
+기록한다.
 
 아래 명령은 camera, gamepad와 motor publisher를 시작하므로 매 실행 직전 사용자
 승인이 필요하다. 바퀴 지지 또는 안전 주행 공간, motor 전원 차단 수단, Y와
@@ -103,8 +110,9 @@ source install/setup.bash
 export ROS_DOMAIN_ID=7
 export ROS_NAMESPACE=xycar
 ros2 launch xycar_ai_drive jetson_guided_collection.launch.py \
-  artifact_id:=<schema-v2-or-v3-artifact-id> \
-  curriculum_generation:=1 speed_cap:=27.0 \
+  params_file:=/home/xytron/.config/xycar/guided_stateless_collection.yaml \
+  artifact_id:=<schema-v1-stateless-artifact-id> \
+  curriculum_generation:=1 speed_cap:=9.0 \
   use_camera:=true use_gamepad:=true allow_motion:=true
 ```
 
@@ -117,8 +125,9 @@ CUDA container 없이 host CPU inference를 점검할 때의 일반 launch는 �
 
 ```bash
 ros2 launch xycar_ai_drive guided_policy_collection.launch.py \
-  artifact_id:=<schema-v2-or-v3-artifact-id> \
-  curriculum_generation:=1 speed_cap:=27.0 \
+  params_file:=/home/xytron/.config/xycar/guided_stateless_collection.yaml \
+  artifact_id:=<schema-v1-stateless-artifact-id> \
+  curriculum_generation:=1 speed_cap:=9.0 allow_motion:=false \
   inference_backend:=local inference_device:=cpu
 ```
 
@@ -127,9 +136,10 @@ parameter file과 versioned artifact를 모두 명시한다.
 
 ```bash
 ros2 run xycar_ai_drive guided_policy_collector --ros-args \
-  --params-file /home/xytron/xycar_ws_mgw/install/xycar_ai_drive/share/xycar_ai_drive/config/guided_policy_collection.yaml \
-  -p artifact_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/<artifact-id> \
-  -p curriculum_generation:=1 -p speed_cap:=27.0
+  --params-file /home/xytron/.config/xycar/guided_stateless_collection.yaml \
+  -p collection_profile_path:=/home/xytron/.config/xycar/guided_stateless_collection.yaml \
+  -p artifact_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/<schema-v1-artifact-id> \
+  -p curriculum_generation:=1 -p speed_cap:=9.0 -p allow_motion:=false
 ```
 
 기존 artifact의 `full_frame_bicubic_resize`와 새
@@ -142,8 +152,9 @@ artifact는 manifest에 정규화 source 사다리꼴, BEV 크기와 destination
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 /home/xytron/.local/bin/uv run --locked xycar-export-policy \
-  --checkpoint artifacts/runs/front_cam_policy/baseline_seed20260810/best.pt \
-  --artifact-id front-cam-policy-baseline-e6-20260810
+  --checkpoint artifacts/runs/front_cam_policy/<stateless-run>/best.pt \
+  --artifact-id <schema-v1-stateless-artifact-id> \
+  --require-schema-version 1
 
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw
 ./scripts/ai/deploy_model.sh front-cam-policy-baseline-e6-20260810 --dry-run
@@ -243,7 +254,7 @@ cd /home/xytron/xycar_ws_mgw
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch xycar_ai_drive jetson_gpu_policy.launch.py \
-  artifact_id:=front-cam-policy-tiny-hflip-p05-patience5-e5-20260811 \
+  artifact_id:=<schema-v1-stateless-artifact-id> \
   use_camera:=true use_gamepad:=true allow_motion:=true
 ```
 

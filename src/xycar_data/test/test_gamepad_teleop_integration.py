@@ -107,6 +107,11 @@ def ros_harness(monkeypatch, tmp_path):
         Parameter('recording_queue_size', value=64),
         Parameter('recording_min_free_space_mb', value=0),
     ]
+    profile = tmp_path / 'gamepad_stateless_manual.yaml'
+    profile.write_text('manual: stateless\n', encoding='utf-8')
+    overrides.append(
+        Parameter('collection_profile_path', value=str(profile))
+    )
     teleop = GamepadTeleopNode(parameter_overrides=overrides)
     peer = Node('gamepad_teleop_test_peer')
     received_commands = []
@@ -322,6 +327,13 @@ def test_a_waits_for_forward_and_b_saves_all_frames_without_stopping(
     assert metadata['control_mode'] == 'gamepad'
     assert metadata['stop_reason'] == 'b_button'
     assert metadata['emergency_discard_count'] == 0
+    assert metadata['collection_profile']['path'].endswith(
+        'gamepad_stateless_manual.yaml'
+    )
+    assert len(metadata['collection_profile']['sha256']) == 64
+    assert metadata['recording']['root_dir'] == str(
+        harness['recording_root']
+    )
 
 
 def test_nonpositive_speed_discards_fifteen_and_keeps_driving(

@@ -1,0 +1,7 @@
+schema_version: 2
+dataset_snapshot: stateless_ema_manual_review_required
+splits:
+  # Add only reviewed source-qualified IDs, for example manual/<session-id>.
+  train: []
+  val: []
+  test: []

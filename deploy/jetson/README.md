@@ -55,6 +55,13 @@ migration backup에 보존한 뒤, Desktop `x27.desktop`이 Jetson motor wrapper
 `~/.local/lib/xycar-ai-gpu/`에 함께 복사하므로 source checkout 위치나 이후의
 부분 빌드에 의존하지 않는다. motor wrapper와 lock도 같은 이유로
 `~/.local/lib/xycar-motor/`에 복사한다.
+stateless 수집 profile 두 개는 `~/.config/xycar/`에 파일이 없을 때만 설치한다.
+차량에서 튜닝한 기존 profile은 이후 재설치에서도 덮어쓰지 않는다.
+
+```text
+~/.config/xycar/gamepad_stateless_manual.yaml
+~/.config/xycar/guided_stateless_collection.yaml
+```
 
 학습용 `ai/uv.lock`은 4090 Laptop CUDA 환경이므로 Jetson에서 `uv sync`하지 않는다.
 GPU image build context는 runtime package인 `src/xycar_ai_drive`로 제한하며 dataset,
@@ -94,8 +101,9 @@ cd /home/xytron/xycar_ws_mgw
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch xycar_ai_drive jetson_guided_collection.launch.py \
-  artifact_id:=<schema-v2-or-v3-artifact-id> \
-  curriculum_generation:=1 speed_cap:=27.0 \
+  params_file:=/home/xytron/.config/xycar/guided_stateless_collection.yaml \
+  artifact_id:=<schema-v1-stateless-artifact-id> \
+  curriculum_generation:=1 speed_cap:=9.0 \
   use_camera:=true use_gamepad:=true allow_motion:=true
 ```
 

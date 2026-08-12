@@ -3,11 +3,15 @@
 
 import hashlib
 import json
+import csv
+from collections import deque
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import yaml
+from xycar_data.session_writer import AsyncSessionWriter
 from xycar_ai_drive.artifact import (
     ArtifactContractError,
     RoadWarpParameters,
@@ -21,7 +25,12 @@ from xycar_ai_drive.control import (
     is_fresh,
 )
 from xycar_ai_drive.guided_policy_collector import (
+    FusedCommand,
     GuideInput,
+    GuidedPolicyCollectorNode,
+    GuidedPrediction,
+    _collection_profile_metadata,
+    _validate_collection_profile,
     fuse_guided_command,
     trigger_depth,
 )
@@ -110,6 +119,119 @@ def test_guided_command_fuses_joint_angle_speed_and_clamps_safely():
     assert stopped.executed == DriveCommand(angle=100.0, speed=0.0)
     assert trigger_depth(-1.0, 'negative') == 1.0
     assert trigger_depth(1.0, 'signed') == 0.0
+
+
+def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
+    profile = tmp_path / 'guided.yaml'
+    profile.write_text('guided: stateless\n', encoding='utf-8')
+    assert GuidedPolicyCollectorNode._initial_history(
+        SimpleNamespace(artifact=SimpleNamespace(history=None))
+    ) is None
+    profile_metadata = _collection_profile_metadata(str(profile))
+    assert profile_metadata['path'] == str(profile)
+    assert profile_metadata['sha256'] == hashlib.sha256(
+        profile.read_bytes()
+    ).hexdigest()
+    with pytest.raises(ValueError, match='existing absolute file'):
+        _validate_collection_profile(str(tmp_path / 'missing.yaml'))
+
+    writer = AsyncSessionWriter(
+        tmp_path / 'sessions',
+        png_compression=0,
+        queue_size=16,
+        min_free_space_mb=0,
+    )
+    token = writer.start_session({'control_mode': 'guided_policy'})
+    assert token is not None
+    fake = SimpleNamespace(
+        _recording_tail=deque(),
+        recording_queue_size=128,
+        tail_discard_frames=0,
+        _session_token=token,
+        writer=writer,
+    )
+    fake._flush_recording_prefix = lambda: (
+        GuidedPolicyCollectorNode._flush_recording_prefix(fake)
+    )
+    prediction = GuidedPrediction(
+        sequence=4,
+        command=DriveCommand(angle=20.0, speed=6.0),
+        source_monotonic=1.0,
+        completed_monotonic=1.01,
+        inference_ms=3.0,
+        image_bgr=np.zeros((4, 6, 3), dtype=np.uint8),
+        stamp_sec=1,
+        stamp_nanosec=2,
+        received_wall_time_ns=3,
+    )
+    guide = GuideInput(steering_axis=0.5, rt_depth=1.0)
+    fused = FusedCommand(
+        executed=DriveCommand(angle=-80.0, speed=8.0),
+        steering_residual=-100.0,
+        speed_delta=2.0,
+        human_correction=True,
+    )
+
+    GuidedPolicyCollectorNode._record_prediction(
+        fake, prediction, guide, fused
+    )
+
+    assert not fake._recording_tail
+    assert writer.finish(token, 'test_complete')
+    assert writer.shutdown()
+    results = writer.poll_results()
+    assert len(results) == 1
+    with (results[0].path / 'samples.csv').open(
+        encoding='utf-8', newline=''
+    ) as stream:
+        rows = list(csv.DictReader(stream))
+    assert [(row['angle'], row['speed']) for row in rows] == [
+        ('-80.000000', '8.000000')
+    ]
+    assert [(row['model_angle'], row['model_speed']) for row in rows] == [
+        ('20.000000', '6.000000')
+    ]
+    assert rows[0]['human_correction'] == 'true'
+
+
+def test_stateless_external_collection_templates_and_launch_contract():
+    package_root = Path(__file__).parents[1]
+    profile = yaml.safe_load(
+        (
+            package_root / 'config' / 'guided_stateless_collection.yaml'
+        ).read_text(encoding='utf-8')
+    )['guided_policy_collector']['ros__parameters']
+    launch_text = (
+        package_root / 'launch' / 'jetson_guided_collection.launch.py'
+    ).read_text(encoding='utf-8')
+    collector_text = (
+        package_root
+        / 'xycar_ai_drive'
+        / 'guided_policy_collector.py'
+    ).read_text(encoding='utf-8')
+
+    assert profile['recording_root_dir'].endswith('/stateless_guided')
+    assert profile['speed_cap'] == 9.0
+    assert profile['rt_speed_increment'] == 2.0
+    assert profile['lt_speed_decrement'] == 5.0
+    assert profile['curriculum_generation'] == 1
+    assert profile['allow_motion'] is False
+    assert "['params_file:=', params_file]" in launch_text
+    assert 'OpaqueFunction(function=_require_params_file)' in launch_text
+    for metadata_group in (
+        "'collection_profile':",
+        "'runtime_safety':",
+        "'inference_runtime':",
+        "'recording':",
+    ):
+        assert metadata_group in collector_text
+    for required in (
+        "DeclareLaunchArgument(\n                'artifact_id'",
+        "DeclareLaunchArgument(\n                'allow_motion'",
+        "DeclareLaunchArgument(\n                'curriculum_generation'",
+        "DeclareLaunchArgument(\n                'speed_cap'",
+    ):
+        assert required in launch_text
 
 
 def test_freshness_and_rgb_preprocessing_contract():

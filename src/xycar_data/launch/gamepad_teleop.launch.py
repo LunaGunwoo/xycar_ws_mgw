@@ -79,7 +79,15 @@ def generate_launch_description():
                 name='gamepad_teleop',
                 namespace='/',
                 output='screen',
-                parameters=[params_file],
+                parameters=[
+                    params_file,
+                    {
+                        'collection_profile_path': ParameterValue(
+                            params_file,
+                            value_type=str,
+                        )
+                    },
+                ],
             ),
         ]
     )

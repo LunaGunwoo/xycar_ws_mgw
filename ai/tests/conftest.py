@@ -94,12 +94,13 @@ def write_split_manifest(
     train: list[str],
     val: list[str],
     test: list[str],
+    schema_version: int = 1,
 ) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         yaml.safe_dump(
             {
-                "schema_version": 1,
+                "schema_version": schema_version,
                 "dataset_snapshot": "synthetic",
                 "splits": {"train": train, "val": val, "test": test},
             },

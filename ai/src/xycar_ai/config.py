@@ -3,14 +3,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
+import re
 from typing import Any
 
 import yaml
 
-CONFIG_SCHEMA_VERSIONS = {1, 2}
+CONFIG_SCHEMA_VERSIONS = {1, 2, 3}
 CLASS_WEIGHTING_MODES = {"none", "sqrt_inverse_frequency"}
 MODEL_ARCHITECTURES = {"task_tokens", "ar_control_tokens"}
 HISTORY_UPDATE_MODES = {"predicted_argmax", "externally_executed_commands"}
+STATELESS_EMA_MODEL = "vit_small_patch16_224.augreg_in21k_ft_in1k"
 
 
 @dataclass(frozen=True)
@@ -27,8 +29,17 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
-class DataConfig:
+class DataSourceConfig:
+    source_id: str
     root: Path
+    control_modes: tuple[str, ...]
+    fixed_generation: int | None = None
+    require_curriculum_generation: bool = False
+
+
+@dataclass(frozen=True)
+class DataConfig:
+    root: Path | None
     split_manifest: Path
     require_all_matching_sessions: bool
     control_mode: str
@@ -41,6 +52,7 @@ class DataConfig:
     generation_decay: float = 1.0
     legacy_generation: int = 0
     ema_sampling: bool = False
+    sources: tuple[DataSourceConfig, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -263,7 +275,13 @@ def load_train_config(path: str | Path) -> TrainConfig:
             ),
         ),
         data=DataConfig(
-            root=_resolve_project_path(project_root, _string(data_payload, "root")),
+            root=(
+                None
+                if schema_version == 3
+                else _resolve_project_path(
+                    project_root, _string(data_payload, "root")
+                )
+            ),
             split_manifest=_resolve_project_path(
                 project_root, _string(data_payload, "split_manifest")
             ),
@@ -311,7 +329,12 @@ def load_train_config(path: str | Path) -> TrainConfig:
                 if "legacy_generation" in data_payload
                 else 0
             ),
-            ema_sampling=schema_version == 2,
+            ema_sampling=schema_version in {2, 3},
+            sources=(
+                _parse_data_sources(project_root, data_payload)
+                if schema_version == 3
+                else ()
+            ),
         ),
         preprocessing=PreprocessingConfig(
             road_warp_config=(
@@ -406,14 +429,84 @@ def _validate(config: TrainConfig) -> None:
             )
     if config.data.num_workers < 0:
         raise ValueError("data.num_workers must be >= 0")
-    if bool(config.data.control_mode) == bool(config.data.control_modes):
-        raise ValueError(
-            "exactly one of data.control_mode or data.control_modes is required"
-        )
-    if config.data.control_modes and len(set(config.data.control_modes)) != len(
-        config.data.control_modes
-    ):
-        raise ValueError("data.control_modes must not contain duplicates")
+    if config.data.sources:
+        if config.data.root is not None:
+            raise ValueError("multi-source data.root must be unset")
+        source_ids = [source.source_id for source in config.data.sources]
+        if len(set(source_ids)) != len(source_ids):
+            raise ValueError("data.sources ids must not contain duplicates")
+        source_roots = [source.root for source in config.data.sources]
+        if len(set(source_roots)) != len(source_roots):
+            raise ValueError("data.sources roots must be distinct")
+        for source in config.data.sources:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", source.source_id):
+                raise ValueError(f"invalid data source id: {source.source_id!r}")
+            if len(set(source.control_modes)) != len(source.control_modes):
+                raise ValueError(
+                    f"data.sources.{source.source_id}.control_modes has duplicates"
+                )
+            if source.fixed_generation is not None and source.fixed_generation < 0:
+                raise ValueError(
+                    f"data.sources.{source.source_id}.fixed_generation must be >= 0"
+                )
+            if (
+                source.fixed_generation is not None
+                and source.fixed_generation > config.data.current_generation
+            ):
+                raise ValueError(
+                    f"data.sources.{source.source_id}.fixed_generation cannot "
+                    "exceed current_generation"
+                )
+        sources_by_id = {
+            source.source_id: source for source in config.data.sources
+        }
+        if set(sources_by_id) != {"manual", "guided"}:
+            raise ValueError(
+                "multi-source stateless data requires manual and guided sources"
+            )
+        manual = sources_by_id["manual"]
+        guided = sources_by_id["guided"]
+        if manual.control_modes != ("gamepad",) or manual.fixed_generation != 0:
+            raise ValueError(
+                "manual source must accept only gamepad sessions at fixed_generation 0"
+            )
+        if (
+            guided.control_modes != ("guided_policy",)
+            or not guided.require_curriculum_generation
+        ):
+            raise ValueError(
+                "guided source must accept only guided_policy sessions and require generation"
+            )
+        if (
+            config.model.name != STATELESS_EMA_MODEL
+            or config.model.architecture != "task_tokens"
+            or config.model.history_frames != 0
+            or not config.model.pretrained
+            or config.model.image_size != 224
+            or config.data.train_angle_mean_window != 1
+            or config.preprocessing.road_warp_config is None
+        ):
+            raise ValueError(
+                "multi-source stateless data requires pretrained ViT-Small, "
+                "task_tokens, 224 road warp, and raw instantaneous angle"
+            )
+        if not config.output.run_name.endswith(
+            f"generation{config.data.current_generation}"
+        ):
+            raise ValueError(
+                "multi-source output.run_name must end with current generation"
+            )
+    else:
+        if config.data.root is None:
+            raise ValueError("single-source data.root is required")
+        if bool(config.data.control_mode) == bool(config.data.control_modes):
+            raise ValueError(
+                "exactly one of data.control_mode or data.control_modes is required"
+            )
+        if config.data.control_modes and len(set(config.data.control_modes)) != len(
+            config.data.control_modes
+        ):
+            raise ValueError("data.control_modes must not contain duplicates")
     if config.data.current_generation < 0 or config.data.legacy_generation < 0:
         raise ValueError("data generation numbers must be >= 0")
     if config.data.legacy_generation > config.data.current_generation:
@@ -509,6 +602,22 @@ def _expect_keys(
 
 
 def _expect_data_keys(payload: Mapping[str, object], *, schema_version: int) -> None:
+    if schema_version == 3:
+        _expect_keys(
+            payload,
+            {
+                "sources",
+                "split_manifest",
+                "require_all_matching_sessions",
+                "num_workers",
+                "current_generation",
+                "generation_decay",
+            },
+            "data",
+            optional={"train_angle_mean_window"},
+        )
+        return
+
     if schema_version == 2:
         required = {
             "root",
@@ -557,6 +666,60 @@ def _expect_data_keys(payload: Mapping[str, object], *, schema_version: int) -> 
             f"missing={sorted(missing)}, extra={sorted(extra)}, "
             "exactly one of max_forward_speed or min_forward_speed is required"
         )
+
+
+def _parse_data_sources(
+    project_root: Path, data_payload: Mapping[str, object]
+) -> tuple[DataSourceConfig, ...]:
+    sources_payload = data_payload.get("sources")
+    if not isinstance(sources_payload, dict) or not sources_payload:
+        raise ValueError("data.sources must be a non-empty mapping")
+    sources: list[DataSourceConfig] = []
+    for source_id, raw_source in sources_payload.items():
+        if not isinstance(source_id, str) or not source_id:
+            raise ValueError("data.sources keys must be non-empty strings")
+        if not isinstance(raw_source, dict):
+            raise TypeError(f"data.sources.{source_id} must be a mapping")
+        source_payload = dict(raw_source)
+        _expect_keys(
+            source_payload,
+            {"root", "control_modes"},
+            f"data.sources.{source_id}",
+            optional={"fixed_generation", "require_curriculum_generation"},
+        )
+        generation_keys = {
+            "fixed_generation",
+            "require_curriculum_generation",
+        } & set(source_payload)
+        if len(generation_keys) != 1:
+            raise ValueError(
+                f"data.sources.{source_id} must define exactly one generation contract"
+            )
+        require_generation = (
+            _boolean(source_payload, "require_curriculum_generation")
+            if "require_curriculum_generation" in source_payload
+            else False
+        )
+        if "require_curriculum_generation" in source_payload and not require_generation:
+            raise ValueError(
+                f"data.sources.{source_id}.require_curriculum_generation must be true"
+            )
+        sources.append(
+            DataSourceConfig(
+                source_id=source_id,
+                root=_resolve_project_path(
+                    project_root, _string(source_payload, "root")
+                ),
+                control_modes=_string_tuple(source_payload, "control_modes"),
+                fixed_generation=(
+                    _integer(source_payload, "fixed_generation")
+                    if "fixed_generation" in source_payload
+                    else None
+                ),
+                require_curriculum_generation=require_generation,
+            )
+        )
+    return tuple(sources)
 
 
 def _string_tuple(payload: Mapping[str, object], key: str) -> tuple[str, ...]:

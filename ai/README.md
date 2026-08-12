@@ -7,12 +7,14 @@
 
 - Python: 3.12
 - uv: 0.11.24
-- dataset: `datasets/teleop/`
+- 새 dataset: `datasets/stateless_manual/`, `datasets/stateless_guided/`
+- rollback dataset: `datasets/teleop/`
 - training output: `artifacts/`
 - 배포 후보: `artifacts/models/<artifact-id>/`
 
 `.venv`, dataset과 artifact는 Git에 commit하지 않는다. `.venv`는 lockfile에서
-재생성한다. 학습은 내부 ext4의 실제 `datasets/teleop` directory만 사용한다.
+재생성한다. 새 학습은 내부 ext4의 두 `datasets/stateless_*` directory만 사용한다.
+기존 `datasets/teleop`은 rollback 실험에만 사용한다.
 Windows `/mnt/c`를 가리키는 symlink는 최초 Windows sync에서 안전하게 실제
 directory로 전환해 학습 시 WSL filesystem 경계를 넘는 image I/O를 제거한다.
 
@@ -36,8 +38,9 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 
 ### 기존 Windows C: snapshot 미러 (선택 사항)
 
-새 기본 workflow는 아래의 T7 direct pull이다. 기존 C: snapshot을 원본으로 계속
-사용해야 할 때만 MGW root에서 Windows dataset을 WSL 작업본으로 가져온다. 기본
+아래 T7·Windows 절은 기존 `datasets/teleop` rollback dataset을 유지할 때만
+사용한다. 새 stateless 기본은 뒤의 차량 두-root 동기화 절차다. 기존 C: snapshot을
+원본으로 계속 사용해야 할 때만 MGW root에서 Windows dataset을 WSL 작업본으로 가져온다. 기본
 source는 `/mnt/c/Users/gunwoo/Desktop/teleop`, destination은
 `ai/datasets/teleop`이다. 완료된 gamepad session 중 metadata의
 `max_forward_speed >= 20`인 session만 선택하며 현재 기준 11 sessions,
@@ -291,9 +294,10 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
   --resume artifacts/runs/front_cam_policy/vit_small_warp_angle_mean5_hflip_p05_seed20260811/last.pt
 ```
 
-### 정답 history 기반 AR control token
+### 기존 AR control token 재현 (rollback 전용)
 
-AR 설정은 현재 warped image token 뒤에 과거 4 frame의 angle/speed token과 현재
+이 절은 과거 결과 재현과 rollback 검증에만 사용한다. 새 stateless dataset과
+curriculum에는 적용하지 않는다. AR 설정은 현재 warped image token 뒤에 과거 4 frame의 angle/speed token과 현재
 angle/speed query를 다음 순서로 붙인다.
 
 ```text
@@ -348,22 +352,31 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 probe run에는 최종 test 대신 `probe_summary.json`을 기록한다. 승자를 총 20 epoch까지
 resume한 뒤에만 best checkpoint를 prediction rollout 방식으로 test 평가한다.
 
-### 사람 보정 세대 학습과 EMA sampling
+### Stateless ViT-Small 증분 학습과 EMA sampling
 
-`config/front_cam_policy_train_guided_ema.yaml`은 gamepad 초기 데이터와
-`guided_policy` session을 함께 읽는 schema 2 설정이다. 모델은 angle/speed를
-동시에 내는 기존 공통 backbone·두 head 구조를 유지한다. AR history는 smoothed
-학습 target이나 직전 argmax가 아니라 각 frame 전에 실제로 실행된 angle/speed
-네 쌍이다. guided session은 수집 metadata의 `initial_history_class_ids`부터
-시작하고, legacy gamepad session은 canonical `(angle=0, speed=25)` 명령을
-edge padding으로 사용한다.
-history를 먼저 구성한 다음 현재 train angle에만 centered mean을 적용하므로
-과거 실행 명령이 smoothing으로 바뀌지 않는다.
+새 기본 workflow는 기존 `datasets/teleop`과 checkpoint를 사용하지 않는다.
+수동·사람 보정 session은 각각 다음 root에 물리적으로 분리하고, 한 학습 run에서만
+두 source를 함께 읽는다.
 
-raw session은 삭제하지 않는다. 각 guided session의
-`metadata.curriculum.generation`을 사용하고 이 필드가 없는 기존 session은
-`legacy_generation`으로 취급한다. train epoch의 세대별 총 sampling mass는 다음과
-같고 같은 세대 안에서는 intervention 여부와 관계없이 frame을 균등하게 뽑는다.
+```text
+datasets/stateless_manual  # control_mode=gamepad, 항상 generation 0
+datasets/stateless_guided  # control_mode=guided_policy, curriculum.generation 필수
+```
+
+`config/front_cam_policy_train_stateless_ema.yaml`은 pretrained
+`vit_small_patch16_224`, `task_tokens`, history 0, 224x224 road warp와 raw instantaneous
+angle(`train_angle_mean_window: 1`)을 강제하는 schema 3 설정이다. AR 학습 설정과
+schema v2/v3 runtime은 rollback용으로 남아 있지만 새 데이터에는 사용하지 않는다.
+
+split은 `config/front_cam_policy_split_stateless_ema.yaml`을 사람이 검토해 갱신한다.
+ID는 반드시 `manual/<session-id>` 또는 `guided/<session-id>`로 적는다. 서로 다른
+root에 같은 session directory 이름이 있어도 source-qualified ID가 다르므로
+충돌하지 않는다. guided session에 generation이 없거나 train split에
+`current_generation` sample이 없거나 더 미래 generation이 있으면 검증을 거부한다.
+
+train epoch의 세대별 총 sampling mass는 다음과 같고 같은 세대 안에서는 frame을
+균등하게 뽑는다. raw session은 삭제하지 않으며 과거 영향은 sampling mass로만
+지수 감쇠한다.
 
 ```text
 mass(g) = generation_decay ** (current_generation - g)
@@ -378,30 +391,60 @@ checkpoint 선택식 `angle_mae + 0.25 * speed_mae` 역시 세대별 metric을 �
 epoch sample 수를 기록한다. config의 `current_generation`보다 새 generation이
 있거나 train split에 current generation sample이 없으면 학습을 거부한다.
 
-새 수집 session은 train/val/test에 session 단위로 배치해 split YAML에 명시한다.
-첫 guided round라면 config의 `current_generation`, `output.run_name`을 1로 올리고
-generation 1 session이 train에 적어도 하나 있도록 manifest를 갱신한다. raw
-dataset을 합쳐 복사하거나 과거 session을 삭제할 필요는 없다.
+generation 0은 ImageNet pretrained weight에서 시작한다. generation 1부터는 config의
+`current_generation`과 `output.run_name`을 같은 generation 번호로 바꾸고 직전
+stateless run의 `best.pt`를 `--initialize-from`으로 반드시 지정한다. 이 옵션은
+model state만 strict load하고 optimizer, scheduler, AMP scaler, epoch와
+early-stopping state는 새로 시작한다. 같은 generation run의 중단 재개만
+`--resume`을 사용한다.
 
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 /home/xytron/.local/bin/uv run --locked xycar-train \
-  --config config/front_cam_policy_train_guided_ema.yaml \
+  --config config/front_cam_policy_train_stateless_ema.yaml \
   --validate-only
 
+# generation 0
 /home/xytron/.local/bin/uv run --locked xycar-train \
-  --config config/front_cam_policy_train_guided_ema.yaml \
+  --config config/front_cam_policy_train_stateless_ema.yaml
+
+# generation 1 이상: YAML의 current_generation과 run_name을 먼저 갱신
+/home/xytron/.local/bin/uv run --locked xycar-train \
+  --config config/front_cam_policy_train_stateless_ema.yaml \
   --initialize-from artifacts/runs/front_cam_policy/<previous-run>/best.pt
 ```
 
-`--initialize-from`은 model state만 strict load하고 새 run directory에서 optimizer,
-scheduler, AMP scaler, epoch와 early-stopping 상태를 모두 초기화한다. source
-checkpoint 경로와 SHA-256은 새 checkpoint/summary에 기록된다. 같은 run을 중단
-지점부터 이어가는 `--resume`과는 서로 배타적이다. 다음 세대도 이전 세대의
-`best.pt`를 `--initialize-from`으로 지정하고 generation과 speed cap을 한 단계씩
-올린다.
+export는 schema v1을 명시적으로 요구한다. stateless가 아닌 checkpoint면 artifact를
+만들기 전에 거부하며, 성공한 artifact는 checksum까지 다시 검증한다.
 
-### 감속 평가용 session split
+```bash
+/home/xytron/.local/bin/uv run --locked xycar-export-policy \
+  --checkpoint artifacts/runs/front_cam_policy/<current-run>/best.pt \
+  --artifact-id <schema-v1-stateless-artifact-id> \
+  --require-schema-version 1
+```
+
+차량 두 root를 Laptop으로 가져올 때는 하나의 directory로 합치지 않고 같은 sync
+script를 환경변수를 바꿔 두 번 실행한다. 각각 dry-run을 검토한 뒤 `--apply`한다.
+
+```bash
+cd /home/xytron/xycar_ws/apps/xycar_ws_mgw
+XYCAR_AI_VEHICLE_DATASET_ROOT=/home/xytron/xycar_data/stateless_manual \
+XYCAR_AI_LOCAL_DATASET_ROOT="$PWD/ai/datasets/stateless_manual" \
+  ./scripts/ai/sync_dataset.sh
+XYCAR_AI_VEHICLE_DATASET_ROOT=/home/xytron/xycar_data/stateless_manual \
+XYCAR_AI_LOCAL_DATASET_ROOT="$PWD/ai/datasets/stateless_manual" \
+  ./scripts/ai/sync_dataset.sh --apply
+
+XYCAR_AI_VEHICLE_DATASET_ROOT=/home/xytron/xycar_data/stateless_guided \
+XYCAR_AI_LOCAL_DATASET_ROOT="$PWD/ai/datasets/stateless_guided" \
+  ./scripts/ai/sync_dataset.sh
+XYCAR_AI_VEHICLE_DATASET_ROOT=/home/xytron/xycar_data/stateless_guided \
+XYCAR_AI_LOCAL_DATASET_ROOT="$PWD/ai/datasets/stateless_guided" \
+  ./scripts/ai/sync_dataset.sh --apply
+```
+
+### 기존 stateless/AR 감속 비교 재현 (rollback 전용)
 
 기존 min-speed-20 split은 speed를 크게 낮춘 세 session이 모두 train에 있어
 validation 685장은 전부 speed 25였고 test도 702장 중 699장이 speed 25였다.
@@ -535,13 +578,9 @@ artifact ID는 덮어쓰지 않는다. stateless schema v1은 image `[1,3,224,22
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 /home/xytron/.local/bin/uv run --locked xycar-export-policy \
-  --checkpoint artifacts/runs/front_cam_policy/baseline_seed20260810/best.pt \
-  --artifact-id front-cam-policy-baseline-e6-20260810
-
-# AR winner 예시
-/home/xytron/.local/bin/uv run --locked xycar-export-policy \
-  --checkpoint artifacts/runs/front_cam_policy/<winner-run>/best.pt \
-  --artifact-id <ar-artifact-id>
+  --checkpoint artifacts/runs/front_cam_policy/<stateless-run>/best.pt \
+  --artifact-id <schema-v1-stateless-artifact-id> \
+  --require-schema-version 1
 ```
 
 exporter는 checkpoint model state를 strict load하고 eager/trace/reload 결과와 두

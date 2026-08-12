@@ -17,6 +17,7 @@ from xycar_ai.train_front_cam_policy import (
     initialize_model_weights,
     load_configured_road_warp,
     main,
+    validate_incremental_initialization,
     validate_resume_payload,
 )
 
@@ -114,6 +115,116 @@ def test_guided_ema_config_uses_external_history_and_generation_decay():
     assert config.data.control_modes == ("gamepad", "guided_policy")
     assert config.data.current_generation == 0
     assert config.data.generation_decay == 0.5
+
+
+def test_stateless_ema_config_uses_two_qualified_sources_and_raw_angle(
+    tmp_path: Path,
+):
+    project_root = Path(__file__).parents[1]
+    config = load_train_config(
+        project_root / "config" / "front_cam_policy_train_stateless_ema.yaml"
+    )
+
+    assert config.model.name == "vit_small_patch16_224.augreg_in21k_ft_in1k"
+    assert config.model.architecture == "task_tokens"
+    assert config.model.history_frames == 0
+    assert config.model.image_size == 224
+    assert config.preprocessing.road_warp_config == (
+        project_root / "config" / "front_cam_policy_preprocess.yaml"
+    )
+    assert config.data.train_angle_mean_window == 1
+    assert config.data.ema_sampling
+    assert config.data.current_generation == 0
+    assert config.data.generation_decay == 0.5
+    assert [(source.source_id, source.fixed_generation) for source in config.data.sources] == [
+        ("manual", 0),
+        ("guided", None),
+    ]
+    assert config.data.sources[1].require_curriculum_generation
+    assert config.output.run_name == "vit_small_stateless_ema_generation0"
+    validate_incremental_initialization(
+        config, initialize_from="", resume=""
+    )
+    with pytest.raises(ValueError, match="pretrained ImageNet"):
+        validate_incremental_initialization(
+            config, initialize_from="previous.pt", resume=""
+        )
+
+    generation_one = copy.deepcopy(config)
+    object.__setattr__(generation_one.data, "current_generation", 1)
+    with pytest.raises(ValueError, match="requires --initialize-from"):
+        validate_incremental_initialization(
+            generation_one, initialize_from="", resume=""
+        )
+    validate_incremental_initialization(
+        generation_one, initialize_from="previous.pt", resume=""
+    )
+
+    source = torch.nn.Linear(3, 2)
+    target = torch.nn.Linear(3, 2)
+    checkpoint_path = tmp_path / "generation0-best.pt"
+    torch.save(
+        {
+            "schema_version": 1,
+            "epoch": 3,
+            "model_name": config.model.name,
+            "config": config.serializable(),
+            "model_state": source.state_dict(),
+        },
+        checkpoint_path,
+    )
+    metadata = initialize_model_weights(
+        model=target,
+        checkpoint=str(checkpoint_path),
+        config=generation_one,
+        device=torch.device("cpu"),
+    )
+    assert metadata is not None
+    assert metadata["mode"] == "model_weights_only"
+    assert torch.equal(target.weight, source.weight)
+
+
+def test_stateless_two_root_config_validate_only_with_synthetic_sessions(
+    tmp_path: Path,
+):
+    project_root = Path(__file__).parents[1]
+    manual_root = tmp_path / "datasets" / "stateless_manual"
+    guided_root = tmp_path / "datasets" / "stateless_guided"
+    guided_root.mkdir(parents=True)
+    names = [
+        "20260813_010101_001_session",
+        "20260813_010102_001_session",
+        "20260813_010103_001_session",
+    ]
+    for name in names:
+        write_session(manual_root, name, labels=[(0.0, 7.0)])
+    split_path = write_split_manifest(
+        tmp_path / "config" / "split.yaml",
+        train=[f"manual/{names[0]}"],
+        val=[f"manual/{names[1]}"],
+        test=[f"manual/{names[2]}"],
+        schema_version=2,
+    )
+    payload = yaml.safe_load(
+        (
+            project_root
+            / "config"
+            / "front_cam_policy_train_stateless_ema.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    payload["data"]["sources"]["manual"]["root"] = str(manual_root)
+    payload["data"]["sources"]["guided"]["root"] = str(guided_root)
+    payload["data"]["split_manifest"] = str(split_path)
+    payload["preprocessing"]["road_warp_config"] = str(
+        project_root / "config" / "front_cam_policy_preprocess.yaml"
+    )
+    payload["output"]["root"] = str(tmp_path / "artifacts")
+    config_path = tmp_path / "config" / "train.yaml"
+    config_path.write_text(
+        yaml.safe_dump(payload, sort_keys=False), encoding="utf-8"
+    )
+
+    assert main(["--config", str(config_path), "--validate-only"]) == 0
 
 
 def test_small_warp_config_embeds_preprocessing_contract():

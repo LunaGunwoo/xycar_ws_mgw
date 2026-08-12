@@ -16,7 +16,7 @@ from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms import functional as transform_functional
 
-from xycar_ai.config import AugmentationConfig, DataConfig
+from xycar_ai.config import AugmentationConfig, DataConfig, DataSourceConfig
 from xycar_ai.front_cam_policy_warp import RoadWarpConfig, warp_pil_image
 
 COMMAND_MIN = -100
@@ -55,6 +55,7 @@ class PolicySample:
     speed_class_id: int
     history_class_ids: tuple[tuple[int, int], ...] | None = None
     generation: int = 0
+    source_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,7 @@ class PolicySession:
     metadata: Mapping[str, object]
     samples: tuple[PolicySample, ...]
     generation: int = 0
+    source_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -110,7 +112,15 @@ class PolicyDataSplits:
                 )
             split_payload[name] = details
         return {
-            "schema_version": 1,
+            "schema_version": (
+                2
+                if any(
+                    session.source_id is not None
+                    for sessions in self._session_groups().values()
+                    for session in sessions
+                )
+                else 1
+            ),
             "dataset_snapshot": self.dataset_snapshot,
             "splits": split_payload,
         }
@@ -298,11 +308,20 @@ def command_class_id(value: float) -> int:
 
 
 def discover_policy_sessions(config: DataConfig) -> tuple[PolicySession, ...]:
-    root = config.root
-    if not root.is_dir():
-        raise PolicyDatasetError(f"dataset root does not exist: {root}")
-
     sessions: list[PolicySession] = []
+    if config.sources:
+        for source in config.sources:
+            sessions.extend(_discover_source_sessions(source))
+        if not sessions:
+            roots = ", ".join(str(source.root) for source in config.sources)
+            raise PolicyDatasetError(
+                f"no completed policy sessions match configured sources under {roots}"
+            )
+        return tuple(sessions)
+
+    root = config.root
+    if root is None or not root.is_dir():
+        raise PolicyDatasetError(f"dataset root does not exist: {root}")
     for path in sorted(root.iterdir()):
         if not path.is_dir() or not SESSION_NAME_RE.fullmatch(path.name):
             continue
@@ -326,6 +345,33 @@ def discover_policy_sessions(config: DataConfig) -> tuple[PolicySession, ...]:
     return tuple(sessions)
 
 
+def _discover_source_sessions(source: DataSourceConfig) -> list[PolicySession]:
+    if not source.root.is_dir():
+        raise PolicyDatasetError(
+            f"dataset source root does not exist: {source.source_id}={source.root}"
+        )
+    sessions: list[PolicySession] = []
+    for path in sorted(source.root.iterdir()):
+        if not path.is_dir() or not SESSION_NAME_RE.fullmatch(path.name):
+            continue
+        metadata = _load_metadata(path / "metadata.yaml")
+        if not _matches_source_filter(metadata, source):
+            continue
+        sessions.append(
+            _load_policy_session(
+                path,
+                source.root,
+                metadata,
+                source_id=source.source_id,
+                fixed_generation=source.fixed_generation,
+                require_curriculum_generation=(
+                    source.require_curriculum_generation
+                ),
+            )
+        )
+    return sessions
+
+
 def build_policy_data_splits(
     config: DataConfig,
 ) -> PolicyDataSplits:
@@ -335,8 +381,13 @@ def build_policy_data_splits(
         raise PolicyDatasetError(
             f"unexpected split manifest keys: {config.split_manifest}"
         )
-    if _manifest_integer(payload, "schema_version") != 1:
-        raise PolicyDatasetError("unsupported split manifest schema_version")
+    manifest_schema_version = _manifest_integer(payload, "schema_version")
+    expected_schema_version = 2 if config.sources else 1
+    if manifest_schema_version != expected_schema_version:
+        raise PolicyDatasetError(
+            "split manifest schema_version must be "
+            f"{expected_schema_version} for this data configuration"
+        )
     dataset_snapshot = _manifest_string(payload, "dataset_snapshot")
     split_payload = payload.get("splits")
     if not isinstance(split_payload, dict) or set(split_payload) != set(SPLIT_NAMES):
@@ -374,12 +425,28 @@ def build_policy_data_splits(
                 f"matching sessions are absent from the split manifest: {unlisted}"
             )
 
-    return PolicyDataSplits(
+    result = PolicyDataSplits(
         dataset_snapshot=dataset_snapshot,
         train_sessions=split_sessions["train"],
         val_sessions=split_sessions["val"],
         test_sessions=split_sessions["test"],
     )
+    if config.ema_sampling:
+        future_generations = sorted(
+            {
+                sample.generation
+                for sessions in result._session_groups().values()
+                for session in sessions
+                for sample in session.samples
+                if sample.generation > config.current_generation
+            }
+        )
+        if future_generations:
+            raise PolicyDatasetError(
+                "split contains generation(s) newer than current_generation: "
+                f"{future_generations}"
+            )
+    return result
 
 
 def policy_dataset_stats(
@@ -622,9 +689,20 @@ def _load_policy_session(
     root: Path,
     metadata: Mapping[str, object],
     *,
-    legacy_generation: int = 0,
+    source_id: str | None = None,
+    legacy_generation: int | None = 0,
+    fixed_generation: int | None = None,
+    require_curriculum_generation: bool = False,
 ) -> PolicySession:
-    generation = _metadata_generation(metadata, legacy_generation=legacy_generation)
+    generation = _metadata_generation(
+        metadata,
+        legacy_generation=legacy_generation,
+        fixed_generation=fixed_generation,
+        require_curriculum_generation=require_curriculum_generation,
+    )
+    qualified_session_id = (
+        f"{source_id}/{path.name}" if source_id is not None else path.name
+    )
     samples_path = path / "samples.csv"
     images_path = path / "Images"
     if not samples_path.is_file():
@@ -643,7 +721,15 @@ def _load_policy_session(
             )
         for row_number, row in enumerate(reader, start=2):
             samples.append(
-                _sample_from_row(row, row_number, path, root, generation=generation)
+                _sample_from_row(
+                    row,
+                    row_number,
+                    path,
+                    root,
+                    generation=generation,
+                    session_id=qualified_session_id,
+                    source_id=source_id,
+                )
             )
 
     if not samples:
@@ -656,11 +742,12 @@ def _load_policy_session(
             f"metadata sample_count mismatch in {path}: {expected_count} != {len(samples)}"
         )
     return PolicySession(
-        session_id=path.name,
+        session_id=qualified_session_id,
         path=path,
         metadata=dict(metadata),
         samples=tuple(samples),
         generation=generation,
+        source_id=source_id,
     )
 
 
@@ -671,6 +758,8 @@ def _sample_from_row(
     data_root: Path,
     *,
     generation: int = 0,
+    session_id: str | None = None,
+    source_id: str | None = None,
 ) -> PolicySample:
     image_value = row.get("image", "")
     relative_path = PurePosixPath(image_value)
@@ -699,9 +788,13 @@ def _sample_from_row(
     angle = quantize_command(angle_raw)
     speed = quantize_command(speed_raw)
     return PolicySample(
-        session_id=session_path.name,
+        session_id=session_id or session_path.name,
         image_path=image_path,
-        relative_image=str(image_path.relative_to(data_root)),
+        relative_image=(
+            f"{source_id}/{image_path.relative_to(data_root)}"
+            if source_id is not None
+            else str(image_path.relative_to(data_root))
+        ),
         angle_raw=angle_raw,
         speed_raw=speed_raw,
         angle=angle,
@@ -709,6 +802,7 @@ def _sample_from_row(
         angle_class_id=angle + COMMAND_OFFSET,
         speed_class_id=speed + COMMAND_OFFSET,
         generation=generation,
+        source_id=source_id,
     )
 
 
@@ -771,6 +865,16 @@ def _matches_filter(metadata: Mapping[str, object], config: DataConfig) -> bool:
     return speed >= float(config.min_forward_speed)
 
 
+def _matches_source_filter(
+    metadata: Mapping[str, object], source: DataSourceConfig
+) -> bool:
+    if metadata.get("format_version") != 1 or metadata.get("complete") is not True:
+        return False
+    if metadata.get("dataset_kind") != "camera_first_teleop_behavior_cloning":
+        return False
+    return metadata.get("control_mode") in source.control_modes
+
+
 def _forward_speed_filter_description(config: DataConfig) -> str:
     if config.max_forward_speed is not None:
         return f"max_forward_speed={config.max_forward_speed}"
@@ -780,10 +884,20 @@ def _forward_speed_filter_description(config: DataConfig) -> str:
 
 
 def _metadata_generation(
-    metadata: Mapping[str, object], *, legacy_generation: int
+    metadata: Mapping[str, object],
+    *,
+    legacy_generation: int | None,
+    fixed_generation: int | None = None,
+    require_curriculum_generation: bool = False,
 ) -> int:
+    if fixed_generation is not None:
+        return fixed_generation
     curriculum = metadata.get("curriculum")
     if not isinstance(curriculum, dict) or "generation" not in curriculum:
+        if require_curriculum_generation or legacy_generation is None:
+            raise PolicyDatasetError(
+                "curriculum.generation is required for this dataset source"
+            )
         return legacy_generation
     generation = curriculum.get("generation")
     if (

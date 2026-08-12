@@ -98,6 +98,7 @@ def test_export_checkpoint_writes_verified_artifact(monkeypatch, tmp_path: Path)
         checkpoint_path=checkpoint_path,
         artifact_id="fixture-policy",
         output_root=tmp_path / "models",
+        require_schema_version=1,
     )
 
     assert {path.name for path in artifact.iterdir()} == {
@@ -107,6 +108,8 @@ def test_export_checkpoint_writes_verified_artifact(monkeypatch, tmp_path: Path)
     }
     verify_artifact(artifact)
     manifest = yaml.safe_load((artifact / "manifest.yaml").read_text())
+    assert manifest["schema_version"] == 1
+    assert "history" not in manifest
     assert manifest["artifact_id"] == "fixture-policy"
     assert manifest["source"]["best_epoch"] == 6
     assert manifest["model"]["input"]["shape"] == [1, 3, 16, 16]
@@ -194,6 +197,14 @@ def test_export_ar_checkpoint_writes_v3_external_history_contract(
         },
         checkpoint_path,
     )
+
+    with pytest.raises(PolicyExportError, match="required 1"):
+        export_checkpoint(
+            checkpoint_path=checkpoint_path,
+            artifact_id="fixture-ar-rejected",
+            output_root=tmp_path / "models",
+            require_schema_version=1,
+        )
 
     artifact = export_checkpoint(
         checkpoint_path=checkpoint_path,

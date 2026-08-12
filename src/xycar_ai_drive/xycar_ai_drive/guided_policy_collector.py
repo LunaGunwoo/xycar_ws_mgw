@@ -151,6 +151,9 @@ class GuidedPolicyCollectorNode(Node):
         self._declare_parameters()
         self._read_parameters()
         self._validate_parameters()
+        self.collection_profile_metadata = _collection_profile_metadata(
+            self.collection_profile_path
+        )
 
         self.artifact: PolicyArtifact = load_policy_artifact(
             self.artifact_dir
@@ -240,6 +243,7 @@ class GuidedPolicyCollectorNode(Node):
 
     def _declare_parameters(self) -> None:
         self.declare_parameter('artifact_dir', '')
+        self.declare_parameter('collection_profile_path', '')
         self.declare_parameter('camera_topic', '/image_raw')
         self.declare_parameter('joy_topic', '/joy')
         self.declare_parameter('motor_topic', '/xycar_motor')
@@ -297,6 +301,7 @@ class GuidedPolicyCollectorNode(Node):
 
         for name in (
             'artifact_dir',
+            'collection_profile_path',
             'camera_topic',
             'joy_topic',
             'motor_topic',
@@ -359,6 +364,7 @@ class GuidedPolicyCollectorNode(Node):
         ):
             if not getattr(self, name):
                 raise ValueError(f'{name} must not be empty')
+        _validate_collection_profile(self.collection_profile_path)
         indices = (
             self.steering_axis,
             self.lt_axis,
@@ -816,6 +822,33 @@ class GuidedPolicyCollectorNode(Node):
                 'record_discard_button': self.record_discard_button,
                 'drive_toggle_button': self.drive_toggle_button,
             },
+            'collection_profile': dict(self.collection_profile_metadata),
+            'runtime_safety': {
+                'allow_motion': self.allow_motion,
+                'publish_rate_hz': self.publish_rate_hz,
+                'joy_timeout_sec': self.joy_timeout_sec,
+                'inference_timeout_sec': self.inference_timeout_sec,
+                'graph_check_period_sec': self.graph_check_period_sec,
+                'stop_publish_count': self.stop_publish_count,
+                'allowed_motor_relay_nodes': list(
+                    self.allowed_motor_relay_nodes
+                ),
+            },
+            'inference_runtime': {
+                'backend': self.inference_backend,
+                'device': self.inference_device,
+                'socket_path': self.inference_socket_path,
+                'rpc_timeout_sec': self.inference_rpc_timeout_sec,
+                'torch_num_threads': self.torch_num_threads,
+                'warmup_count': self.warmup_count,
+            },
+            'recording': {
+                'root_dir': self.recording_root_dir,
+                'tail_discard_frames': self.tail_discard_frames,
+                'png_compression': self.recording_png_compression,
+                'queue_size': self.recording_queue_size,
+                'min_free_space_mb': self.recording_min_free_space_mb,
+            },
         }
         token = self.writer.start_session(metadata)
         if token is None:
@@ -1015,6 +1048,25 @@ class GuidedPolicyCollectorNode(Node):
         self.writer.shutdown()
         self._poll_writer_results()
         self.publish_stop_burst()
+
+
+def _validate_collection_profile(configured_path: str) -> None:
+    if not configured_path:
+        return
+    path = Path(configured_path)
+    if not path.is_absolute() or not path.is_file():
+        raise ValueError(
+            'collection_profile_path must be an existing absolute file'
+        )
+
+
+def _collection_profile_metadata(configured_path: str) -> dict[str, object]:
+    if not configured_path:
+        return {'path': None, 'sha256': None}
+    return {
+        'path': configured_path,
+        'sha256': _sha256_file(Path(configured_path)),
+    }
 
 
 def _sha256_file(path: Path) -> str:

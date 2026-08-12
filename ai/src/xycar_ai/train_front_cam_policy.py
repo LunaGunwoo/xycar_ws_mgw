@@ -119,6 +119,12 @@ def main(argv: Iterable[str] | None = None) -> int:
         )
         return 0
 
+    validate_incremental_initialization(
+        config,
+        initialize_from=args.initialize_from,
+        resume=args.resume,
+    )
+
     set_seed(config.training.seed, deterministic=config.training.deterministic)
     device = resolve_device(config.training.device)
     amp_enabled = bool(config.training.amp and device.type == "cuda")
@@ -478,6 +484,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     checkpoint_group.add_argument("--initialize-from", default="")
     parser.add_argument("--stop-after-epoch", type=int)
     return parser
+
+
+def validate_incremental_initialization(
+    config: TrainConfig, *, initialize_from: str, resume: str
+) -> None:
+    if not config.data.sources:
+        return
+    generation = config.data.current_generation
+    if generation == 0 and initialize_from:
+        raise ValueError(
+            "stateless generation 0 must start from pretrained ImageNet weights"
+        )
+    if generation > 0 and not initialize_from and not resume:
+        raise ValueError(
+            "stateless generation 1+ requires --initialize-from previous best.pt"
+        )
 
 
 def make_loaders(
@@ -918,6 +940,23 @@ def initialize_model_weights(
         raise ValueError(
             "initialization checkpoint model architecture differs from config"
         )
+    if config.data.sources:
+        checkpoint_data = (
+            checkpoint_config.get("data")
+            if isinstance(checkpoint_config, dict)
+            else None
+        )
+        source_generation = (
+            checkpoint_data.get("current_generation")
+            if isinstance(checkpoint_data, dict)
+            else None
+        )
+        expected_generation = config.data.current_generation - 1
+        if source_generation != expected_generation:
+            raise ValueError(
+                "initialization checkpoint must be from the immediately "
+                f"previous stateless generation {expected_generation}"
+            )
     model_state = payload.get("model_state")
     if not isinstance(model_state, Mapping):
         raise ValueError("initialization checkpoint has no model_state")

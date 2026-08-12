@@ -104,6 +104,10 @@ def generate_launch_description():
                         'artifact_dir': PathJoinSubstitution(
                             [artifact_root, artifact_id]
                         ),
+                        'collection_profile_path': ParameterValue(
+                            params_file,
+                            value_type=str,
+                        ),
                         'allow_motion': ParameterValue(
                             allow_motion,
                             value_type=bool,
