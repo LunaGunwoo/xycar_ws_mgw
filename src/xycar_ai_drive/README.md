@@ -11,6 +11,11 @@
   OFF가 되는 상승 edge toggle이다. A를 계속 누르고 있는 것은 추가 toggle이 아니다.
 - 추론은 OFF 상태에서도 최신 camera frame으로 계속 수행한다. ON 상태에서만 최신
   유효 예측을 motor command로 사용하고, OFF 상태에서는 `[0, 0]`을 발행한다.
+- AR artifact는 `(angle=0, speed=25)` class 네 쌍으로 history를 시작하고 성공한
+  argmax 예측만 queue에 추가한다. 추론 실패 또는 성공한 추론 사이가 0.25초 이상
+  벌어지면 초기 history로 reset한다.
+- A 버튼으로 ON이 되는 순간에도 AR history와 저장된 예측을 reset한다. reset 뒤
+  새 camera frame의 첫 예측이 완료될 때까지 motor output은 `[0, 0]`을 유지한다.
 - angle은 `angle_class_id - 100`이다. speed는
   `max(0, speed_class_id - 100)`이므로 reverse는 금지하지만 양수 예측에는 별도
   cap을 적용하지 않아 label 계약의 최대 `100`까지 전달한다.
@@ -43,9 +48,12 @@
     SHA256SUMS
 ```
 
-node는 시작 전에 checksum, 고정 RGB `[1,3,224,224]` input, angle/speed
-`[1,201]` tuple output, normalization과 label decode 계약을 검증한다. 이후 CPU
-thread 8개로 model을 load하고 3회 warm-up한다. artifact 생성과 배포는 개발
+node는 시작 전에 checksum, input, angle/speed `[1,201]` tuple output,
+normalization과 label decode 계약을 검증한다. schema v1 stateless artifact는 고정
+RGB `[1,3,224,224]` 하나를 받고 계속 지원한다. schema v2 AR artifact는 RGB image와
+int64 history `[1,4,2]` tuple을 받으며 history pair 순서는
+`[angle_class_id, speed_class_id]`, 시간 순서는 오래된 값부터 최신 값까지다. 이후
+CPU thread 8개로 model을 load하고 3회 warm-up한다. artifact 생성과 배포는 개발
 Laptop의 MGW root에서 수행한다.
 
 기존 artifact의 `full_frame_bicubic_resize`와 새

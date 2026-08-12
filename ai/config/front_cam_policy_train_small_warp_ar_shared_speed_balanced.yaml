@@ -4,10 +4,15 @@ model:
   name: vit_small_patch16_224.augreg_in21k_ft_in1k
   pretrained: true
   image_size: 224
+  architecture: ar_control_tokens
+  history_frames: 4
+  control_token_type_embedding: false
+  history_initial_angle: 0
+  history_initial_speed: 25
 
 data:
   root: datasets/teleop
-  split_manifest: config/front_cam_policy_split_min_speed20.yaml
+  split_manifest: config/front_cam_policy_split_min_speed20_speed_balanced.yaml
   require_all_matching_sessions: true
   control_mode: gamepad
   min_forward_speed: 20.0
@@ -54,4 +59,4 @@ loss:
 
 output:
   root: artifacts/runs/front_cam_policy
-  run_name: vit_small_warp_angle_mean5_hflip_p05_seed20260811
+  run_name: vit_small_warp_angle_mean5_ar4_gt_shared_speed_balanced_hflip_p05_seed20260811

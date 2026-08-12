@@ -5,7 +5,7 @@ import math
 import re
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
 import torch
@@ -53,6 +53,7 @@ class PolicySample:
     speed: int
     angle_class_id: int
     speed_class_id: int
+    history_class_ids: tuple[tuple[int, int], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,100 @@ class PolicyDataSplits:
             "val": self.val_sessions,
             "test": self.test_sessions,
         }
+
+
+def smooth_training_angle_targets(
+    splits: PolicyDataSplits,
+    window_size: int,
+) -> PolicyDataSplits:
+    if window_size <= 0 or window_size % 2 == 0:
+        raise ValueError("angle mean window must be a positive odd integer")
+    if window_size == 1:
+        return splits
+    return replace(
+        splits,
+        train_sessions=tuple(
+            _smooth_session_angle_targets(session, window_size)
+            for session in splits.train_sessions
+        ),
+    )
+
+
+def _smooth_session_angle_targets(
+    session: PolicySession,
+    window_size: int,
+) -> PolicySession:
+    radius = window_size // 2
+    last_index = len(session.samples) - 1
+    smoothed: list[PolicySample] = []
+    for index, sample in enumerate(session.samples):
+        angle_raw = (
+            sum(
+                session.samples[min(max(index + offset, 0), last_index)].angle_raw
+                for offset in range(-radius, radius + 1)
+            )
+            / window_size
+        )
+        angle = quantize_command(angle_raw)
+        smoothed.append(
+            replace(
+                sample,
+                angle_raw=angle_raw,
+                angle=angle,
+                angle_class_id=angle + COMMAND_OFFSET,
+            )
+        )
+    return replace(session, samples=tuple(smoothed))
+
+
+def attach_training_teacher_forced_history(
+    splits: PolicyDataSplits,
+    history_frames: int,
+) -> PolicyDataSplits:
+    if history_frames <= 0:
+        raise ValueError("history_frames must be positive")
+    return replace(
+        splits,
+        train_sessions=tuple(
+            _attach_session_teacher_forced_history(session, history_frames)
+            for session in splits.train_sessions
+        ),
+    )
+
+
+def _attach_session_teacher_forced_history(
+    session: PolicySession,
+    history_frames: int,
+) -> PolicySession:
+    samples: list[PolicySample] = []
+    for index, sample in enumerate(session.samples):
+        history = tuple(
+            (
+                session.samples[max(index - history_frames + offset, 0)].angle_class_id,
+                session.samples[max(index - history_frames + offset, 0)].speed_class_id,
+            )
+            for offset in range(history_frames)
+        )
+        samples.append(replace(sample, history_class_ids=history))
+    return replace(session, samples=tuple(samples))
+
+
+def validate_session_initial_classes(
+    splits: PolicyDataSplits,
+    *,
+    angle_class_id: int,
+    speed_class_id: int,
+) -> None:
+    for split_name, sessions in splits._session_groups().items():
+        for session in sessions:
+            first = session.samples[0]
+            actual = (first.angle_class_id, first.speed_class_id)
+            expected = (angle_class_id, speed_class_id)
+            if actual != expected:
+                raise PolicyDatasetError(
+                    f"{split_name} session {session.session_id} initial class "
+                    f"pair differs from the history contract: {actual} != {expected}"
+                )
 
 
 def quantize_command(value: float) -> int:
@@ -278,7 +373,7 @@ class FrontCamPolicyDataset(Dataset):
             if horizontal_flipped
             else sample.angle_class_id
         )
-        return {
+        item: dict[str, object] = {
             "image_tensor": image_tensor,
             "angle": angle,
             "speed": sample.speed,
@@ -290,6 +385,17 @@ class FrontCamPolicyDataset(Dataset):
             "session_id": sample.session_id,
             "relative_image": sample.relative_image,
         }
+        if sample.history_class_ids is not None:
+            history_class_ids = torch.tensor(
+                sample.history_class_ids,
+                dtype=torch.long,
+            )
+            if horizontal_flipped:
+                history_class_ids[:, 0] = (
+                    NUM_COMMAND_CLASSES - 1 - history_class_ids[:, 0]
+                )
+            item["history_class_ids"] = history_class_ids
+        return item
 
 
 def compute_sqrt_inverse_frequency_weights(

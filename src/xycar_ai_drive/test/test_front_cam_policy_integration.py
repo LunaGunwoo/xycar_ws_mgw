@@ -26,7 +26,10 @@ ENABLED_TOPIC = '/xycar_ai_drive_test/enabled'
 
 class _FakePolicy:
     def __init__(self, **_kwargs):
-        pass
+        self.reset_count = 0
+
+    def reset_history(self):
+        self.reset_count += 1
 
     def infer(self, _image):
         return SimpleNamespace(
@@ -87,7 +90,10 @@ def test_only_paired_unnamed_bridge_endpoint_is_recognized():
     assert not _is_paired_unnamed_relay(publisher, [unrelated])
 
     named_publisher = _endpoint(
-        'other_motor_publisher', '/', participant, [0, 0, 0x12, 0x03]
+        'other_motor_publisher',
+        '/',
+        participant,
+        [0, 0, 0x12, 0x03],
     )
     assert not _is_paired_unnamed_relay(named_publisher, [subscriber])
 
@@ -212,6 +218,7 @@ def test_a_toggle_publish_rate_and_fault_rearming(ros_harness):
     harness['joy_publisher'].publish(_joy(True))
     _spin_for(harness, 0.20, a=True)
     assert policy._toggle.enabled
+    assert policy._policy.reset_count == 1
     moving = [command for command in commands if command[1] > 0.0]
     assert len(moving) >= 2
     assert all(command == pytest.approx((-18.0, 25.0)) for command in moving)

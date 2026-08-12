@@ -14,12 +14,15 @@ from xycar_ai.config import DataConfig
 from xycar_ai.front_cam_policy_data import (
     FrontCamPolicyDataset,
     PolicyDatasetError,
+    attach_training_teacher_forced_history,
     build_policy_data_splits,
     command_class_id,
     compute_sqrt_inverse_frequency_weights,
     discover_policy_sessions,
     policy_dataset_stats,
     quantize_command,
+    smooth_training_angle_targets,
+    validate_session_initial_classes,
 )
 
 
@@ -317,6 +320,168 @@ def test_horizontal_flip_pairs_image_and_angle_labels(tmp_path: Path):
     flipped_center = flipped_dataset[1]
     assert flipped_center["angle"] == 0
     assert flipped_center["angle_class_id"] == 100
+
+
+def test_training_angle_mean_uses_session_edge_padding_and_preserves_other_targets(
+    tmp_path: Path,
+):
+    data_root = tmp_path / "datasets" / "teleop"
+    names = [
+        "20260810_130735_027_session",
+        "20260810_130818_255_session",
+        "20260810_130857_726_session",
+        "20260810_130938_647_session",
+    ]
+    for name in names[:3]:
+        write_session(
+            data_root,
+            name,
+            labels=[(10.0, 21.0), (20.0, 22.0), (30.0, 23.0)],
+        )
+    write_session(data_root, names[3], labels=[(100.0, 24.0), (100.0, 25.0)])
+    manifest = write_split_manifest(
+        tmp_path / "config" / "split.yaml",
+        train=[names[0], names[3]],
+        val=[names[1]],
+        test=[names[2]],
+    )
+    splits = build_policy_data_splits(_data_config(data_root, manifest))
+
+    smoothed = smooth_training_angle_targets(splits, 5)
+
+    first_train = smoothed.train_sessions[0].samples
+    second_train = smoothed.train_sessions[1].samples
+    assert [sample.angle_raw for sample in first_train] == pytest.approx(
+        [16.0, 20.0, 24.0]
+    )
+    assert [sample.angle for sample in first_train] == [16, 20, 24]
+    assert [sample.angle_class_id for sample in first_train] == [116, 120, 124]
+    assert [sample.speed_raw for sample in first_train] == [21.0, 22.0, 23.0]
+    assert [sample.angle_raw for sample in second_train] == [100.0, 100.0]
+    assert smoothed.val_samples == splits.val_samples
+    assert smoothed.test_samples == splits.test_samples
+    assert smooth_training_angle_targets(splits, 1) is splits
+
+
+def test_teacher_forced_history_uses_smoothed_angle_raw_speed_and_session_padding(
+    tmp_path: Path,
+):
+    data_root = tmp_path / "datasets" / "teleop"
+    names = [
+        "20260810_130735_027_session",
+        "20260810_130818_255_session",
+        "20260810_130857_726_session",
+        "20260810_130938_647_session",
+    ]
+    write_session(
+        data_root,
+        names[0],
+        labels=[(0.0, 25.0), (10.0, 24.0), (20.0, 23.0), (30.0, 22.0)],
+    )
+    write_session(
+        data_root,
+        names[1],
+        labels=[(0.0, 25.0), (-10.0, 24.0)],
+    )
+    for name in names[2:]:
+        write_session(data_root, name, labels=[(0.0, 25.0), (80.0, 20.0)])
+    manifest = write_split_manifest(
+        tmp_path / "config" / "split.yaml",
+        train=names[:2],
+        val=[names[2]],
+        test=[names[3]],
+    )
+    splits = build_policy_data_splits(_data_config(data_root, manifest))
+    validate_session_initial_classes(
+        splits,
+        angle_class_id=100,
+        speed_class_id=125,
+    )
+
+    with_history = attach_training_teacher_forced_history(
+        smooth_training_angle_targets(splits, 5),
+        4,
+    )
+    first = with_history.train_sessions[0].samples
+    first_pair = (first[0].angle_class_id, first[0].speed_class_id)
+    assert first[0].history_class_ids == (first_pair,) * 4
+    assert first[2].history_class_ids == (
+        first_pair,
+        first_pair,
+        first_pair,
+        (first[1].angle_class_id, first[1].speed_class_id),
+    )
+    assert first[1].history_class_ids[-1][0] == first[0].angle_class_id
+    assert first[1].history_class_ids[-1][1] == 125
+    second_first = with_history.train_sessions[1].samples[0]
+    assert (
+        second_first.history_class_ids
+        == ((second_first.angle_class_id, second_first.speed_class_id),) * 4
+    )
+    assert all(sample.history_class_ids is None for sample in with_history.val_samples)
+    assert all(sample.history_class_ids is None for sample in with_history.test_samples)
+
+    flipped_dataset = FrontCamPolicyDataset(
+        [first[2]],
+        transform=transforms.ToTensor(),
+        horizontal_flip_probability=1.0,
+    )
+    flipped = flipped_dataset[0]
+    expected_history = torch.tensor(first[2].history_class_ids, dtype=torch.long)
+    expected_history[:, 0] = 200 - expected_history[:, 0]
+    assert torch.equal(flipped["history_class_ids"], expected_history)
+    assert flipped["angle_class_id"] == 200 - first[2].angle_class_id
+    assert flipped["speed_class_id"] == first[2].speed_class_id
+
+
+def test_initial_class_validation_rejects_a_session_mismatch(tmp_path: Path):
+    data_root = tmp_path / "datasets" / "teleop"
+    names = [
+        "20260810_130735_027_session",
+        "20260810_130818_255_session",
+        "20260810_130857_726_session",
+    ]
+    write_session(data_root, names[0], labels=[(0.0, 25.0)])
+    write_session(data_root, names[1], labels=[(1.0, 25.0)])
+    write_session(data_root, names[2], labels=[(0.0, 25.0)])
+    manifest = write_split_manifest(
+        tmp_path / "config" / "split.yaml",
+        train=[names[0]],
+        val=[names[1]],
+        test=[names[2]],
+    )
+    splits = build_policy_data_splits(_data_config(data_root, manifest))
+    with pytest.raises(PolicyDatasetError, match=names[1]):
+        validate_session_initial_classes(
+            splits,
+            angle_class_id=100,
+            speed_class_id=125,
+        )
+
+
+@pytest.mark.parametrize("window_size", [0, -1, 2, 4])
+def test_training_angle_mean_rejects_non_positive_or_even_window(
+    tmp_path: Path,
+    window_size: int,
+):
+    data_root = tmp_path / "datasets" / "teleop"
+    names = [
+        "20260810_130735_027_session",
+        "20260810_130818_255_session",
+        "20260810_130857_726_session",
+    ]
+    for name in names:
+        write_session(data_root, name, labels=[(10.0, 25.0)])
+    manifest = write_split_manifest(
+        tmp_path / "config" / "split.yaml",
+        train=[names[0]],
+        val=[names[1]],
+        test=[names[2]],
+    )
+    splits = build_policy_data_splits(_data_config(data_root, manifest))
+
+    with pytest.raises(ValueError, match="positive odd integer"):
+        smooth_training_angle_targets(splits, window_size)
 
 
 def test_horizontal_flip_sequence_is_seeded(tmp_path: Path):

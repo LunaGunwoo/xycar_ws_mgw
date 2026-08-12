@@ -265,8 +265,11 @@ artifact 계약은 그대로 지원한다.
 
 warp를 사용하는 ViT-small 설정은
 `config/front_cam_policy_train_small_warp.yaml`이고 run name은
-`vit_small_warp_hflip_p05_seed20260811`이다. GUI 저장 후 아래 명령으로 dataset과
-warp YAML을 함께 검증하고 학습한다.
+`vit_small_warp_angle_mean5_hflip_p05_seed20260811`이다. train split의 angle
+target은 같은 session 안에서 현재 frame 중심 5개 angle을 평균하며, session
+경계에서는 첫·마지막 angle을 반복한다. 평균은 class 양자화 전에 적용한다.
+validation/test angle과 모든 speed target은 원본 frame 값을 유지한다. GUI 저장 후
+아래 명령으로 dataset과 warp YAML을 함께 검증하고 학습한다.
 
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
@@ -283,7 +286,99 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 /home/xytron/.local/bin/uv run --locked xycar-train \
   --config config/front_cam_policy_train_small_warp.yaml \
-  --resume artifacts/runs/front_cam_policy/vit_small_warp_hflip_p05_seed20260811/last.pt
+  --resume artifacts/runs/front_cam_policy/vit_small_warp_angle_mean5_hflip_p05_seed20260811/last.pt
+```
+
+### 정답 history 기반 AR control token
+
+AR 설정은 현재 warped image token 뒤에 과거 4 frame의 angle/speed token과 현재
+angle/speed query를 다음 순서로 붙인다.
+
+```text
+[CLS, image patches,
+ angle/speed(t-4), angle/speed(t-3), angle/speed(t-2), angle/speed(t-1),
+ angle query, speed query]
+```
+
+train history는 같은 session의 정답만 사용한다. angle은 각 과거 frame에 계산된
+centered 5-frame 평균 target이고 speed는 원본 target이다. 부족한 과거 위치는
+session의 첫 target을 반복하며 horizontal flip은 현재 angle과 history angle을
+모두 `200 - class_id`로 바꾼다. 현재 두 query에만 loss를 계산한다. 선택한 계약상
+과거 smoothed angle에 현재·미래 raw angle이 포함될 수 있고 t=0 history에도 첫
+target이 들어간다. validation/test와 runtime은 정답을 사용하지 않고 session마다
+`(angle=0, speed=25)` 네 쌍으로 시작해 직전 argmax 예측을 순차적으로 넣는다.
+
+두 출력은 201개 control value embedding weight를 공용 output projection으로
+사용하고 task별 bias만 분리한다. `shared_type`은 여기에 angle/speed type embedding을
+추가한다. loss는 기존 예선 및 stateless 모델과 같은 다음 식이다.
+
+```text
+CE_angle + 0.5 * CE_speed + 0.2 * (EMD_angle + 0.5 * EMD_speed)
+```
+
+EMD는 예측 softmax와 정답 one-hot의 누적분포 간 평균 절대 차이이므로 정답 class에서
+멀리 떨어진 확률에 더 큰 손실을 준다. 두 설정을 같은 20-epoch cosine schedule로
+만들고 5 epoch에서 probe를 멈춘 뒤 rollout validation score가 낮은 run만 `last.pt`로
+재개한다.
+
+```bash
+cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
+/home/xytron/.local/bin/uv run --locked xycar-train \
+  --config config/front_cam_policy_train_small_warp_ar_shared.yaml \
+  --validate-only
+/home/xytron/.local/bin/uv run --locked xycar-train \
+  --config config/front_cam_policy_train_small_warp_ar_shared_type.yaml \
+  --validate-only
+
+/home/xytron/.local/bin/uv run --locked xycar-train \
+  --config config/front_cam_policy_train_small_warp_ar_shared.yaml \
+  --stop-after-epoch 5
+/home/xytron/.local/bin/uv run --locked xycar-train \
+  --config config/front_cam_policy_train_small_warp_ar_shared_type.yaml \
+  --stop-after-epoch 5
+
+# <winner-config>과 <winner-run>은 5-epoch rollout validation 비교로 선택한다.
+/home/xytron/.local/bin/uv run --locked xycar-train \
+  --config config/<winner-config>.yaml \
+  --resume artifacts/runs/front_cam_policy/<winner-run>/last.pt
+```
+
+probe run에는 최종 test 대신 `probe_summary.json`을 기록한다. 승자를 총 20 epoch까지
+resume한 뒤에만 best checkpoint를 prediction rollout 방식으로 test 평가한다.
+
+### 감속 평가용 session split
+
+기존 min-speed-20 split은 speed를 크게 낮춘 세 session이 모두 train에 있어
+validation 685장은 전부 speed 25였고 test도 702장 중 699장이 speed 25였다.
+감속 능력을 별도로 검증할 때는 기존 실험의 재현성을 보존하면서
+`config/front_cam_policy_split_min_speed20_speed_balanced.yaml`을 사용한다. 감속
+session 하나씩을 train/validation/test에 session-disjoint하게 배치하며 sample 수와
+`speed < 25` 비율은 다음과 같다.
+
+```text
+train: 2,999 samples, 224 slowdown samples (7.47%)
+val:     849 samples, 161 slowdown samples (18.96%)
+test:    766 samples, 186 slowdown samples (24.28%)
+```
+
+stateless와 AR을 공정하게 비교하려면 기존 checkpoint를 새 validation/test에
+재평가하지 않는다. 새 validation/test session이 기존 checkpoint의 train에 들어간
+적이 있기 때문에 두 모델 모두 아래 전용 config로 처음부터 다시 학습한다. 두
+config는 같은 road warp, centered-5 angle, optimizer, loss와 seed를 사용한다.
+
+```bash
+cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
+/home/xytron/.local/bin/uv run --locked xycar-train \
+  --config config/front_cam_policy_train_small_warp_speed_balanced.yaml \
+  --validate-only
+/home/xytron/.local/bin/uv run --locked xycar-train \
+  --config config/front_cam_policy_train_small_warp_ar_shared_speed_balanced.yaml \
+  --validate-only
+
+/home/xytron/.local/bin/uv run --locked xycar-train \
+  --config config/front_cam_policy_train_small_warp_speed_balanced.yaml
+/home/xytron/.local/bin/uv run --locked xycar-train \
+  --config config/front_cam_policy_train_small_warp_ar_shared_speed_balanced.yaml
 ```
 
 dataset 전송 뒤 먼저 source와 manifest 계약을 검사한다. 이 명령은 model이나
@@ -346,6 +441,7 @@ artifacts/runs/front_cam_policy/<run-id>/
   metrics.csv
   best.pt
   last.pt
+  probe_summary.json  # --stop-after-epoch probe에서만 생성
   test_metrics.json
   summary.json
 ```
@@ -376,13 +472,19 @@ artifacts/models/<artifact-id>/
 `SHA256SUMS`에는 `manifest.yaml`과 모든 배포 파일의 상대 경로를 기록한다.
 절대 경로, `..`, symlink는 허용하지 않는다. 학습 checkpoint를 fixed-shape
 TorchScript tuple-output artifact로 변환할 때는 다음 명령을 사용한다. 기존
-artifact ID는 덮어쓰지 않는다.
+artifact ID는 덮어쓰지 않는다. stateless schema v1은 image `[1,3,224,224]` 하나를
+받고 AR schema v2는 image와 int64 history `[1,4,2]`를 함께 받는다.
 
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 /home/xytron/.local/bin/uv run --locked xycar-export-policy \
   --checkpoint artifacts/runs/front_cam_policy/baseline_seed20260810/best.pt \
   --artifact-id front-cam-policy-baseline-e6-20260810
+
+# AR winner 예시
+/home/xytron/.local/bin/uv run --locked xycar-export-policy \
+  --checkpoint artifacts/runs/front_cam_policy/<winner-run>/best.pt \
+  --artifact-id <ar-artifact-id>
 ```
 
 exporter는 checkpoint model state를 strict load하고 eager/trace/reload 결과와 두

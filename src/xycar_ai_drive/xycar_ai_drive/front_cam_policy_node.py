@@ -104,6 +104,8 @@ class FrontCamPolicyNode(Node):
         self._has_motor_subscriber = False
         self._next_graph_check_monotonic = 0.0
         self._stop_reason: str | None = None
+        self._awaiting_post_reset_prediction = False
+        self._history_reset_monotonic: float | None = None
         self._shutdown_started = False
         self._worker_stop = False
 
@@ -309,6 +311,7 @@ class FrontCamPolicyNode(Node):
             artifact_dir=self.artifact_dir,
             torch_num_threads=self.torch_num_threads,
             warmup_count=self.warmup_count,
+            history_reset_timeout_sec=self.inference_timeout_sec,
         )
 
     def _on_joy(self, message: Joy) -> None:
@@ -329,8 +332,15 @@ class FrontCamPolicyNode(Node):
                 can_enable=self._can_enable_locked(now),
             )
             if action == ToggleAction.ENABLED:
+                self._policy.reset_history()
+                self._prediction = None
+                self._awaiting_post_reset_prediction = True
+                self._history_reset_monotonic = now
                 self._stop_reason = None
                 self._publish_enabled(True)
+            elif action == ToggleAction.DISABLED:
+                self._awaiting_post_reset_prediction = False
+                self._history_reset_monotonic = None
         if action == ToggleAction.ENABLED:
             self.get_logger().warning('AI motion toggled ON by A button.')
         elif action == ToggleAction.DISABLED:
@@ -375,12 +385,9 @@ class FrontCamPolicyNode(Node):
         processed_sequence = 0
         while True:
             with self._frame_condition:
-                while (
-                    not self._worker_stop
-                    and (
-                        self._latest_frame is None
-                        or self._latest_frame[0] <= processed_sequence
-                    )
+                while not self._worker_stop and (
+                    self._latest_frame is None
+                    or self._latest_frame[0] <= processed_sequence
                 ):
                     self._frame_condition.wait()
                 if self._worker_stop:
@@ -408,10 +415,27 @@ class FrontCamPolicyNode(Node):
                     prediction.inference_ms,
                 )
             ):
-                self._force_off('policy prediction contains a non-finite value')
+                self._force_off(
+                    'policy prediction contains a non-finite value'
+                )
                 continue
+            reset_again = False
             with self._lock:
-                self._prediction = prediction
+                if self._awaiting_post_reset_prediction:
+                    reset_monotonic = self._history_reset_monotonic
+                    if (
+                        reset_monotonic is None
+                        or prediction.source_monotonic <= reset_monotonic
+                    ):
+                        reset_again = True
+                    else:
+                        self._awaiting_post_reset_prediction = False
+                        self._history_reset_monotonic = None
+                if not reset_again:
+                    self._prediction = prediction
+            if reset_again:
+                self._policy.reset_history()
+                continue
             message = Float32MultiArray()
             message.data = [
                 float(prediction.command.angle),
@@ -453,6 +477,14 @@ class FrontCamPolicyNode(Node):
             self.joy_timeout_sec,
         ):
             return 'Joy input is missing or stale'
+        if self._awaiting_post_reset_prediction:
+            if (
+                self._history_reset_monotonic is None
+                or now - self._history_reset_monotonic
+                > self.inference_timeout_sec
+            ):
+                return 'post-reset camera inference is missing or stale'
+            return None
         if self._prediction is None or not is_fresh(
             now,
             self._prediction.source_monotonic,
@@ -484,7 +516,8 @@ class FrontCamPolicyNode(Node):
             if label in self.allowed_motor_relay_nodes:
                 continue
             if allow_unnamed_bridge and _is_paired_unnamed_relay(
-                publisher, subscriptions
+                publisher,
+                subscriptions,
             ):
                 continue
             competitors.append(label)
@@ -501,6 +534,8 @@ class FrontCamPolicyNode(Node):
             was_enabled = self._toggle.fault()
             changed_reason = reason != self._stop_reason
             self._stop_reason = reason
+            self._awaiting_post_reset_prediction = False
+            self._history_reset_monotonic = None
         self._publish_stop()
         if was_enabled:
             self._publish_enabled(False)

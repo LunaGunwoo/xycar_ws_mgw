@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import threading
 from dataclasses import dataclass
 
 import cv2
@@ -29,11 +30,19 @@ class TorchScriptPolicy:
         artifact_dir: str,
         torch_num_threads: int,
         warmup_count: int,
+        history_reset_timeout_sec: float = 0.25,
     ) -> None:
         if torch_num_threads < 1:
             raise ValueError('torch_num_threads must be positive')
         if warmup_count < 0:
             raise ValueError('warmup_count must be non-negative')
+        if (
+            not np.isfinite(history_reset_timeout_sec)
+            or history_reset_timeout_sec <= 0
+        ):
+            raise ValueError(
+                'history_reset_timeout_sec must be finite and positive'
+            )
         self.artifact = load_policy_artifact(artifact_dir)
         try:
             import torch
@@ -42,6 +51,11 @@ class TorchScriptPolicy:
                 'PyTorch is unavailable in the vehicle Python environment'
             ) from exc
         self._torch = torch
+        self._history_lock = threading.RLock()
+        self._history_reset_timeout_sec = float(history_reset_timeout_sec)
+        self._last_successful_inference_monotonic: float | None = None
+        self._history_class_ids: list[list[int]] | None = None
+        self._reset_history_locked()
         torch.set_num_threads(torch_num_threads)
         try:
             torch.set_num_interop_threads(1)
@@ -73,7 +87,38 @@ class TorchScriptPolicy:
         )
         with torch.inference_mode():
             for _ in range(warmup_count):
-                self._validate_outputs(self._model(sample))
+                if self._history_class_ids is None:
+                    outputs = self._model(sample)
+                else:
+                    history = torch.tensor(
+                        [self._history_class_ids],
+                        dtype=torch.long,
+                    )
+                    outputs = self._model(sample, history)
+                self._validate_outputs(outputs)
+
+    @property
+    def history_class_ids(self) -> tuple[tuple[int, int], ...] | None:
+        with self._history_lock:
+            if self._history_class_ids is None:
+                return None
+            return tuple(tuple(pair) for pair in self._history_class_ids)
+
+    def reset_history(self) -> None:
+        with self._history_lock:
+            self._reset_history_locked()
+
+    def _reset_history_locked(self) -> None:
+        history = getattr(self, 'artifact', None)
+        history = history.history if history is not None else None
+        if history is None:
+            self._history_class_ids = None
+        else:
+            pair = list(history.initial_class_ids)
+            self._history_class_ids = [
+                pair.copy() for _ in range(history.frames)
+            ]
+        self._last_successful_inference_monotonic = None
 
     def infer(self, rgb_frame: np.ndarray) -> InferenceResult:
         chw = preprocess_rgb_frame(
@@ -84,16 +129,47 @@ class TorchScriptPolicy:
             road_warp=self.artifact.road_warp,
         )
         tensor = self._torch.from_numpy(chw).unsqueeze(0)
-        started = time.perf_counter()
+        now = time.monotonic()
         try:
-            with self._torch.inference_mode():
-                outputs = self._model(tensor)
+            with self._history_lock:
+                if (
+                    self._last_successful_inference_monotonic is not None
+                    and now - self._last_successful_inference_monotonic
+                    >= self._history_reset_timeout_sec
+                ):
+                    self._reset_history_locked()
+                started = time.perf_counter()
+                with self._torch.inference_mode():
+                    if self._history_class_ids is None:
+                        outputs = self._model(tensor)
+                    else:
+                        history = self._torch.tensor(
+                            [self._history_class_ids],
+                            dtype=self._torch.long,
+                        )
+                        outputs = self._model(tensor, history)
+                inference_ms = (time.perf_counter() - started) * 1000.0
+                angle_logits, speed_logits = self._validate_outputs(outputs)
+                angle_class_id = int(
+                    self._torch.argmax(angle_logits, dim=1).item()
+                )
+                speed_class_id = int(
+                    self._torch.argmax(speed_logits, dim=1).item()
+                )
+                if self._history_class_ids is not None:
+                    self._history_class_ids = [
+                        *self._history_class_ids[1:],
+                        [angle_class_id, speed_class_id],
+                    ]
+                self._last_successful_inference_monotonic = time.monotonic()
+        except PolicyRuntimeError:
+            self.reset_history()
+            raise
         except Exception as exc:
-            raise PolicyRuntimeError(f'TorchScript inference failed: {exc}') from exc
-        inference_ms = (time.perf_counter() - started) * 1000.0
-        angle_logits, speed_logits = self._validate_outputs(outputs)
-        angle_class_id = int(self._torch.argmax(angle_logits, dim=1).item())
-        speed_class_id = int(self._torch.argmax(speed_logits, dim=1).item())
+            self.reset_history()
+            raise PolicyRuntimeError(
+                f'TorchScript inference failed: {exc}'
+            ) from exc
         return InferenceResult(
             command=decode_class_ids(angle_class_id, speed_class_id),
             inference_ms=inference_ms,
@@ -134,7 +210,9 @@ def preprocess_rgb_frame(
         or rgb_frame.shape[0] < 1
         or rgb_frame.shape[1] < 1
     ):
-        raise PolicyRuntimeError('camera frame must be a non-empty uint8 RGB image')
+        raise PolicyRuntimeError(
+            'camera frame must be a non-empty uint8 RGB image'
+        )
     if image_size < 1:
         raise PolicyRuntimeError('image_size must be positive')
     if road_warp is not None and (
@@ -142,7 +220,9 @@ def preprocess_rgb_frame(
     ):
         raise PolicyRuntimeError('road warp requires a frame of at least 2x2')
     if mean.shape != (1, 1, 3) or std.shape != (1, 1, 3):
-        raise PolicyRuntimeError('normalization arrays must have shape [1,1,3]')
+        raise PolicyRuntimeError(
+            'normalization arrays must have shape [1,1,3]'
+        )
     if not np.isfinite(mean).all() or not np.isfinite(std).all():
         raise PolicyRuntimeError('normalization arrays must be finite')
     if np.any(std <= 0.0):

@@ -9,6 +9,7 @@ import yaml
 
 CONFIG_SCHEMA_VERSION = 1
 CLASS_WEIGHTING_MODES = {"none", "sqrt_inverse_frequency"}
+MODEL_ARCHITECTURES = {"task_tokens", "ar_control_tokens"}
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,11 @@ class ModelConfig:
     name: str
     pretrained: bool
     image_size: int
+    architecture: str = "task_tokens"
+    history_frames: int = 0
+    control_token_type_embedding: bool = False
+    history_initial_angle: int = 0
+    history_initial_speed: int = 25
 
 
 @dataclass(frozen=True)
@@ -27,6 +33,7 @@ class DataConfig:
     max_forward_speed: float | None
     min_forward_speed: float | None
     num_workers: int
+    train_angle_mean_window: int = 1
 
 
 @dataclass(frozen=True)
@@ -142,7 +149,18 @@ def load_train_config(path: str | Path) -> TrainConfig:
     loss_payload = _mapping(payload, "loss")
     output_payload = _mapping(payload, "output")
 
-    _expect_keys(model_payload, {"name", "pretrained", "image_size"}, "model")
+    _expect_keys(
+        model_payload,
+        {"name", "pretrained", "image_size"},
+        "model",
+        optional={
+            "architecture",
+            "history_frames",
+            "control_token_type_embedding",
+            "history_initial_angle",
+            "history_initial_speed",
+        },
+    )
     _expect_data_keys(data_payload)
     if preprocessing_payload is not None:
         _expect_keys(
@@ -204,6 +222,31 @@ def load_train_config(path: str | Path) -> TrainConfig:
             name=_string(model_payload, "name"),
             pretrained=_boolean(model_payload, "pretrained"),
             image_size=_integer(model_payload, "image_size"),
+            architecture=(
+                _string(model_payload, "architecture")
+                if "architecture" in model_payload
+                else "task_tokens"
+            ),
+            history_frames=(
+                _integer(model_payload, "history_frames")
+                if "history_frames" in model_payload
+                else 0
+            ),
+            control_token_type_embedding=(
+                _boolean(model_payload, "control_token_type_embedding")
+                if "control_token_type_embedding" in model_payload
+                else False
+            ),
+            history_initial_angle=(
+                _integer(model_payload, "history_initial_angle")
+                if "history_initial_angle" in model_payload
+                else 0
+            ),
+            history_initial_speed=(
+                _integer(model_payload, "history_initial_speed")
+                if "history_initial_speed" in model_payload
+                else 25
+            ),
         ),
         data=DataConfig(
             root=_resolve_project_path(project_root, _string(data_payload, "root")),
@@ -225,6 +268,11 @@ def load_train_config(path: str | Path) -> TrainConfig:
                 else None
             ),
             num_workers=_integer(data_payload, "num_workers"),
+            train_angle_mean_window=(
+                _integer(data_payload, "train_angle_mean_window")
+                if "train_angle_mean_window" in data_payload
+                else 1
+            ),
         ),
         preprocessing=PreprocessingConfig(
             road_warp_config=(
@@ -292,8 +340,36 @@ def _validate(config: TrainConfig) -> None:
         raise ValueError("model.image_size must be > 0")
     if config.model.pretrained and config.model.image_size != 224:
         raise ValueError("the selected pretrained ViT requires image_size 224")
+    if config.model.architecture not in MODEL_ARCHITECTURES:
+        raise ValueError("unsupported model.architecture")
+    if not -100 <= config.model.history_initial_angle <= 100:
+        raise ValueError("model.history_initial_angle must be in [-100, 100]")
+    if not -100 <= config.model.history_initial_speed <= 100:
+        raise ValueError("model.history_initial_speed must be in [-100, 100]")
+    if config.model.architecture == "task_tokens":
+        if config.model.history_frames != 0:
+            raise ValueError("task_tokens model.history_frames must be 0")
+        if config.model.control_token_type_embedding:
+            raise ValueError(
+                "task_tokens model cannot use control_token_type_embedding"
+            )
+    else:
+        if config.model.history_frames != 4:
+            raise ValueError("ar_control_tokens model.history_frames must be 4")
+        if (
+            config.model.history_initial_angle,
+            config.model.history_initial_speed,
+        ) != (0, 25):
+            raise ValueError(
+                "ar_control_tokens initial history command must be (0, 25)"
+            )
     if config.data.num_workers < 0:
         raise ValueError("data.num_workers must be >= 0")
+    if (
+        config.data.train_angle_mean_window <= 0
+        or config.data.train_angle_mean_window % 2 == 0
+    ):
+        raise ValueError("data.train_angle_mean_window must be a positive odd integer")
     if config.data.max_forward_speed is not None and not (
         -100.0 <= config.data.max_forward_speed <= 100.0
     ):
@@ -386,9 +462,10 @@ def _expect_data_keys(payload: Mapping[str, object]) -> None:
         "num_workers",
     }
     filters = {"max_forward_speed", "min_forward_speed"}
+    optional = {"train_angle_mean_window"}
     actual = set(payload)
     missing = required - actual
-    extra = actual - required - filters
+    extra = actual - required - filters - optional
     selected_filters = actual & filters
     if missing or extra or len(selected_filters) != 1:
         raise ValueError(

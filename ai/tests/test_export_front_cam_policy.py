@@ -36,6 +36,37 @@ class _TinyPolicy(nn.Module):
         }
 
 
+class _TinyARPolicy(nn.Module):
+    def __init__(
+        self,
+        *,
+        model_name: str,
+        pretrained: bool,
+        image_size: int,
+        history_frames: int,
+        use_control_type_embedding: bool,
+    ) -> None:
+        super().__init__()
+        del model_name, pretrained, image_size, use_control_type_embedding
+        self.history_frames = history_frames
+        self.angle_bias = nn.Parameter(torch.zeros(201))
+        self.speed_bias = nn.Parameter(torch.ones(201))
+
+    def forward(
+        self,
+        images: torch.Tensor,
+        history_class_ids: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        batch_size = images.shape[0]
+        history_signal = history_class_ids[:, -1, :].to(images.dtype)
+        return {
+            "angle_logits": self.angle_bias.expand(batch_size, -1)
+            + history_signal[:, :1],
+            "speed_logits": self.speed_bias.expand(batch_size, -1)
+            + history_signal[:, 1:],
+        }
+
+
 def test_export_checkpoint_writes_verified_artifact(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(export_module, "TaskTokenViTPolicy", _TinyPolicy)
     checkpoint_path = tmp_path / "best.pt"
@@ -115,3 +146,76 @@ def test_export_validation_rejects_unsafe_id_and_tampering(tmp_path: Path):
     )
     with pytest.raises(PolicyExportError, match="checksum mismatch"):
         verify_artifact(artifact)
+
+
+def test_export_ar_checkpoint_writes_v2_history_contract(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(
+        export_module,
+        "AutoregressiveControlTokenViTPolicy",
+        _TinyARPolicy,
+    )
+    checkpoint_path = tmp_path / "best.pt"
+    model = _TinyARPolicy(
+        model_name="tiny",
+        pretrained=False,
+        image_size=16,
+        history_frames=4,
+        use_control_type_embedding=True,
+    )
+    torch.save(
+        {
+            "epoch": 5,
+            "best_epoch": 4,
+            "best_score": 10.0,
+            "config": {
+                "model": {
+                    "name": "tiny",
+                    "image_size": 16,
+                    "architecture": "ar_control_tokens",
+                    "history_frames": 4,
+                    "control_token_type_embedding": True,
+                    "history_initial_angle": 0,
+                    "history_initial_speed": 25,
+                }
+            },
+            "model_state": model.state_dict(),
+            "preprocessing": {
+                "geometry": "full_frame_bicubic_resize",
+                "image_size": 16,
+                "mean": [0.5, 0.5, 0.5],
+                "std": [0.5, 0.5, 0.5],
+            },
+            "label_contract": {
+                "num_classes": 201,
+                "decode_mapping": "class_id - 100",
+            },
+        },
+        checkpoint_path,
+    )
+
+    artifact = export_checkpoint(
+        checkpoint_path=checkpoint_path,
+        artifact_id="fixture-ar-policy",
+        output_root=tmp_path / "models",
+    )
+    manifest = yaml.safe_load((artifact / "manifest.yaml").read_text())
+    assert manifest["schema_version"] == 2
+    assert manifest["model"]["input"] == {
+        "kind": "tuple",
+        "order": ["images", "history_class_ids"],
+        "images": {
+            "color_space": "RGB",
+            "dtype": "float32",
+            "shape": [1, 3, 16, 16],
+        },
+        "history_class_ids": {"dtype": "int64", "shape": [1, 4, 2]},
+    }
+    assert manifest["history"]["initial_class_ids"] == [100, 125]
+    assert manifest["history"]["update"] == "predicted_argmax"
+    model_ts = torch.jit.load(str(artifact / "model.ts"), map_location="cpu")
+    angle, speed = model_ts(
+        torch.zeros(1, 3, 16, 16),
+        torch.tensor([[[100, 125]] * 4], dtype=torch.long),
+    )
+    assert tuple(angle.shape) == (1, 201)
+    assert tuple(speed.shape) == (1, 201)

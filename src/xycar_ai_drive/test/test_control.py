@@ -21,6 +21,7 @@ from xycar_ai_drive.control import (
 )
 from xycar_ai_drive.policy_runtime import (
     PolicyRuntimeError,
+    TorchScriptPolicy,
     preprocess_rgb_frame,
 )
 
@@ -41,7 +42,9 @@ def test_a_button_toggle_requires_release_and_fault_rearming():
     assert gate.observe(pressed=True, can_enable=True) == ToggleAction.NONE
     assert not gate.enabled
     assert gate.observe(pressed=False, can_enable=True) == ToggleAction.NONE
-    assert gate.observe(pressed=True, can_enable=False) == ToggleAction.REJECTED
+    assert (
+        gate.observe(pressed=True, can_enable=False) == ToggleAction.REJECTED
+    )
     assert not gate.enabled
     assert gate.observe(pressed=True, can_enable=True) == ToggleAction.NONE
     assert gate.observe(pressed=False, can_enable=True) == ToggleAction.NONE
@@ -144,6 +147,7 @@ def test_artifact_contract_and_checksum_tampering(tmp_path):
     contract = load_policy_artifact(artifact)
     assert contract.image_size == 224
     assert contract.model_path == artifact / 'model.ts'
+    assert contract.history is None
 
     alias = tmp_path / 'fixture-policy-alias'
     alias.symlink_to(artifact, target_is_directory=True)
@@ -153,6 +157,125 @@ def test_artifact_contract_and_checksum_tampering(tmp_path):
     (artifact / 'model.ts').write_bytes(b'tampered')
     with pytest.raises(ArtifactContractError, match='checksum mismatch'):
         load_policy_artifact(artifact)
+
+
+def test_v2_artifact_history_contract_and_runtime_queue(monkeypatch, tmp_path):
+    torch = pytest.importorskip('torch')
+
+    class HistoryEchoPolicy(torch.nn.Module):
+        def forward(self, images, history_class_ids):
+            del images
+            next_ids = torch.clamp(history_class_ids[:, -1] + 1, max=200)
+            angle = torch.nn.functional.one_hot(next_ids[:, 0], 201).to(
+                torch.float32
+            )
+            speed = torch.nn.functional.one_hot(next_ids[:, 1], 201).to(
+                torch.float32
+            )
+            return angle, speed
+
+    artifact = tmp_path / 'fixture-ar-policy'
+    artifact.mkdir()
+    sample_image = torch.zeros(1, 3, 4, 4)
+    sample_history = torch.tensor([[[100, 125]] * 4], dtype=torch.long)
+    traced = torch.jit.trace(
+        HistoryEchoPolicy(),
+        (sample_image, sample_history),
+        strict=True,
+    )
+    traced.save(str(artifact / 'model.ts'))
+    manifest = {
+        'schema_version': 2,
+        'artifact_id': artifact.name,
+        'model': {
+            'format': 'torchscript',
+            'file': 'model.ts',
+            'architecture': 'ar_control_tokens',
+            'input': {
+                'kind': 'tuple',
+                'order': ['images', 'history_class_ids'],
+                'images': {
+                    'color_space': 'RGB',
+                    'dtype': 'float32',
+                    'shape': [1, 3, 4, 4],
+                },
+                'history_class_ids': {
+                    'dtype': 'int64',
+                    'shape': [1, 4, 2],
+                },
+            },
+            'output': {
+                'kind': 'tuple',
+                'order': ['angle_logits', 'speed_logits'],
+                'shapes': [[1, 201], [1, 201]],
+            },
+        },
+        'preprocessing': {
+            'geometry': 'full_frame_bicubic_resize',
+            'image_size': 4,
+            'mean': [0.5, 0.5, 0.5],
+            'std': [0.5, 0.5, 0.5],
+        },
+        'label_contract': {
+            'num_classes': 201,
+            'decode_mapping': 'class_id - 100',
+        },
+        'history': {
+            'frames': 4,
+            'pair_order': ['angle_class_id', 'speed_class_id'],
+            'time_order': 'oldest_to_newest',
+            'initial_command': [0, 25],
+            'initial_class_ids': [100, 125],
+            'update': 'predicted_argmax',
+        },
+    }
+    (artifact / 'manifest.yaml').write_text(
+        yaml.safe_dump(manifest, sort_keys=False),
+        encoding='utf-8',
+    )
+    _write_checksums(artifact)
+
+    contract = load_policy_artifact(artifact)
+    assert contract.history is not None
+    assert contract.history.frames == 4
+    assert contract.history.initial_class_ids == (100, 125)
+    runtime = TorchScriptPolicy(
+        artifact_dir=str(artifact),
+        torch_num_threads=1,
+        warmup_count=0,
+        history_reset_timeout_sec=0.25,
+    )
+    frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    assert runtime.history_class_ids == ((100, 125),) * 4
+    first = runtime.infer(frame)
+    assert first.command.angle == 1.0
+    assert first.command.speed == 26.0
+    assert runtime.history_class_ids[-1] == (101, 126)
+    second = runtime.infer(frame)
+    assert second.command.angle == 2.0
+    assert second.command.speed == 27.0
+
+    runtime.reset_history()
+    assert runtime.history_class_ids == ((100, 125),) * 4
+    runtime._last_successful_inference_monotonic = 0.0
+    monkeypatch.setattr(
+        'xycar_ai_drive.policy_runtime.time.monotonic', lambda: 1.0
+    )
+    after_stale_gap = runtime.infer(frame)
+    assert after_stale_gap.command.angle == 1.0
+    assert runtime.history_class_ids[-1] == (101, 126)
+
+    class NonFinitePolicy:
+        def __call__(self, *_args):
+            return (
+                torch.full((1, 201), float('nan')),
+                torch.zeros(1, 201),
+            )
+
+    runtime._model = NonFinitePolicy()
+    with pytest.raises(PolicyRuntimeError, match='non-finite'):
+        runtime.infer(frame)
+    assert runtime.history_class_ids == ((100, 125),) * 4
 
 
 def test_road_warp_artifact_and_runtime_preprocessing(tmp_path):

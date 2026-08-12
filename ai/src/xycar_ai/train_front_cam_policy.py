@@ -27,10 +27,14 @@ from xycar_ai.front_cam_policy_data import (
     FrontCamPolicyDataset,
     PolicyDataSplits,
     PolicySample,
+    PolicySession,
+    attach_training_teacher_forced_history,
     build_policy_data_splits,
     compute_sqrt_inverse_frequency_weights,
     make_policy_transform,
     policy_dataset_stats,
+    smooth_training_angle_targets,
+    validate_session_initial_classes,
 )
 from xycar_ai.front_cam_policy_metrics import (
     ClassificationMetricAccumulator,
@@ -38,7 +42,12 @@ from xycar_ai.front_cam_policy_metrics import (
     ordinal_emd_loss,
     selection_score,
 )
-from xycar_ai.front_cam_policy_model import TaskTokenViTPolicy
+from xycar_ai.front_cam_policy_model import (
+    AR_CONTROL_TOKEN_ARCHITECTURE,
+    AutoregressiveControlTokenViTPolicy,
+    TaskTokenViTPolicy,
+    build_policy_model,
+)
 from xycar_ai.front_cam_policy_warp import (
     ROAD_WARP_GEOMETRY,
     RoadWarpConfig,
@@ -52,8 +61,27 @@ CHECKPOINT_SCHEMA_VERSION = 1
 def main(argv: Iterable[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     config = load_train_config(args.config)
+    if args.stop_after_epoch is not None and not (
+        1 <= args.stop_after_epoch <= config.training.epochs
+    ):
+        raise ValueError("--stop-after-epoch must be in [1, training.epochs]")
     road_warp = load_configured_road_warp(config)
     splits = build_policy_data_splits(config.data)
+    if config.model.architecture == AR_CONTROL_TOKEN_ARCHITECTURE:
+        validate_session_initial_classes(
+            splits,
+            angle_class_id=config.model.history_initial_angle + 100,
+            speed_class_id=config.model.history_initial_speed + 100,
+        )
+    splits = smooth_training_angle_targets(
+        splits,
+        config.data.train_angle_mean_window,
+    )
+    if config.model.architecture == AR_CONTROL_TOKEN_ARCHITECTURE:
+        splits = attach_training_teacher_forced_history(
+            splits,
+            config.model.history_frames,
+        )
     split_manifest = splits.manifest()
     dataset_stats = policy_dataset_stats(splits)
 
@@ -69,16 +97,20 @@ def main(argv: Iterable[str] | None = None) -> int:
     set_seed(config.training.seed, deterministic=config.training.deterministic)
     device = resolve_device(config.training.device)
     amp_enabled = bool(config.training.amp and device.type == "cuda")
-    model = TaskTokenViTPolicy(
+    model = build_policy_model(
+        architecture=config.model.architecture,
         model_name=config.model.name,
         pretrained=config.model.pretrained,
         image_size=config.model.image_size,
+        history_frames=config.model.history_frames,
+        control_token_type_embedding=config.model.control_token_type_embedding,
     ).to(device)
     preprocessing = build_preprocessing_contract(
         model.preprocessing_contract(),
         config=config,
         road_warp=road_warp,
     )
+    label_contract = build_label_contract(config)
     loaders = make_loaders(
         splits=splits,
         config=config,
@@ -129,6 +161,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         device=device,
         expected_split=split_manifest,
         expected_preprocessing=preprocessing,
+        expected_label_contract=label_contract,
     )
     write_yaml(run_dir / "resolved_config.yaml", config.serializable())
     write_json(run_dir / "split.json", split_manifest)
@@ -159,27 +192,12 @@ def main(argv: Iterable[str] | None = None) -> int:
             f"resume epoch {start_epoch - 1} already reaches configured "
             f"epochs={config.training.epochs}"
         )
+    if args.stop_after_epoch is not None and args.stop_after_epoch < start_epoch:
+        raise ValueError("--stop-after-epoch is before the resume start epoch")
 
     metrics_path = run_dir / "metrics.csv"
     metrics_rows = read_metrics_rows(metrics_path) if resume_payload else []
     source_state = collect_source_state(config.project_root)
-    label_contract = {
-        "schema_version": 1,
-        "output_keys": ["angle_logits", "speed_logits"],
-        "num_classes": NUM_COMMAND_CLASSES,
-        "command_min": COMMAND_MIN,
-        "command_max": COMMAND_MAX,
-        "class_id_mapping": "int(round(clamp(value, -100, 100))) + 100",
-        "decode_mapping": "class_id - 100",
-        "horizontal_flip_mapping": {
-            "angle_raw": "-angle_raw",
-            "angle": "-angle",
-            "angle_class_id": "200 - angle_class_id",
-            "speed": "unchanged",
-            "speed_class_id": "unchanged",
-        },
-    }
-
     for epoch in range(start_epoch, config.training.epochs + 1):
         train_metrics = run_epoch(
             model=model,
@@ -195,19 +213,19 @@ def main(argv: Iterable[str] | None = None) -> int:
             speed_loss_weight=config.loss.speed_loss_weight,
             emd_loss_weight=config.loss.emd_loss_weight,
         )
-        val_metrics = run_epoch(
+        val_metrics = evaluate_policy(
             model=model,
             loader=loaders["val"],
+            sessions=splits.val_sessions,
             split_name="val",
+            config=config,
+            model_data_config=model.model_data_config,
+            road_warp=road_warp,
             device=device,
             angle_criterion=angle_criterion,
             speed_criterion=speed_criterion,
-            optimizer=None,
             scaler=scaler,
             amp_enabled=amp_enabled,
-            grad_clip=config.training.grad_clip,
-            speed_loss_weight=config.loss.speed_loss_weight,
-            emd_loss_weight=config.loss.emd_loss_weight,
         )
         current_lr = float(optimizer.param_groups[0]["lr"])
         scheduler.step()
@@ -263,25 +281,51 @@ def main(argv: Iterable[str] | None = None) -> int:
                 f"best_epoch={best_epoch} best_score={best_score:.4f}"
             )
             break
+        if args.stop_after_epoch is not None and epoch >= args.stop_after_epoch:
+            print(f"probe_stopped epoch={epoch}")
+            break
+
+    completed_epoch = int(metrics_rows[-1]["epoch"])
+    if (
+        args.stop_after_epoch is not None
+        and args.stop_after_epoch < config.training.epochs
+        and completed_epoch == args.stop_after_epoch
+    ):
+        write_json(
+            run_dir / "probe_summary.json",
+            {
+                "schema_version": 1,
+                "status": "probe_stopped",
+                "completed_epochs": completed_epoch,
+                "max_epochs": config.training.epochs,
+                "best_epoch": best_epoch,
+                "best_score": best_score,
+                "last_checkpoint": str(run_dir / "last.pt"),
+                "source": source_state,
+            },
+        )
+        print(f"run_dir={run_dir}")
+        print(f"best_epoch={best_epoch} best_score={best_score:.4f}")
+        return 0
 
     best_path = run_dir / "best.pt"
     if not best_path.is_file():
         raise RuntimeError(f"best checkpoint is unavailable: {best_path}")
     best_payload = load_checkpoint(best_path, device)
     model.load_state_dict(best_payload["model_state"])
-    test_metrics = run_epoch(
+    test_metrics = evaluate_policy(
         model=model,
         loader=loaders["test"],
+        sessions=splits.test_sessions,
         split_name="test",
+        config=config,
+        model_data_config=model.model_data_config,
+        road_warp=road_warp,
         device=device,
         angle_criterion=angle_criterion,
         speed_criterion=speed_criterion,
-        optimizer=None,
         scaler=scaler,
         amp_enabled=amp_enabled,
-        grad_clip=config.training.grad_clip,
-        speed_loss_weight=config.loss.speed_loss_weight,
-        emd_loss_weight=config.loss.emd_loss_weight,
     )
     write_json(run_dir / "test_metrics.json", test_metrics)
     summary = {
@@ -295,14 +339,13 @@ def main(argv: Iterable[str] | None = None) -> int:
         "completed_epochs": int(metrics_rows[-1]["epoch"]),
         "max_epochs": config.training.epochs,
         "early_stopping_patience": config.training.early_stopping_patience,
-        "stopped_early": bool(
-            metrics_rows[-1].get("early_stopping_triggered", 0)
-        ),
+        "stopped_early": bool(metrics_rows[-1].get("early_stopping_triggered", 0)),
         "device": str(device),
         "amp": amp_enabled,
         "source": source_state,
         "dataset": split_manifest,
         "model_name": config.model.name,
+        "model_architecture": config.model.architecture,
         "pretrained": config.model.pretrained,
         "preprocessing": preprocessing,
         "label_contract": label_contract,
@@ -318,6 +361,55 @@ def main(argv: Iterable[str] | None = None) -> int:
     return 0
 
 
+def build_label_contract(config: TrainConfig) -> dict[str, object]:
+    contract: dict[str, object] = {
+        "schema_version": 1,
+        "output_keys": ["angle_logits", "speed_logits"],
+        "num_classes": NUM_COMMAND_CLASSES,
+        "command_min": COMMAND_MIN,
+        "command_max": COMMAND_MAX,
+        "class_id_mapping": "int(round(clamp(value, -100, 100))) + 100",
+        "decode_mapping": "class_id - 100",
+        "train_angle_target": {
+            "method": "centered_mean",
+            "window_size": config.data.train_angle_mean_window,
+            "padding": "repeat_session_edge",
+            "applied_splits": ["train"],
+            "average_before_quantization": True,
+            "speed_target": "unchanged",
+        },
+        "horizontal_flip_mapping": {
+            "angle_raw": "-angle_raw",
+            "angle": "-angle",
+            "angle_class_id": "200 - angle_class_id",
+            "speed": "unchanged",
+            "speed_class_id": "unchanged",
+        },
+    }
+    if config.model.architecture == AR_CONTROL_TOKEN_ARCHITECTURE:
+        contract["history"] = {
+            "frames": config.model.history_frames,
+            "shape": [config.model.history_frames, 2],
+            "pair_order": ["angle_class_id", "speed_class_id"],
+            "time_order": "oldest_to_newest",
+            "train_source": "ground_truth_teacher_forcing",
+            "train_angle_source": "centered_mean_target",
+            "train_speed_source": "instantaneous_target",
+            "evaluation_source": "predicted_argmax_rollout",
+            "initial_command": [
+                config.model.history_initial_angle,
+                config.model.history_initial_speed,
+            ],
+            "initial_class_ids": [
+                config.model.history_initial_angle + 100,
+                config.model.history_initial_speed + 100,
+            ],
+            "edge_padding": "repeat_session_first_target",
+            "known_train_label_leakage": True,
+        }
+    return contract
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Train the Xycar front-camera angle/speed policy."
@@ -325,6 +417,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default=DEFAULT_CONFIG)
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--resume", default="")
+    parser.add_argument("--stop-after-epoch", type=int)
     return parser
 
 
@@ -372,9 +465,154 @@ def make_loaders(
     return loaders
 
 
+def evaluate_policy(
+    *,
+    model: TaskTokenViTPolicy | AutoregressiveControlTokenViTPolicy,
+    loader: DataLoader,
+    sessions: Sequence[PolicySession],
+    split_name: str,
+    config: TrainConfig,
+    model_data_config: Mapping[str, object],
+    road_warp: RoadWarpConfig | None,
+    device: torch.device,
+    angle_criterion: nn.Module,
+    speed_criterion: nn.Module,
+    scaler: torch.amp.GradScaler,
+    amp_enabled: bool,
+) -> dict[str, float]:
+    if isinstance(model, AutoregressiveControlTokenViTPolicy):
+        return run_rollout_evaluation(
+            model=model,
+            sessions=sessions,
+            split_name=split_name,
+            config=config,
+            model_data_config=model_data_config,
+            road_warp=road_warp,
+            device=device,
+            angle_criterion=angle_criterion,
+            speed_criterion=speed_criterion,
+            amp_enabled=amp_enabled,
+        )
+    return run_epoch(
+        model=model,
+        loader=loader,
+        split_name=split_name,
+        device=device,
+        angle_criterion=angle_criterion,
+        speed_criterion=speed_criterion,
+        optimizer=None,
+        scaler=scaler,
+        amp_enabled=amp_enabled,
+        grad_clip=config.training.grad_clip,
+        speed_loss_weight=config.loss.speed_loss_weight,
+        emd_loss_weight=config.loss.emd_loss_weight,
+    )
+
+
+def run_rollout_evaluation(
+    *,
+    model: AutoregressiveControlTokenViTPolicy,
+    sessions: Sequence[PolicySession],
+    split_name: str,
+    config: TrainConfig,
+    model_data_config: Mapping[str, object],
+    road_warp: RoadWarpConfig | None,
+    device: torch.device,
+    angle_criterion: nn.Module,
+    speed_criterion: nn.Module,
+    amp_enabled: bool,
+) -> dict[str, float]:
+    model.eval()
+    accumulator = ClassificationMetricAccumulator(split_name)
+    progress = tqdm(
+        total=sum(len(session.samples) for session in sessions),
+        desc=split_name,
+        leave=False,
+    )
+    initial_pair = [
+        config.model.history_initial_angle + 100,
+        config.model.history_initial_speed + 100,
+    ]
+    transform = make_policy_transform(
+        train=False,
+        image_size=config.model.image_size,
+        model_data_config=model_data_config,
+        augmentation=config.augmentation,
+    )
+    with torch.inference_mode():
+        for session in sessions:
+            history = torch.tensor(
+                [[initial_pair] * config.model.history_frames],
+                dtype=torch.long,
+                device=device,
+            )
+            dataset = FrontCamPolicyDataset(
+                session.samples,
+                transform=transform,
+                horizontal_flip_probability=0.0,
+                road_warp=road_warp,
+            )
+            for item in dataset:
+                images = (
+                    item["image_tensor"]
+                    .unsqueeze(0)
+                    .to(
+                        device=device,
+                        non_blocking=True,
+                    )
+                )
+                angle_class = torch.tensor(
+                    [item["angle_class_id"]], dtype=torch.long, device=device
+                )
+                speed_class = torch.tensor(
+                    [item["speed_class_id"]], dtype=torch.long, device=device
+                )
+                with torch.autocast(device_type=device.type, enabled=amp_enabled):
+                    outputs = model(images, history)
+                    angle_loss = angle_criterion(outputs["angle_logits"], angle_class)
+                    speed_loss = speed_criterion(outputs["speed_logits"], speed_class)
+                    angle_emd = ordinal_emd_loss(outputs["angle_logits"], angle_class)
+                    speed_emd = ordinal_emd_loss(outputs["speed_logits"], speed_class)
+                    total_loss, emd_loss = combine_policy_losses(
+                        angle_loss=angle_loss,
+                        speed_loss=speed_loss,
+                        angle_emd_loss=angle_emd,
+                        speed_emd_loss=speed_emd,
+                        speed_loss_weight=config.loss.speed_loss_weight,
+                        emd_loss_weight=config.loss.emd_loss_weight,
+                    )
+                accumulator.update(
+                    outputs={key: value.detach() for key, value in outputs.items()},
+                    batch=item,
+                    total_loss=total_loss.detach(),
+                    angle_loss=angle_loss.detach(),
+                    speed_loss=speed_loss.detach(),
+                    emd_loss=emd_loss.detach(),
+                )
+                predicted_pair = torch.stack(
+                    (
+                        outputs["angle_logits"].argmax(dim=1),
+                        outputs["speed_logits"].argmax(dim=1),
+                    ),
+                    dim=1,
+                )
+                history = torch.cat(
+                    (history[:, 1:], predicted_pair.unsqueeze(1)),
+                    dim=1,
+                )
+                progress.update(1)
+                current = accumulator.compute()
+                progress.set_postfix(
+                    loss=f"{current[f'{split_name}_loss']:.3f}",
+                    angle_mae=f"{current[f'{split_name}_angle_mae']:.2f}",
+                )
+    progress.close()
+    return accumulator.compute()
+
+
 def run_epoch(
     *,
-    model: TaskTokenViTPolicy,
+    model: TaskTokenViTPolicy | AutoregressiveControlTokenViTPolicy,
     loader: DataLoader,
     split_name: str,
     device: torch.device,
@@ -400,7 +638,14 @@ def run_epoch(
 
         with torch.set_grad_enabled(training):
             with torch.autocast(device_type=device.type, enabled=amp_enabled):
-                outputs = model(images)
+                if isinstance(model, AutoregressiveControlTokenViTPolicy):
+                    history_class_ids = batch["history_class_ids"].to(
+                        device=device,
+                        non_blocking=True,
+                    )
+                    outputs = model(images, history_class_ids)
+                else:
+                    outputs = model(images)
                 angle_loss = angle_criterion(outputs["angle_logits"], angle_class)
                 speed_loss = speed_criterion(outputs["speed_logits"], speed_class)
                 angle_emd = ordinal_emd_loss(outputs["angle_logits"], angle_class)
@@ -465,7 +710,7 @@ def class_weights(
 def checkpoint_payload(
     *,
     epoch: int,
-    model: TaskTokenViTPolicy,
+    model: TaskTokenViTPolicy | AutoregressiveControlTokenViTPolicy,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     scaler: torch.amp.GradScaler,
@@ -509,6 +754,7 @@ def prepare_run_directory(
     device: torch.device,
     expected_split: dict[str, object],
     expected_preprocessing: dict[str, object],
+    expected_label_contract: dict[str, object],
 ) -> tuple[Path, dict[str, object] | None]:
     if resume:
         checkpoint_path = Path(resume).expanduser().resolve()
@@ -522,6 +768,7 @@ def prepare_run_directory(
             config=config,
             expected_split=expected_split,
             expected_preprocessing=expected_preprocessing,
+            expected_label_contract=expected_label_contract,
         )
         return checkpoint_path.parent, payload
 
@@ -537,6 +784,7 @@ def validate_resume_payload(
     config: TrainConfig,
     expected_split: dict[str, object],
     expected_preprocessing: dict[str, object] | None = None,
+    expected_label_contract: dict[str, object] | None = None,
 ) -> None:
     if payload.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("resume checkpoint schema is incompatible")
@@ -545,6 +793,14 @@ def validate_resume_payload(
     label_contract = payload.get("label_contract")
     if not isinstance(label_contract, dict) or label_contract.get("num_classes") != 201:
         raise ValueError("resume checkpoint label contract is incompatible")
+    if expected_label_contract is not None and label_contract.get(
+        "train_angle_target"
+    ) != expected_label_contract.get("train_angle_target"):
+        raise ValueError("resume checkpoint train angle target differs from the config")
+    if expected_label_contract is not None and label_contract.get(
+        "history"
+    ) != expected_label_contract.get("history"):
+        raise ValueError("resume checkpoint history contract differs from the config")
     if payload.get("split_manifest") != expected_split:
         raise ValueError("resume checkpoint dataset split differs from the config")
     checkpoint_preprocessing = payload.get("preprocessing")
@@ -557,6 +813,45 @@ def validate_resume_payload(
             "resume checkpoint preprocessing differs from the current warp config"
         )
     checkpoint_config = payload.get("config")
+    checkpoint_model = (
+        checkpoint_config.get("model") if isinstance(checkpoint_config, dict) else None
+    )
+    expected_model_contract = {
+        "architecture": config.model.architecture,
+        "history_frames": config.model.history_frames,
+        "control_token_type_embedding": (config.model.control_token_type_embedding),
+        "history_initial_angle": config.model.history_initial_angle,
+        "history_initial_speed": config.model.history_initial_speed,
+    }
+    checkpoint_model_contract = {
+        "architecture": (
+            checkpoint_model.get("architecture", "task_tokens")
+            if isinstance(checkpoint_model, dict)
+            else None
+        ),
+        "history_frames": (
+            checkpoint_model.get("history_frames", 0)
+            if isinstance(checkpoint_model, dict)
+            else None
+        ),
+        "control_token_type_embedding": (
+            checkpoint_model.get("control_token_type_embedding", False)
+            if isinstance(checkpoint_model, dict)
+            else None
+        ),
+        "history_initial_angle": (
+            checkpoint_model.get("history_initial_angle", 0)
+            if isinstance(checkpoint_model, dict)
+            else None
+        ),
+        "history_initial_speed": (
+            checkpoint_model.get("history_initial_speed", 25)
+            if isinstance(checkpoint_model, dict)
+            else None
+        ),
+    }
+    if checkpoint_model_contract != expected_model_contract:
+        raise ValueError("resume checkpoint model history settings differ from config")
     checkpoint_augmentation = (
         checkpoint_config.get("augmentation")
         if isinstance(checkpoint_config, dict)

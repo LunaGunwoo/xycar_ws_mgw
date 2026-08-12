@@ -9,7 +9,10 @@ from xycar_ai.front_cam_policy_metrics import (
     ordinal_emd_loss,
     selection_score,
 )
-from xycar_ai.front_cam_policy_model import TaskTokenViTPolicy
+from xycar_ai.front_cam_policy_model import (
+    AutoregressiveControlTokenViTPolicy,
+    TaskTokenViTPolicy,
+)
 
 
 def test_task_token_vit_tiny_output_shapes():
@@ -40,6 +43,56 @@ def test_task_token_vit_small_output_shapes():
     assert tuple(outputs["angle_logits"].shape) == (1, 201)
     assert tuple(outputs["speed_logits"].shape) == (1, 201)
     assert sum(parameter.numel() for parameter in model.parameters()) == 21_823_506
+
+
+@pytest.mark.parametrize("use_type_embedding", [False, True])
+def test_ar_control_token_vit_output_shapes_and_shared_projection(
+    use_type_embedding: bool,
+):
+    model = AutoregressiveControlTokenViTPolicy(
+        model_name="vit_tiny_patch16_224.augreg_in21k_ft_in1k",
+        pretrained=False,
+        image_size=32,
+        history_frames=4,
+        use_control_type_embedding=use_type_embedding,
+    )
+    model.eval()
+    images = torch.zeros(2, 3, 32, 32)
+    history = torch.tensor(
+        [
+            [[100, 125], [100, 125], [101, 124], [102, 123]],
+            [[90, 120], [91, 121], [92, 122], [93, 123]],
+        ],
+        dtype=torch.long,
+    )
+    with torch.no_grad():
+        features = model.forward_features(images, history)
+        outputs = model(images, history)
+        expected = torch.nn.functional.linear(
+            features[:, -2:],
+            model.control_token_embedding.weight[:201],
+        ) + model.output_bias.unsqueeze(0)
+
+    assert tuple(outputs["angle_logits"].shape) == (2, 201)
+    assert tuple(outputs["speed_logits"].shape) == (2, 201)
+    assert torch.equal(outputs["angle_logits"], expected[:, 0])
+    assert torch.equal(outputs["speed_logits"], expected[:, 1])
+    assert (model.control_type_embedding is not None) is use_type_embedding
+
+
+def test_ar_control_token_vit_rejects_invalid_history():
+    model = AutoregressiveControlTokenViTPolicy(
+        model_name="vit_tiny_patch16_224.augreg_in21k_ft_in1k",
+        pretrained=False,
+        image_size=32,
+    )
+    images = torch.zeros(1, 3, 32, 32)
+    with pytest.raises(ValueError, match=r"shape \[B,4,2\]"):
+        model(images, torch.zeros(1, 3, 2, dtype=torch.long))
+    with pytest.raises(TypeError, match="torch.int64"):
+        model(images, torch.zeros(1, 4, 2))
+    with pytest.raises(ValueError, match=r"\[0,200\]"):
+        model(images, torch.full((1, 4, 2), 201, dtype=torch.long))
 
 
 def test_ordinal_emd_tracks_class_distance_and_combines_losses():

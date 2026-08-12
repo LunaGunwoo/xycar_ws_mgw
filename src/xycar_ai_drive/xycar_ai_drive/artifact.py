@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
-ARTIFACT_SCHEMA_VERSION = 1
+SUPPORTED_ARTIFACT_SCHEMA_VERSIONS = {1, 2}
 CHECKSUM_FILENAME = 'SHA256SUMS'
 MANIFEST_FILENAME = 'manifest.yaml'
 
@@ -36,6 +36,12 @@ class RoadWarpParameters:
 
 
 @dataclass(frozen=True)
+class PolicyHistoryContract:
+    frames: int
+    initial_class_ids: tuple[int, int]
+
+
+@dataclass(frozen=True)
 class PolicyArtifact:
     root: Path
     artifact_id: str
@@ -44,6 +50,7 @@ class PolicyArtifact:
     mean: tuple[float, float, float]
     std: tuple[float, float, float]
     road_warp: RoadWarpParameters | None
+    history: PolicyHistoryContract | None
 
 
 def load_policy_artifact(root: str | Path) -> PolicyArtifact:
@@ -57,7 +64,8 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
         raise ArtifactContractError(f'artifact directory is missing: {root}')
     _verify_checksums(root)
     manifest = _load_mapping(root / MANIFEST_FILENAME)
-    if manifest.get('schema_version') != ARTIFACT_SCHEMA_VERSION:
+    schema_version = manifest.get('schema_version')
+    if schema_version not in SUPPORTED_ARTIFACT_SCHEMA_VERSIONS:
         raise ArtifactContractError('unsupported artifact schema_version')
     artifact_id = _required_string(manifest, 'artifact_id', 'manifest')
     if artifact_id != root.name:
@@ -72,25 +80,38 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
     _validate_relative_path(model_relative)
     model_path = root / model_relative
     if not model_path.is_file() or model_path.is_symlink():
-        raise ArtifactContractError(f'model file is missing or unsafe: {model_path}')
+        raise ArtifactContractError(
+            f'model file is missing or unsafe: {model_path}'
+        )
 
     model_input = _required_mapping(model, 'input', 'model')
-    if model_input.get('color_space') != 'RGB':
-        raise ArtifactContractError('model input color_space must be RGB')
-    if model_input.get('dtype') != 'float32':
-        raise ArtifactContractError('model input dtype must be float32')
-    shape = model_input.get('shape')
-    if (
-        not isinstance(shape, list)
-        or len(shape) != 4
-        or shape[0] != 1
-        or shape[1] != 3
-        or not isinstance(shape[2], int)
-        or isinstance(shape[2], bool)
-        or shape[2] <= 0
-        or shape[3] != shape[2]
-    ):
-        raise ArtifactContractError('model input shape must be [1,3,N,N]')
+    history = None
+    if schema_version == 1:
+        shape = _validate_image_input(model_input)
+    else:
+        if model.get('architecture') != 'ar_control_tokens':
+            raise ArtifactContractError('schema v2 requires ar_control_tokens')
+        if model_input.get('kind') != 'tuple':
+            raise ArtifactContractError(
+                'schema v2 model input must be a tuple'
+            )
+        if model_input.get('order') != ['images', 'history_class_ids']:
+            raise ArtifactContractError(
+                'schema v2 model input order is unsupported'
+            )
+        shape = _validate_image_input(
+            _required_mapping(model_input, 'images', 'model.input')
+        )
+        history_input = _required_mapping(
+            model_input,
+            'history_class_ids',
+            'model.input',
+        )
+        if history_input.get('dtype') != 'int64':
+            raise ArtifactContractError('history input dtype must be int64')
+        if history_input.get('shape') != [1, 4, 2]:
+            raise ArtifactContractError('history input shape must be [1,4,2]')
+        history = _history_contract(manifest)
     image_size = shape[2]
 
     model_output = _required_mapping(model, 'output', 'model')
@@ -117,7 +138,9 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
     mean = _three_finite_floats(preprocessing, 'mean')
     std = _three_finite_floats(preprocessing, 'std')
     if any(value <= 0.0 for value in std):
-        raise ArtifactContractError('preprocessing std values must be positive')
+        raise ArtifactContractError(
+            'preprocessing std values must be positive'
+        )
     road_warp = None
     if geometry == 'perspective_road_warp_then_bicubic_resize':
         road_warp = _road_warp_parameters(preprocessing)
@@ -144,6 +167,67 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
         mean=mean,
         std=std,
         road_warp=road_warp,
+        history=history,
+    )
+
+
+def _validate_image_input(model_input: Mapping[str, object]) -> list[object]:
+    if model_input.get('color_space') != 'RGB':
+        raise ArtifactContractError('model input color_space must be RGB')
+    if model_input.get('dtype') != 'float32':
+        raise ArtifactContractError('model input dtype must be float32')
+    shape = model_input.get('shape')
+    if (
+        not isinstance(shape, list)
+        or len(shape) != 4
+        or shape[0] != 1
+        or shape[1] != 3
+        or not isinstance(shape[2], int)
+        or isinstance(shape[2], bool)
+        or shape[2] <= 0
+        or shape[3] != shape[2]
+    ):
+        raise ArtifactContractError('model input shape must be [1,3,N,N]')
+    return shape
+
+
+def _history_contract(
+    manifest: Mapping[str, object],
+) -> PolicyHistoryContract:
+    history = _required_mapping(manifest, 'history', 'manifest')
+    if history.get('frames') != 4:
+        raise ArtifactContractError('history.frames must be 4')
+    if history.get('pair_order') != [
+        'angle_class_id',
+        'speed_class_id',
+    ]:
+        raise ArtifactContractError('history pair order is unsupported')
+    if history.get('time_order') != 'oldest_to_newest':
+        raise ArtifactContractError('history time order is unsupported')
+    if history.get('update') != 'predicted_argmax':
+        raise ArtifactContractError('history update mode is unsupported')
+    initial_ids = history.get('initial_class_ids')
+    if (
+        not isinstance(initial_ids, list)
+        or len(initial_ids) != 2
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 <= value <= 200
+            for value in initial_ids
+        )
+    ):
+        raise ArtifactContractError('history initial class ids are invalid')
+    if initial_ids != [100, 125]:
+        raise ArtifactContractError(
+            'history initial class ids must be [100,125]'
+        )
+    initial_command = history.get('initial_command')
+    if initial_command != [0, 25]:
+        raise ArtifactContractError('history initial command must be [0,25]')
+    return PolicyHistoryContract(
+        frames=4,
+        initial_class_ids=(initial_ids[0], initial_ids[1]),
     )
 
 
@@ -178,7 +262,9 @@ def _road_warp_parameters(
         'dst_right_x',
     }
     if set(parameters) != expected:
-        raise ArtifactContractError('road_warp parameter keys are incompatible')
+        raise ArtifactContractError(
+            'road_warp parameter keys are incompatible'
+        )
     expected_sha256 = contract.get('sha256')
     if not isinstance(expected_sha256, str) or not re.fullmatch(
         r'[0-9a-f]{64}', expected_sha256
@@ -260,7 +346,9 @@ def _verify_checksums(root: Path) -> None:
         if path.is_symlink():
             raise ArtifactContractError(f'artifact contains a symlink: {path}')
         if not path.is_dir() and not path.is_file():
-            raise ArtifactContractError(f'artifact contains a special file: {path}')
+            raise ArtifactContractError(
+                f'artifact contains a special file: {path}'
+            )
     actual_files = {
         path.relative_to(root).as_posix()
         for path in root.rglob('*')
