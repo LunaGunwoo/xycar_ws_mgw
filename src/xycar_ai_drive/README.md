@@ -19,8 +19,10 @@
   전환한다. 조건이 복구돼도 A release 후 새 press가 있어야 다시 ON된다.
 - Jetson의 양방향 parameter bridge `/ros_bridge`는
   `allowed_motor_relay_nodes`에 명시된 필수 relay라 경쟁 publisher 판정에서
-  제외한다. `gamepad_teleop`을 포함한 그 밖의 publisher는 계속 fail-closed로
-  주행을 차단한다.
+  제외한다. Fast DDS가 bridge node 이름을 `UNKNOWN`으로 보고할 때는 같은 DDS
+  participant GID를 가진 unnamed publisher/subscriber 쌍만 bridge로 인정한다.
+  이름 없는 publisher 하나만 있거나 participant가 다른 경우와 `gamepad_teleop`을
+  포함한 그 밖의 publisher는 계속 fail-closed로 주행을 차단한다.
 - 기본 launch의 `allow_motion:=true`는 A toggle 후 실제로 움직일 수 있다.
   `allow_motion:=false`는 nonzero command를 차단하는 점검용 gate지만 node 자체가
   motor publisher이므로 실행 전 승인 규칙은 그대로 적용된다.

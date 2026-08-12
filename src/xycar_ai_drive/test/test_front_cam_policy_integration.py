@@ -12,7 +12,10 @@ from rclpy.parameter import Parameter
 from sensor_msgs.msg import Image, Joy
 from std_msgs.msg import Bool, Float32MultiArray
 from xycar_ai_drive.control import DriveCommand
-from xycar_ai_drive.front_cam_policy_node import FrontCamPolicyNode
+from xycar_ai_drive.front_cam_policy_node import (
+    FrontCamPolicyNode,
+    _is_paired_unnamed_relay,
+)
 
 JOY_TOPIC = '/xycar_ai_drive_test/joy'
 CAMERA_TOPIC = '/xycar_ai_drive_test/camera'
@@ -48,6 +51,45 @@ def _image(sequence):
     message.step = message.width * 3
     message.data = bytes([sequence % 256] * (message.step * message.height))
     return message
+
+
+def _endpoint(name, namespace, participant, entity):
+    return SimpleNamespace(
+        node_name=name,
+        node_namespace=namespace,
+        endpoint_gid=bytes(participant) + bytes(entity),
+    )
+
+
+def test_only_paired_unnamed_bridge_endpoint_is_recognized():
+    participant = bytes(range(12))
+    publisher = _endpoint(
+        '_NODE_NAME_UNKNOWN_',
+        '_NODE_NAMESPACE_UNKNOWN_',
+        participant,
+        [0, 0, 0x12, 0x03],
+    )
+    subscriber = _endpoint(
+        '_NODE_NAME_UNKNOWN_',
+        '_NODE_NAMESPACE_UNKNOWN_',
+        participant,
+        [0, 0, 0x13, 0x04],
+    )
+    assert _is_paired_unnamed_relay(publisher, [subscriber])
+
+    different_participant = bytes([99]) + participant[1:]
+    unrelated = _endpoint(
+        '_NODE_NAME_UNKNOWN_',
+        '_NODE_NAMESPACE_UNKNOWN_',
+        different_participant,
+        [0, 0, 0x13, 0x04],
+    )
+    assert not _is_paired_unnamed_relay(publisher, [unrelated])
+
+    named_publisher = _endpoint(
+        'other_motor_publisher', '/', participant, [0, 0, 0x12, 0x03]
+    )
+    assert not _is_paired_unnamed_relay(named_publisher, [subscriber])
 
 
 def _spin_for(harness, duration_sec, *, a=None, publish_camera=True):

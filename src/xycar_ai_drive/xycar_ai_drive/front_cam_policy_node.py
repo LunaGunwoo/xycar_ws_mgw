@@ -30,12 +30,48 @@ from xycar_ai_drive.policy_runtime import TorchScriptPolicy
 
 PolicyFactory = Callable[..., object]
 
+_DDS_GUID_PREFIX_SIZE = 12
+_UNKNOWN_NODE_NAME = '_NODE_NAME_UNKNOWN_'
+_UNKNOWN_NODE_NAMESPACE = '_NODE_NAMESPACE_UNKNOWN_'
+
 
 def _node_label(namespace: str, name: str) -> str:
     namespace = namespace.rstrip('/')
     if not namespace:
         return f'/{name}'
     return f'{namespace}/{name}'
+
+
+def _endpoint_participant_prefix(endpoint) -> bytes | None:
+    """Return the DDS participant portion of a topic endpoint GID."""
+    try:
+        gid = bytes(endpoint.endpoint_gid)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if len(gid) < _DDS_GUID_PREFIX_SIZE:
+        return None
+    return gid[:_DDS_GUID_PREFIX_SIZE]
+
+
+def _is_unnamed_endpoint(endpoint) -> bool:
+    return (
+        endpoint.node_name == _UNKNOWN_NODE_NAME
+        and endpoint.node_namespace == _UNKNOWN_NODE_NAMESPACE
+    )
+
+
+def _is_paired_unnamed_relay(endpoint, subscriptions) -> bool:
+    """Match the unnamed publisher half of one DDS bridge participant."""
+    if not _is_unnamed_endpoint(endpoint):
+        return False
+    participant = _endpoint_participant_prefix(endpoint)
+    if participant is None:
+        return False
+    return any(
+        _is_unnamed_endpoint(subscription)
+        and _endpoint_participant_prefix(subscription) == participant
+        for subscription in subscriptions
+    )
 
 
 class FrontCamPolicyNode(Node):
@@ -430,6 +466,10 @@ class FrontCamPolicyNode(Node):
 
     def _refresh_graph(self, now: float) -> None:
         topic = self.resolve_topic_name(self.motor_topic)
+        subscriptions = self.get_subscriptions_info_by_topic(topic)
+        allow_unnamed_bridge = (
+            '/ros_bridge' in self.allowed_motor_relay_nodes
+        )
         competitors = []
         for publisher in self.get_publishers_info_by_topic(topic):
             if (
@@ -443,10 +483,12 @@ class FrontCamPolicyNode(Node):
             )
             if label in self.allowed_motor_relay_nodes:
                 continue
+            if allow_unnamed_bridge and _is_paired_unnamed_relay(
+                publisher, subscriptions
+            ):
+                continue
             competitors.append(label)
-        has_motor_subscriber = bool(
-            self.get_subscriptions_info_by_topic(topic)
-        )
+        has_motor_subscriber = bool(subscriptions)
         with self._lock:
             self._competitors = tuple(sorted(set(competitors)))
             self._has_motor_subscriber = has_motor_subscriber
