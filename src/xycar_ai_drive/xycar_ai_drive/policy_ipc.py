@@ -26,6 +26,7 @@ _MAGIC = b'XPAI'
 _VERSION = 1
 _HEADER = struct.Struct('!4sBBHII')
 _IMAGE_HEADER = struct.Struct('!III')
+_HISTORY_CLASS_IDS = struct.Struct('!8B')
 _HELLO = 1
 _INFER = 2
 _RESET = 3
@@ -60,6 +61,7 @@ class UnixSocketPolicyClient:
         self._socket_path = socket_path
         self._timeout_sec = float(timeout_sec)
         self._required_device = required_device
+        self._artifact = load_policy_artifact(artifact_dir)
         self._artifact_id, self._artifact_digest = _artifact_identity(
             artifact_dir
         )
@@ -68,7 +70,11 @@ class UnixSocketPolicyClient:
         self._socket: socket.socket | None = None
         self._connect_and_verify()
 
-    def infer(self, rgb_frame: np.ndarray) -> InferenceResult:
+    def infer(
+        self,
+        rgb_frame: np.ndarray,
+        history_class_ids=None,
+    ) -> InferenceResult:
         if (
             not isinstance(rgb_frame, np.ndarray)
             or rgb_frame.dtype != np.uint8
@@ -79,7 +85,16 @@ class UnixSocketPolicyClient:
                 'IPC camera frame must be a uint8 RGB image'
             )
         frame = np.ascontiguousarray(rgb_frame)
-        payload = _IMAGE_HEADER.pack(*frame.shape) + frame.tobytes()
+        payload = _IMAGE_HEADER.pack(*frame.shape)
+        history = self._artifact.history
+        if history is not None and history.update == 'externally_executed_commands':
+            values = _flatten_external_history(history_class_ids, history.frames)
+            payload += _HISTORY_CLASS_IDS.pack(*values)
+        elif history_class_ids is not None:
+            raise PolicyRuntimeError(
+                'deployed policy does not accept executed history'
+            )
+        payload += frame.tobytes()
         response = self._request(_INFER, payload)
         try:
             result = json.loads(response.decode('utf-8'))
@@ -222,6 +237,7 @@ class PolicyIpcServer:
     def __init__(self, *, socket_path: str, policy: object) -> None:
         self.socket_path = Path(socket_path)
         self.policy = policy
+        self.artifact = load_policy_artifact(policy.artifact.root)
         self.artifact_id, self.artifact_digest = _artifact_identity(
             policy.artifact.root
         )
@@ -355,7 +371,22 @@ class PolicyIpcServer:
             payload[: _IMAGE_HEADER.size]
         )
         expected_size = height * width * channels
-        image_bytes = payload[_IMAGE_HEADER.size :]
+        body = payload[_IMAGE_HEADER.size :]
+        external_history = None
+        history = self.artifact.history
+        if history is not None and history.update == 'externally_executed_commands':
+            if len(body) < _HISTORY_CLASS_IDS.size:
+                raise PolicyRuntimeError('executed history payload is missing')
+            flat_history = _HISTORY_CLASS_IDS.unpack(
+                body[: _HISTORY_CLASS_IDS.size]
+            )
+            external_history = [
+                list(flat_history[index : index + 2])
+                for index in range(0, len(flat_history), 2)
+            ]
+            image_bytes = body[_HISTORY_CLASS_IDS.size :]
+        else:
+            image_bytes = body
         if (
             height < 1
             or width < 1
@@ -368,7 +399,10 @@ class PolicyIpcServer:
             width,
             channels,
         )
-        result = self.policy.infer(image)
+        if external_history is None:
+            result = self.policy.infer(image)
+        else:
+            result = self.policy.infer(image, external_history)
         return json.dumps(
             {
                 'angle': float(result.command.angle),
@@ -389,6 +423,28 @@ def _recv_exact_socket(connection: socket.socket, size: int) -> bytes:
             raise EOFError
         chunks.extend(chunk)
     return bytes(chunks)
+
+
+def _flatten_external_history(history_class_ids, frames: int) -> list[int]:
+    if history_class_ids is None:
+        raise PolicyRuntimeError(
+            'schema v3 policy requires executed command history'
+        )
+    values = [list(pair) for pair in history_class_ids]
+    if len(values) != frames or any(
+        len(pair) != 2
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 <= value <= 200
+            for value in pair
+        )
+        for pair in values
+    ):
+        raise PolicyRuntimeError(
+            'executed history must contain four [angle,speed] class pairs'
+        )
+    return [value for pair in values for value in pair]
 
 
 def main(args=None) -> None:

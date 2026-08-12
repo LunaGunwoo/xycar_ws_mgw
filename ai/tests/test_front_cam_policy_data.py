@@ -14,11 +14,15 @@ from xycar_ai.config import DataConfig
 from xycar_ai.front_cam_policy_data import (
     FrontCamPolicyDataset,
     PolicyDatasetError,
+    PolicySample,
+    attach_executed_command_history,
     attach_training_teacher_forced_history,
     build_policy_data_splits,
     command_class_id,
     compute_sqrt_inverse_frequency_weights,
     discover_policy_sessions,
+    generation_epoch_sample_count,
+    generation_sampling_weights,
     policy_dataset_stats,
     quantize_command,
     smooth_training_angle_targets,
@@ -434,6 +438,93 @@ def test_teacher_forced_history_uses_smoothed_angle_raw_speed_and_session_paddin
     assert flipped["speed_class_id"] == first[2].speed_class_id
 
 
+def test_external_history_uses_session_seed_and_raw_executed_commands(
+    tmp_path: Path,
+):
+    data_root = tmp_path / "datasets" / "teleop"
+    names = [
+        "20260810_130735_027_session",
+        "20260810_130818_255_session",
+        "20260810_130857_726_session",
+    ]
+    seed = [[90, 121], [91, 122], [92, 123], [93, 124]]
+    for name in names:
+        write_session(
+            data_root,
+            name,
+            labels=[(10.0, 7.0), (20.0, 6.0)],
+            control_mode="guided_policy",
+            generation=1,
+            initial_history_class_ids=seed,
+        )
+    manifest = write_split_manifest(
+        tmp_path / "config" / "split.yaml",
+        train=[names[0]],
+        val=[names[1]],
+        test=[names[2]],
+    )
+    config = DataConfig(
+        root=data_root,
+        split_manifest=manifest,
+        require_all_matching_sessions=True,
+        control_mode="",
+        control_modes=("guided_policy",),
+        max_forward_speed=None,
+        min_forward_speed=None,
+        num_workers=0,
+        current_generation=1,
+        generation_decay=0.5,
+        ema_sampling=True,
+    )
+
+    attached = attach_executed_command_history(
+        build_policy_data_splits(config),
+        history_frames=4,
+    )
+    for samples in (
+        attached.train_samples,
+        attached.val_samples,
+        attached.test_samples,
+    ):
+        assert samples[0].history_class_ids == tuple(map(tuple, seed))
+        assert samples[1].history_class_ids == (
+            (91, 122),
+            (92, 123),
+            (93, 124),
+            (110, 107),
+        )
+
+
+def test_generation_weights_assign_ema_mass_uniformly_within_generation():
+    samples = [
+        _policy_sample(generation=0, angle_class_id=100),
+        _policy_sample(generation=0, angle_class_id=101),
+        _policy_sample(generation=1, angle_class_id=102),
+        _policy_sample(generation=1, angle_class_id=103),
+        _policy_sample(generation=1, angle_class_id=104),
+        _policy_sample(generation=1, angle_class_id=105),
+    ]
+
+    weights = generation_sampling_weights(
+        samples,
+        current_generation=1,
+        generation_decay=0.5,
+    )
+
+    assert sum(weights[:2]) == pytest.approx(0.5)
+    assert sum(weights[2:]) == pytest.approx(1.0)
+    assert weights[:2] == pytest.approx((0.25, 0.25))
+    assert weights[2:] == pytest.approx((0.25, 0.25, 0.25, 0.25))
+    assert (
+        generation_epoch_sample_count(
+            samples,
+            current_generation=1,
+            generation_decay=0.5,
+        )
+        == 6
+    )
+
+
 def test_initial_class_validation_rejects_a_session_mismatch(tmp_path: Path):
     data_root = tmp_path / "datasets" / "teleop"
     names = [
@@ -515,4 +606,20 @@ def _data_config(data_root: Path, manifest: Path) -> DataConfig:
         max_forward_speed=25.0,
         min_forward_speed=None,
         num_workers=0,
+    )
+
+
+def _policy_sample(*, generation: int, angle_class_id: int) -> PolicySample:
+    angle = angle_class_id - 100
+    return PolicySample(
+        session_id=f"generation-{generation}",
+        image_path=Path("unused.png"),
+        relative_image="unused.png",
+        angle_raw=float(angle),
+        speed_raw=7.0,
+        angle=angle,
+        speed=7,
+        angle_class_id=angle_class_id,
+        speed_class_id=107,
+        generation=generation,
     )

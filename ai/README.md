@@ -142,10 +142,12 @@ dataset marker와 root의 비관리 파일은 삭제하지 않는다.
 정밀 비교해야 할 때만 비용이 큰 `--checksum`을 함께 쓴다.
 
 개발 Laptop과 차량은 Tailscale이 설치된 같은 tailnet에 있어야 하며 차량의
-MagicDNS 이름은 `xycar`다. sync와 model deploy script의 기본 SSH 대상은
-`xytron@xycar`이고 직접 IP로 자동 fallback하지 않는다. 먼저
-`getent hosts xycar`와 `ssh xytron@xycar`로 연결을 확인한다. WSL은 Windows
+MagicDNS 이름은 `xycar-gpu`다. sync와 model deploy script의 기본 SSH 대상은
+`xytron@xycar-gpu`이고 직접 IP로 자동 fallback하지 않는다. 먼저
+`getent hosts xycar-gpu`와 `ssh xytron@xycar-gpu`로 연결을 확인한다. WSL은 Windows
 Tailscale을 통해 MagicDNS를 사용할 수 있어 Linux CLI가 없어도 된다.
+기존 CPU rollback dataset을 명시적으로 가져올 때만 한 명령에
+`XYCAR_AI_VEHICLE_SSH=xytron@xycar`를 지정한다.
 
 ```bash
 ./scripts/ai/sync_dataset.sh
@@ -346,6 +348,59 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 probe run에는 최종 test 대신 `probe_summary.json`을 기록한다. 승자를 총 20 epoch까지
 resume한 뒤에만 best checkpoint를 prediction rollout 방식으로 test 평가한다.
 
+### 사람 보정 세대 학습과 EMA sampling
+
+`config/front_cam_policy_train_guided_ema.yaml`은 gamepad 초기 데이터와
+`guided_policy` session을 함께 읽는 schema 2 설정이다. 모델은 angle/speed를
+동시에 내는 기존 공통 backbone·두 head 구조를 유지한다. AR history는 smoothed
+학습 target이나 직전 argmax가 아니라 각 frame 전에 실제로 실행된 angle/speed
+네 쌍이다. guided session은 수집 metadata의 `initial_history_class_ids`부터
+시작하고, legacy gamepad session은 canonical `(angle=0, speed=25)` 명령을
+edge padding으로 사용한다.
+history를 먼저 구성한 다음 현재 train angle에만 centered mean을 적용하므로
+과거 실행 명령이 smoothing으로 바뀌지 않는다.
+
+raw session은 삭제하지 않는다. 각 guided session의
+`metadata.curriculum.generation`을 사용하고 이 필드가 없는 기존 session은
+`legacy_generation`으로 취급한다. train epoch의 세대별 총 sampling mass는 다음과
+같고 같은 세대 안에서는 intervention 여부와 관계없이 frame을 균등하게 뽑는다.
+
+```text
+mass(g) = generation_decay ** (current_generation - g)
+
+generation_decay=0.5:
+current=1.0, previous=0.5, two-generations-old=0.25, ...
+```
+
+class frequency weight도 같은 세대 sampling weight로 계산한다. validation의
+checkpoint 선택식 `angle_mae + 0.25 * speed_mae` 역시 세대별 metric을 위 mass로
+합친다. dataset stats와 checkpoint에는 세대별 session/sample 수, sampling mass와
+epoch sample 수를 기록한다. config의 `current_generation`보다 새 generation이
+있거나 train split에 current generation sample이 없으면 학습을 거부한다.
+
+새 수집 session은 train/val/test에 session 단위로 배치해 split YAML에 명시한다.
+첫 guided round라면 config의 `current_generation`, `output.run_name`을 1로 올리고
+generation 1 session이 train에 적어도 하나 있도록 manifest를 갱신한다. raw
+dataset을 합쳐 복사하거나 과거 session을 삭제할 필요는 없다.
+
+```bash
+cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
+/home/xytron/.local/bin/uv run --locked xycar-train \
+  --config config/front_cam_policy_train_guided_ema.yaml \
+  --validate-only
+
+/home/xytron/.local/bin/uv run --locked xycar-train \
+  --config config/front_cam_policy_train_guided_ema.yaml \
+  --initialize-from artifacts/runs/front_cam_policy/<previous-run>/best.pt
+```
+
+`--initialize-from`은 model state만 strict load하고 새 run directory에서 optimizer,
+scheduler, AMP scaler, epoch와 early-stopping 상태를 모두 초기화한다. source
+checkpoint 경로와 SHA-256은 새 checkpoint/summary에 기록된다. 같은 run을 중단
+지점부터 이어가는 `--resume`과는 서로 배타적이다. 다음 세대도 이전 세대의
+`best.pt`를 `--initialize-from`으로 지정하고 generation과 speed cap을 한 단계씩
+올린다.
+
 ### 감속 평가용 session split
 
 기존 min-speed-20 split은 speed를 크게 낮춘 세 session이 모두 train에 있어
@@ -473,7 +528,9 @@ artifacts/models/<artifact-id>/
 절대 경로, `..`, symlink는 허용하지 않는다. 학습 checkpoint를 fixed-shape
 TorchScript tuple-output artifact로 변환할 때는 다음 명령을 사용한다. 기존
 artifact ID는 덮어쓰지 않는다. stateless schema v1은 image `[1,3,224,224]` 하나를
-받고 AR schema v2는 image와 int64 history `[1,4,2]`를 함께 받는다.
+받고 기존 AR schema v2는 image와 predicted history `[1,4,2]`를 함께 받는다.
+현재 AR exporter는 같은 input shape에 실제 실행 history를 요구하는 schema v3를
+생성한다. v1/v2 runtime 호환은 유지한다.
 
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai

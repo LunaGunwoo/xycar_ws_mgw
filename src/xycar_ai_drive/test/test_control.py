@@ -14,10 +14,16 @@ from xycar_ai_drive.artifact import (
     load_policy_artifact,
 )
 from xycar_ai_drive.control import (
+    DriveCommand,
     ToggleAction,
     ToggleDriveGate,
     decode_class_ids,
     is_fresh,
+)
+from xycar_ai_drive.guided_policy_collector import (
+    GuideInput,
+    fuse_guided_command,
+    trigger_depth,
 )
 from xycar_ai_drive.policy_runtime import (
     PolicyRuntimeError,
@@ -73,6 +79,37 @@ def test_class_decode_blocks_reverse_without_positive_speed_cap():
         decode_class_ids(-1, 100)
     with pytest.raises(ValueError):
         decode_class_ids(100, 201)
+
+
+def test_guided_command_fuses_joint_angle_speed_and_clamps_safely():
+    fused = fuse_guided_command(
+        DriveCommand(angle=20.0, speed=6.0),
+        GuideInput(steering_axis=0.5, lt_depth=0.0, rt_depth=1.0),
+        residual_gain=200.0,
+        invert_steering=True,
+        rt_speed_increment=2.0,
+        lt_speed_decrement=5.0,
+        speed_cap=7.0,
+        correction_deadzone=0.05,
+    )
+    assert fused.executed == DriveCommand(angle=-80.0, speed=7.0)
+    assert fused.steering_residual == -100.0
+    assert fused.speed_delta == 2.0
+    assert fused.human_correction
+
+    stopped = fuse_guided_command(
+        DriveCommand(angle=-90.0, speed=1.0),
+        GuideInput(steering_axis=1.0, lt_depth=1.0, rt_depth=0.0),
+        residual_gain=200.0,
+        invert_steering=False,
+        rt_speed_increment=2.0,
+        lt_speed_decrement=5.0,
+        speed_cap=7.0,
+        correction_deadzone=0.05,
+    )
+    assert stopped.executed == DriveCommand(angle=100.0, speed=0.0)
+    assert trigger_depth(-1.0, 'negative') == 1.0
+    assert trigger_depth(1.0, 'signed') == 0.0
 
 
 def test_freshness_and_rgb_preprocessing_contract():

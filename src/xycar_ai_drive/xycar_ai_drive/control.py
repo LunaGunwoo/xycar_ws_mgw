@@ -85,6 +85,17 @@ def decode_class_ids(angle_class_id: int, speed_class_id: int) -> DriveCommand:
     return DriveCommand(angle=angle, speed=speed)
 
 
+def command_class_ids(command: DriveCommand) -> tuple[int, int]:
+    """Quantize one executed command for the AR history contract."""
+    values = (command.angle, command.speed)
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError('executed command must contain finite values')
+    return tuple(
+        int(round(max(-100.0, min(100.0, value)))) + COMMAND_OFFSET
+        for value in values
+    )
+
+
 def is_fresh(
     now_monotonic: float,
     timestamp_monotonic: float | None,

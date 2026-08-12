@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import cv2
@@ -120,7 +121,11 @@ class TorchScriptPolicy:
             ]
         self._last_successful_inference_monotonic = None
 
-    def infer(self, rgb_frame: np.ndarray) -> InferenceResult:
+    def infer(
+        self,
+        rgb_frame: np.ndarray,
+        history_class_ids: Sequence[Sequence[int]] | None = None,
+    ) -> InferenceResult:
         chw = preprocess_rgb_frame(
             rgb_frame,
             image_size=self.artifact.image_size,
@@ -140,11 +145,14 @@ class TorchScriptPolicy:
                     self._reset_history_locked()
                 started = time.perf_counter()
                 with self._torch.inference_mode():
-                    if self._history_class_ids is None:
+                    inference_history = self._inference_history(
+                        history_class_ids
+                    )
+                    if inference_history is None:
                         outputs = self._model(tensor)
                     else:
                         history = self._torch.tensor(
-                            [self._history_class_ids],
+                            [inference_history],
                             dtype=self._torch.long,
                         )
                         outputs = self._model(tensor, history)
@@ -156,7 +164,11 @@ class TorchScriptPolicy:
                 speed_class_id = int(
                     self._torch.argmax(speed_logits, dim=1).item()
                 )
-                if self._history_class_ids is not None:
+                if (
+                    self._history_class_ids is not None
+                    and self.artifact.history is not None
+                    and self.artifact.history.update == 'predicted_argmax'
+                ):
                     self._history_class_ids = [
                         *self._history_class_ids[1:],
                         [angle_class_id, speed_class_id],
@@ -174,6 +186,43 @@ class TorchScriptPolicy:
             command=decode_class_ids(angle_class_id, speed_class_id),
             inference_ms=inference_ms,
         )
+
+    def _inference_history(
+        self,
+        supplied: Sequence[Sequence[int]] | None,
+    ) -> list[list[int]] | None:
+        history = self.artifact.history
+        if history is None:
+            if supplied is not None:
+                raise PolicyRuntimeError(
+                    'stateless policy does not accept executed history'
+                )
+            return None
+        if history.update == 'predicted_argmax':
+            if supplied is not None:
+                raise PolicyRuntimeError(
+                    'schema v2 policy owns its predicted history'
+                )
+            return self._history_class_ids
+        if supplied is None:
+            raise PolicyRuntimeError(
+                'schema v3 policy requires executed command history'
+            )
+        values = [list(pair) for pair in supplied]
+        if len(values) != history.frames or any(
+            len(pair) != 2
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 0 <= value <= 200
+                for value in pair
+            )
+            for pair in values
+        ):
+            raise PolicyRuntimeError(
+                'executed history must contain four [angle,speed] class pairs'
+            )
+        return values
 
     def _validate_outputs(self, outputs: object):
         if not isinstance(outputs, (tuple, list)) or len(outputs) != 2:

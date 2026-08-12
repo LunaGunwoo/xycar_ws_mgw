@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Sequence
 
 import numpy as np
 
@@ -99,7 +100,19 @@ class DeviceTorchScriptPolicy:
         )
         with torch.inference_mode():
             for _ in range(warmup_count):
-                self._validate_outputs(self._forward(sample))
+                supplied_history = (
+                    self._history_class_ids
+                    if self.artifact.history is not None
+                    and self.artifact.history.update
+                    == 'externally_executed_commands'
+                    else None
+                )
+                self._validate_outputs(
+                    self._forward(
+                        sample,
+                        history_class_ids=supplied_history,
+                    )
+                )
         self._synchronize()
 
     def reset_history(self) -> None:
@@ -117,7 +130,11 @@ class DeviceTorchScriptPolicy:
             ]
         self._last_successful_inference_monotonic = None
 
-    def infer(self, rgb_frame: np.ndarray) -> InferenceResult:
+    def infer(
+        self,
+        rgb_frame: np.ndarray,
+        history_class_ids: Sequence[Sequence[int]] | None = None,
+    ) -> InferenceResult:
         chw = preprocess_rgb_frame(
             rgb_frame,
             image_size=self.artifact.image_size,
@@ -143,7 +160,10 @@ class DeviceTorchScriptPolicy:
                 self._synchronize()
                 started = time.perf_counter()
                 with self._torch.inference_mode():
-                    outputs = self._forward(tensor)
+                    outputs = self._forward(
+                        tensor,
+                        history_class_ids=history_class_ids,
+                    )
                 self._synchronize()
                 inference_ms = (time.perf_counter() - started) * 1000.0
                 angle_logits, speed_logits = self._validate_outputs(outputs)
@@ -153,7 +173,11 @@ class DeviceTorchScriptPolicy:
                 speed_class_id = int(
                     self._torch.argmax(speed_logits, dim=1).item()
                 )
-                if self._history_class_ids is not None:
+                if (
+                    self._history_class_ids is not None
+                    and self.artifact.history is not None
+                    and self.artifact.history.update == 'predicted_argmax'
+                ):
                     self._history_class_ids = [
                         *self._history_class_ids[1:],
                         [angle_class_id, speed_class_id],
@@ -173,15 +197,50 @@ class DeviceTorchScriptPolicy:
             inference_ms=inference_ms,
         )
 
-    def _forward(self, tensor):
-        if self._history_class_ids is None:
+    def _forward(self, tensor, *, history_class_ids=None):
+        history_contract = self.artifact.history
+        if history_contract is None:
+            if history_class_ids is not None:
+                raise PolicyRuntimeError(
+                    'stateless policy does not accept executed history'
+                )
             return self._model(tensor)
+        if history_contract.update == 'predicted_argmax':
+            if history_class_ids is not None:
+                raise PolicyRuntimeError(
+                    'schema v2 policy owns its predicted history'
+                )
+            values = self._history_class_ids
+        else:
+            values = self._validate_external_history(history_class_ids)
         history = self._torch.tensor(
-            [self._history_class_ids],
+            [values],
             dtype=self._torch.long,
             device=self._device,
         )
         return self._model(tensor, history)
+
+    def _validate_external_history(self, supplied):
+        history = self.artifact.history
+        if history is None or supplied is None:
+            raise PolicyRuntimeError(
+                'schema v3 policy requires executed command history'
+            )
+        values = [list(pair) for pair in supplied]
+        if len(values) != history.frames or any(
+            len(pair) != 2
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 0 <= value <= 200
+                for value in pair
+            )
+            for pair in values
+        ):
+            raise PolicyRuntimeError(
+                'executed history must contain four [angle,speed] class pairs'
+            )
+        return values
 
     def _synchronize(self) -> None:
         if self.device_name == 'cuda':

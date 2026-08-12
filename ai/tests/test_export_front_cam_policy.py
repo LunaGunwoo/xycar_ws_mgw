@@ -148,7 +148,9 @@ def test_export_validation_rejects_unsafe_id_and_tampering(tmp_path: Path):
         verify_artifact(artifact)
 
 
-def test_export_ar_checkpoint_writes_v2_history_contract(monkeypatch, tmp_path: Path):
+def test_export_ar_checkpoint_writes_v3_external_history_contract(
+    monkeypatch, tmp_path: Path
+):
     monkeypatch.setattr(
         export_module,
         "AutoregressiveControlTokenViTPolicy",
@@ -199,7 +201,7 @@ def test_export_ar_checkpoint_writes_v2_history_contract(monkeypatch, tmp_path: 
         output_root=tmp_path / "models",
     )
     manifest = yaml.safe_load((artifact / "manifest.yaml").read_text())
-    assert manifest["schema_version"] == 2
+    assert manifest["schema_version"] == 3
     assert manifest["model"]["input"] == {
         "kind": "tuple",
         "order": ["images", "history_class_ids"],
@@ -211,7 +213,7 @@ def test_export_ar_checkpoint_writes_v2_history_contract(monkeypatch, tmp_path: 
         "history_class_ids": {"dtype": "int64", "shape": [1, 4, 2]},
     }
     assert manifest["history"]["initial_class_ids"] == [100, 125]
-    assert manifest["history"]["update"] == "predicted_argmax"
+    assert manifest["history"]["update"] == "externally_executed_commands"
     model_ts = torch.jit.load(str(artifact / "model.ts"), map_location="cpu")
     angle, speed = model_ts(
         torch.zeros(1, 3, 16, 16),

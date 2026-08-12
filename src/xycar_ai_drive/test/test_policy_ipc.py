@@ -18,8 +18,10 @@ class _FakePolicy:
         self.device_name = device
         self.delay_sec = delay_sec
         self.reset_count = 0
+        self.last_history = None
 
-    def infer(self, _image):
+    def infer(self, _image, history=None):
+        self.last_history = history
         if self.delay_sec:
             time.sleep(self.delay_sec)
         return InferenceResult(
@@ -31,12 +33,12 @@ class _FakePolicy:
         self.reset_count += 1
 
 
-def _artifact(tmp_path):
+def _artifact(tmp_path, *, external_history=False):
     root = tmp_path / 'fixture-policy'
     root.mkdir()
     (root / 'model.ts').write_bytes(b'model')
     manifest = {
-        'schema_version': 1,
+        'schema_version': 3 if external_history else 1,
         'artifact_id': root.name,
         'model': {
             'format': 'torchscript',
@@ -63,6 +65,29 @@ def _artifact(tmp_path):
             'decode_mapping': 'class_id - 100',
         },
     }
+    if external_history:
+        manifest['model']['architecture'] = 'ar_control_tokens'
+        manifest['model']['input'] = {
+            'kind': 'tuple',
+            'order': ['images', 'history_class_ids'],
+            'images': {
+                'color_space': 'RGB',
+                'dtype': 'float32',
+                'shape': [1, 3, 4, 4],
+            },
+            'history_class_ids': {
+                'dtype': 'int64',
+                'shape': [1, 4, 2],
+            },
+        }
+        manifest['history'] = {
+            'frames': 4,
+            'pair_order': ['angle_class_id', 'speed_class_id'],
+            'time_order': 'oldest_to_newest',
+            'initial_command': [0, 25],
+            'initial_class_ids': [100, 125],
+            'update': 'externally_executed_commands',
+        }
     (root / 'manifest.yaml').write_text(
         yaml.safe_dump(manifest, sort_keys=False),
         encoding='utf-8',
@@ -109,6 +134,27 @@ def test_ipc_handshake_inference_and_reset(tmp_path):
     assert result.inference_ms == pytest.approx(2.5)
     client.reset_history()
     assert policy.reset_count == 1
+    _stop_server(client, server, thread)
+
+
+def test_v3_ipc_transports_executed_history(tmp_path):
+    artifact = _artifact(tmp_path, external_history=True)
+    policy = _FakePolicy(artifact)
+    socket_path = tmp_path / 'policy.sock'
+    server, thread = _start_server(socket_path, policy)
+    client = UnixSocketPolicyClient(
+        artifact_dir=str(artifact),
+        socket_path=str(socket_path),
+        timeout_sec=0.2,
+        required_device='cuda',
+    )
+    history = ((90, 120), (91, 121), (92, 122), (93, 123))
+
+    client.infer(np.zeros((8, 12, 3), dtype=np.uint8), history)
+
+    assert policy.last_history == [list(pair) for pair in history]
+    with pytest.raises(PolicyRuntimeError, match='requires executed'):
+        client.infer(np.zeros((8, 12, 3), dtype=np.uint8))
     _stop_server(client, server, thread)
 
 

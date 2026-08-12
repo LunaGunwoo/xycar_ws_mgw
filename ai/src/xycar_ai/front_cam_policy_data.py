@@ -54,6 +54,7 @@ class PolicySample:
     angle_class_id: int
     speed_class_id: int
     history_class_ids: tuple[tuple[int, int], ...] | None = None
+    generation: int = 0
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,7 @@ class PolicySession:
     path: Path
     metadata: Mapping[str, object]
     samples: tuple[PolicySample, ...]
+    generation: int = 0
 
 
 @dataclass(frozen=True)
@@ -83,18 +85,34 @@ class PolicyDataSplits:
     def test_samples(self) -> tuple[PolicySample, ...]:
         return _flatten_samples(self.test_sessions)
 
-    def manifest(self) -> dict[str, object]:
+    def manifest(self, *, include_generation: bool = False) -> dict[str, object]:
+        split_payload: dict[str, object] = {}
+        for name, sessions in self._session_groups().items():
+            details: dict[str, object] = {
+                "sessions": [session.session_id for session in sessions],
+                "session_count": len(sessions),
+                "sample_count": sum(len(session.samples) for session in sessions),
+            }
+            if include_generation:
+                details.update(
+                    {
+                        "generation_session_counts": _counter_dict(
+                            Counter(session.generation for session in sessions)
+                        ),
+                        "generation_sample_counts": _counter_dict(
+                            Counter(
+                                sample.generation
+                                for session in sessions
+                                for sample in session.samples
+                            )
+                        ),
+                    }
+                )
+            split_payload[name] = details
         return {
             "schema_version": 1,
             "dataset_snapshot": self.dataset_snapshot,
-            "splits": {
-                name: {
-                    "sessions": [session.session_id for session in sessions],
-                    "session_count": len(sessions),
-                    "sample_count": sum(len(session.samples) for session in sessions),
-                }
-                for name, sessions in self._session_groups().items()
-            },
+            "splits": split_payload,
         }
 
     def _session_groups(self) -> dict[str, tuple[PolicySession, ...]]:
@@ -164,6 +182,74 @@ def attach_training_teacher_forced_history(
     )
 
 
+def attach_executed_command_history(
+    splits: PolicyDataSplits,
+    history_frames: int,
+) -> PolicyDataSplits:
+    """Attach the actual previously executed commands to every split."""
+    if history_frames <= 0:
+        raise ValueError("history_frames must be positive")
+    groups = {
+        name: tuple(
+            _attach_session_executed_history(session, history_frames)
+            for session in sessions
+        )
+        for name, sessions in splits._session_groups().items()
+    }
+    return replace(
+        splits,
+        train_sessions=groups["train"],
+        val_sessions=groups["val"],
+        test_sessions=groups["test"],
+    )
+
+
+def _attach_session_executed_history(
+    session: PolicySession,
+    history_frames: int,
+) -> PolicySession:
+    initial = _session_initial_history(session, history_frames)
+    history = list(initial)
+    samples: list[PolicySample] = []
+    for sample in session.samples:
+        samples.append(replace(sample, history_class_ids=tuple(history)))
+        history = history[1:] + [(sample.angle_class_id, sample.speed_class_id)]
+    return replace(session, samples=tuple(samples))
+
+
+def _session_initial_history(
+    session: PolicySession,
+    history_frames: int,
+) -> tuple[tuple[int, int], ...]:
+    curriculum = session.metadata.get("curriculum")
+    configured = (
+        curriculum.get("initial_history_class_ids")
+        if isinstance(curriculum, dict)
+        else None
+    )
+    if configured is None:
+        return ((100, 125),) * history_frames
+    if not isinstance(configured, list) or len(configured) != history_frames:
+        raise PolicyDatasetError(
+            f"session {session.session_id} has invalid initial history length"
+        )
+    history: list[tuple[int, int]] = []
+    for pair in configured:
+        if (
+            not isinstance(pair, list)
+            or len(pair) != 2
+            or any(
+                isinstance(value, bool) or not isinstance(value, int) for value in pair
+            )
+            or any(not 0 <= value < NUM_COMMAND_CLASSES for value in pair)
+        ):
+            raise PolicyDatasetError(
+                f"session {session.session_id} has invalid initial history classes"
+            )
+        history.append((pair[0], pair[1]))
+    return tuple(history)
+
+
 def _attach_session_teacher_forced_history(
     session: PolicySession,
     history_frames: int,
@@ -223,11 +309,18 @@ def discover_policy_sessions(config: DataConfig) -> tuple[PolicySession, ...]:
         metadata = _load_metadata(path / "metadata.yaml")
         if not _matches_filter(metadata, config):
             continue
-        sessions.append(_load_policy_session(path, root, metadata))
+        sessions.append(
+            _load_policy_session(
+                path,
+                root,
+                metadata,
+                legacy_generation=config.legacy_generation,
+            )
+        )
 
     if not sessions:
         raise PolicyDatasetError(
-            "no completed gamepad sessions match "
+            "no completed policy sessions match "
             f"{_forward_speed_filter_description(config)} under {root}"
         )
     return tuple(sessions)
@@ -289,7 +382,9 @@ def build_policy_data_splits(
     )
 
 
-def policy_dataset_stats(splits: PolicyDataSplits) -> dict[str, object]:
+def policy_dataset_stats(
+    splits: PolicyDataSplits, *, include_generation: bool = False
+) -> dict[str, object]:
     groups = {
         "train": splits.train_samples,
         "val": splits.val_samples,
@@ -299,8 +394,11 @@ def policy_dataset_stats(splits: PolicyDataSplits) -> dict[str, object]:
     return {
         "schema_version": 1,
         "dataset_snapshot": splits.dataset_snapshot,
-        "all": _sample_stats(all_samples),
-        "splits": {name: _sample_stats(samples) for name, samples in groups.items()},
+        "all": _sample_stats(all_samples, include_generation=include_generation),
+        "splits": {
+            name: _sample_stats(samples, include_generation=include_generation)
+            for name, samples in groups.items()
+        },
     }
 
 
@@ -384,6 +482,7 @@ class FrontCamPolicyDataset(Dataset):
             "horizontal_flipped": horizontal_flipped,
             "session_id": sample.session_id,
             "relative_image": sample.relative_image,
+            "generation": sample.generation,
         }
         if sample.history_class_ids is not None:
             history_class_ids = torch.tensor(
@@ -405,6 +504,7 @@ def compute_sqrt_inverse_frequency_weights(
     min_weight: float,
     max_weight: float,
     mirror_probability: float = 0.0,
+    sample_weights: Sequence[float] | None = None,
 ) -> torch.Tensor:
     if field not in {"angle_class_id", "speed_class_id"}:
         raise ValueError(f"unsupported class field: {field}")
@@ -412,7 +512,14 @@ def compute_sqrt_inverse_frequency_weights(
         raise ValueError("mirror_probability must be in [0, 1]")
     if mirror_probability > 0 and field != "angle_class_id":
         raise ValueError("mirror_probability is only valid for angle_class_id")
-    raw_counts = Counter(int(getattr(sample, field)) for sample in samples)
+    if sample_weights is not None and len(sample_weights) != len(samples):
+        raise ValueError("sample_weights length must match samples")
+    effective_weights = sample_weights or [1.0] * len(samples)
+    raw_counts: Counter[int] = Counter()
+    for sample, sample_weight in zip(samples, effective_weights, strict=True):
+        if not math.isfinite(sample_weight) or sample_weight <= 0:
+            raise ValueError("sample_weights must be finite and positive")
+        raw_counts[int(getattr(sample, field))] += float(sample_weight)
     if not raw_counts:
         raise PolicyDatasetError("cannot compute class weights for no samples")
     counts = [
@@ -433,11 +540,91 @@ def compute_sqrt_inverse_frequency_weights(
     return torch.tensor(weights, dtype=torch.float32)
 
 
+def generation_sampling_weights(
+    samples: Sequence[PolicySample],
+    *,
+    current_generation: int,
+    generation_decay: float,
+) -> tuple[float, ...]:
+    """Give each generation an EMA-like total mass, uniform within generation."""
+    if not samples:
+        raise PolicyDatasetError("cannot build generation weights for no samples")
+    if not 0 < generation_decay <= 1:
+        raise ValueError("generation_decay must be in (0, 1]")
+    counts = Counter(sample.generation for sample in samples)
+    future = sorted(
+        generation for generation in counts if generation > current_generation
+    )
+    if future:
+        raise PolicyDatasetError(
+            f"dataset contains generation(s) newer than current_generation: {future}"
+        )
+    if counts.get(current_generation, 0) == 0:
+        raise PolicyDatasetError(
+            f"training split has no samples for current_generation={current_generation}"
+        )
+    masses = {
+        generation: generation_decay ** (current_generation - generation)
+        for generation in counts
+    }
+    return tuple(
+        masses[sample.generation] / counts[sample.generation] for sample in samples
+    )
+
+
+def generation_epoch_sample_count(
+    samples: Sequence[PolicySample],
+    *,
+    current_generation: int,
+    generation_decay: float,
+) -> int:
+    counts = Counter(sample.generation for sample in samples)
+    if counts.get(current_generation, 0) == 0:
+        raise PolicyDatasetError(
+            f"training split has no samples for current_generation={current_generation}"
+        )
+    total_mass = sum(
+        generation_decay ** (current_generation - generation)
+        for generation in counts
+        if generation <= current_generation
+    )
+    return max(1, round(counts[current_generation] * total_mass))
+
+
+def generation_sampling_summary(
+    samples: Sequence[PolicySample],
+    *,
+    current_generation: int,
+    generation_decay: float,
+) -> dict[str, object]:
+    counts = Counter(sample.generation for sample in samples)
+    return {
+        "current_generation": current_generation,
+        "generation_decay": generation_decay,
+        "epoch_sample_count": generation_epoch_sample_count(
+            samples,
+            current_generation=current_generation,
+            generation_decay=generation_decay,
+        ),
+        "generations": {
+            str(generation): {
+                "sample_count": counts[generation],
+                "total_sampling_mass": generation_decay
+                ** (current_generation - generation),
+            }
+            for generation in sorted(counts)
+        },
+    }
+
+
 def _load_policy_session(
     path: Path,
     root: Path,
     metadata: Mapping[str, object],
+    *,
+    legacy_generation: int = 0,
 ) -> PolicySession:
+    generation = _metadata_generation(metadata, legacy_generation=legacy_generation)
     samples_path = path / "samples.csv"
     images_path = path / "Images"
     if not samples_path.is_file():
@@ -455,7 +642,9 @@ def _load_policy_session(
                 f"missing samples.csv fields in {samples_path}: {missing_fields}"
             )
         for row_number, row in enumerate(reader, start=2):
-            samples.append(_sample_from_row(row, row_number, path, root))
+            samples.append(
+                _sample_from_row(row, row_number, path, root, generation=generation)
+            )
 
     if not samples:
         raise PolicyDatasetError(f"session contains no samples: {path}")
@@ -471,6 +660,7 @@ def _load_policy_session(
         path=path,
         metadata=dict(metadata),
         samples=tuple(samples),
+        generation=generation,
     )
 
 
@@ -479,6 +669,8 @@ def _sample_from_row(
     row_number: int,
     session_path: Path,
     data_root: Path,
+    *,
+    generation: int = 0,
 ) -> PolicySample:
     image_value = row.get("image", "")
     relative_path = PurePosixPath(image_value)
@@ -516,6 +708,7 @@ def _sample_from_row(
         speed=speed,
         angle_class_id=angle + COMMAND_OFFSET,
         speed_class_id=speed + COMMAND_OFFSET,
+        generation=generation,
     )
 
 
@@ -552,18 +745,54 @@ def metadata_matches_policy_filter(
 
 
 def _matches_filter(metadata: Mapping[str, object], config: DataConfig) -> bool:
-    return metadata_matches_policy_filter(
-        metadata,
-        control_mode=config.control_mode,
-        max_forward_speed=config.max_forward_speed,
-        min_forward_speed=config.min_forward_speed,
-    )
+    if metadata.get("format_version") != 1 or metadata.get("complete") is not True:
+        return False
+    if metadata.get("dataset_kind") != "camera_first_teleop_behavior_cloning":
+        return False
+    accepted_modes = config.control_modes or (config.control_mode,)
+    if metadata.get("control_mode") not in accepted_modes:
+        return False
+    if config.max_forward_speed is None and config.min_forward_speed is None:
+        return True
+    gamepad = metadata.get("gamepad")
+    if not isinstance(gamepad, dict):
+        return False
+    observed_speed = gamepad.get("max_forward_speed")
+    if isinstance(observed_speed, bool) or not isinstance(observed_speed, (int, float)):
+        return False
+    speed = float(observed_speed)
+    if config.max_forward_speed is not None:
+        return math.isclose(
+            speed,
+            config.max_forward_speed,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+    return speed >= float(config.min_forward_speed)
 
 
 def _forward_speed_filter_description(config: DataConfig) -> str:
     if config.max_forward_speed is not None:
         return f"max_forward_speed={config.max_forward_speed}"
-    return f"min_forward_speed>={config.min_forward_speed}"
+    if config.min_forward_speed is not None:
+        return f"min_forward_speed>={config.min_forward_speed}"
+    return "configured control modes"
+
+
+def _metadata_generation(
+    metadata: Mapping[str, object], *, legacy_generation: int
+) -> int:
+    curriculum = metadata.get("curriculum")
+    if not isinstance(curriculum, dict) or "generation" not in curriculum:
+        return legacy_generation
+    generation = curriculum.get("generation")
+    if (
+        isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 0
+    ):
+        raise PolicyDatasetError("curriculum.generation must be a non-negative integer")
+    return generation
 
 
 def _load_metadata(path: Path) -> dict[str, object]:
@@ -607,10 +836,12 @@ def _normalization_tuple(
     return tuple(float(item) for item in value)
 
 
-def _sample_stats(samples: Sequence[PolicySample]) -> dict[str, object]:
+def _sample_stats(
+    samples: Sequence[PolicySample], *, include_generation: bool = False
+) -> dict[str, object]:
     angle_counts = Counter(sample.angle for sample in samples)
     speed_counts = Counter(sample.speed for sample in samples)
-    return {
+    stats: dict[str, object] = {
         "sample_count": len(samples),
         "session_count": len({sample.session_id for sample in samples}),
         "angle_range": _range_or_none(sample.angle_raw for sample in samples),
@@ -619,6 +850,11 @@ def _sample_stats(samples: Sequence[PolicySample]) -> dict[str, object]:
         "speed_class_counts": _counter_dict(speed_counts),
         "angle_buckets": _angle_bucket_counts(samples),
     }
+    if include_generation:
+        stats["generation_sample_counts"] = _counter_dict(
+            Counter(sample.generation for sample in samples)
+        )
+    return stats
 
 
 def _angle_bucket_counts(samples: Sequence[PolicySample]) -> dict[str, int]:

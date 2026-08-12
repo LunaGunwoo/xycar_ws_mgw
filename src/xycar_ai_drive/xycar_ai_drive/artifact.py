@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
-SUPPORTED_ARTIFACT_SCHEMA_VERSIONS = {1, 2}
+SUPPORTED_ARTIFACT_SCHEMA_VERSIONS = {1, 2, 3}
 CHECKSUM_FILENAME = 'SHA256SUMS'
 MANIFEST_FILENAME = 'manifest.yaml'
 
@@ -39,6 +39,7 @@ class RoadWarpParameters:
 class PolicyHistoryContract:
     frames: int
     initial_class_ids: tuple[int, int]
+    update: str
 
 
 @dataclass(frozen=True)
@@ -90,14 +91,14 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
         shape = _validate_image_input(model_input)
     else:
         if model.get('architecture') != 'ar_control_tokens':
-            raise ArtifactContractError('schema v2 requires ar_control_tokens')
+            raise ArtifactContractError('AR schema requires ar_control_tokens')
         if model_input.get('kind') != 'tuple':
             raise ArtifactContractError(
-                'schema v2 model input must be a tuple'
+                'AR schema model input must be a tuple'
             )
         if model_input.get('order') != ['images', 'history_class_ids']:
             raise ArtifactContractError(
-                'schema v2 model input order is unsupported'
+                'AR schema model input order is unsupported'
             )
         shape = _validate_image_input(
             _required_mapping(model_input, 'images', 'model.input')
@@ -111,7 +112,7 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
             raise ArtifactContractError('history input dtype must be int64')
         if history_input.get('shape') != [1, 4, 2]:
             raise ArtifactContractError('history input shape must be [1,4,2]')
-        history = _history_contract(manifest)
+        history = _history_contract(manifest, schema_version=schema_version)
     image_size = shape[2]
 
     model_output = _required_mapping(model, 'output', 'model')
@@ -193,6 +194,8 @@ def _validate_image_input(model_input: Mapping[str, object]) -> list[object]:
 
 def _history_contract(
     manifest: Mapping[str, object],
+    *,
+    schema_version: int,
 ) -> PolicyHistoryContract:
     history = _required_mapping(manifest, 'history', 'manifest')
     if history.get('frames') != 4:
@@ -204,7 +207,12 @@ def _history_contract(
         raise ArtifactContractError('history pair order is unsupported')
     if history.get('time_order') != 'oldest_to_newest':
         raise ArtifactContractError('history time order is unsupported')
-    if history.get('update') != 'predicted_argmax':
+    expected_update = (
+        'externally_executed_commands'
+        if schema_version == 3
+        else 'predicted_argmax'
+    )
+    if history.get('update') != expected_update:
         raise ArtifactContractError('history update mode is unsupported')
     initial_ids = history.get('initial_class_ids')
     if (
@@ -228,6 +236,7 @@ def _history_contract(
     return PolicyHistoryContract(
         frames=4,
         initial_class_ids=(initial_ids[0], initial_ids[1]),
+        update=expected_update,
     )
 
 

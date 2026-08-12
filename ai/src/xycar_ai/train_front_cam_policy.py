@@ -16,7 +16,7 @@ import numpy as np
 import torch
 import yaml
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
 from xycar_ai.config import TrainConfig, load_train_config
@@ -28,9 +28,13 @@ from xycar_ai.front_cam_policy_data import (
     PolicyDataSplits,
     PolicySample,
     PolicySession,
+    attach_executed_command_history,
     attach_training_teacher_forced_history,
     build_policy_data_splits,
     compute_sqrt_inverse_frequency_weights,
+    generation_epoch_sample_count,
+    generation_sampling_summary,
+    generation_sampling_weights,
     make_policy_transform,
     policy_dataset_stats,
     smooth_training_angle_targets,
@@ -67,7 +71,16 @@ def main(argv: Iterable[str] | None = None) -> int:
         raise ValueError("--stop-after-epoch must be in [1, training.epochs]")
     road_warp = load_configured_road_warp(config)
     splits = build_policy_data_splits(config.data)
-    if config.model.architecture == AR_CONTROL_TOKEN_ARCHITECTURE:
+    external_history = (
+        config.model.architecture == AR_CONTROL_TOKEN_ARCHITECTURE
+        and config.model.history_update == "externally_executed_commands"
+    )
+    if external_history:
+        splits = attach_executed_command_history(
+            splits,
+            config.model.history_frames,
+        )
+    elif config.model.architecture == AR_CONTROL_TOKEN_ARCHITECTURE:
         validate_session_initial_classes(
             splits,
             angle_class_id=config.model.history_initial_angle + 100,
@@ -77,13 +90,25 @@ def main(argv: Iterable[str] | None = None) -> int:
         splits,
         config.data.train_angle_mean_window,
     )
-    if config.model.architecture == AR_CONTROL_TOKEN_ARCHITECTURE:
+    if (
+        config.model.architecture == AR_CONTROL_TOKEN_ARCHITECTURE
+        and not external_history
+    ):
         splits = attach_training_teacher_forced_history(
             splits,
             config.model.history_frames,
         )
-    split_manifest = splits.manifest()
-    dataset_stats = policy_dataset_stats(splits)
+    split_manifest = splits.manifest(include_generation=config.data.ema_sampling)
+    dataset_stats = policy_dataset_stats(
+        splits,
+        include_generation=config.data.ema_sampling,
+    )
+    if config.data.ema_sampling:
+        dataset_stats["training_sampling"] = generation_sampling_summary(
+            splits.train_samples,
+            current_generation=config.data.current_generation,
+            generation_decay=config.data.generation_decay,
+        )
 
     if args.validate_only:
         print(json.dumps(dataset_stats, indent=2, sort_keys=True))
@@ -100,11 +125,18 @@ def main(argv: Iterable[str] | None = None) -> int:
     model = build_policy_model(
         architecture=config.model.architecture,
         model_name=config.model.name,
-        pretrained=config.model.pretrained,
+        pretrained=config.model.pretrained
+        and not bool(args.initialize_from or args.resume),
         image_size=config.model.image_size,
         history_frames=config.model.history_frames,
         control_token_type_embedding=config.model.control_token_type_embedding,
     ).to(device)
+    initialization = initialize_model_weights(
+        model=model,
+        checkpoint=args.initialize_from,
+        config=config,
+        device=device,
+    )
     preprocessing = build_preprocessing_contract(
         model.preprocessing_contract(),
         config=config,
@@ -198,6 +230,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     metrics_path = run_dir / "metrics.csv"
     metrics_rows = read_metrics_rows(metrics_path) if resume_payload else []
     source_state = collect_source_state(config.project_root)
+    if initialization is not None:
+        source_state["initialization"] = initialization
     for epoch in range(start_epoch, config.training.epochs + 1):
         train_metrics = run_epoch(
             model=model,
@@ -229,7 +263,11 @@ def main(argv: Iterable[str] | None = None) -> int:
         )
         current_lr = float(optimizer.param_groups[0]["lr"])
         scheduler.step()
-        current_score = selection_score(val_metrics)
+        current_score = validation_selection_score(
+            val_metrics,
+            sessions=splits.val_sessions,
+            config=config,
+        )
         is_best = current_score < best_score
         if is_best:
             best_score = current_score
@@ -387,15 +425,11 @@ def build_label_contract(config: TrainConfig) -> dict[str, object]:
         },
     }
     if config.model.architecture == AR_CONTROL_TOKEN_ARCHITECTURE:
-        contract["history"] = {
+        history_contract: dict[str, object] = {
             "frames": config.model.history_frames,
             "shape": [config.model.history_frames, 2],
             "pair_order": ["angle_class_id", "speed_class_id"],
             "time_order": "oldest_to_newest",
-            "train_source": "ground_truth_teacher_forcing",
-            "train_angle_source": "centered_mean_target",
-            "train_speed_source": "instantaneous_target",
-            "evaluation_source": "predicted_argmax_rollout",
             "initial_command": [
                 config.model.history_initial_angle,
                 config.model.history_initial_speed,
@@ -404,9 +438,32 @@ def build_label_contract(config: TrainConfig) -> dict[str, object]:
                 config.model.history_initial_angle + 100,
                 config.model.history_initial_speed + 100,
             ],
-            "edge_padding": "repeat_session_first_target",
-            "known_train_label_leakage": True,
         }
+        if config.model.history_update == "externally_executed_commands":
+            history_contract.update(
+                {
+                    "update": "externally_executed_commands",
+                    "train_source": "previous_actual_executed_commands",
+                    "train_angle_source": "raw_executed_command",
+                    "train_speed_source": "raw_executed_command",
+                    "evaluation_source": "previous_actual_executed_commands",
+                    "edge_padding": "session_metadata_or_canonical_initial_command",
+                    "known_train_label_leakage": False,
+                }
+            )
+        else:
+            history_contract.update(
+                {
+                    "update": "predicted_argmax",
+                    "train_source": "ground_truth_teacher_forcing",
+                    "train_angle_source": "centered_mean_target",
+                    "train_speed_source": "instantaneous_target",
+                    "evaluation_source": "predicted_argmax_rollout",
+                    "edge_padding": "repeat_session_first_target",
+                    "known_train_label_leakage": True,
+                }
+            )
+        contract["history"] = history_contract
     return contract
 
 
@@ -416,7 +473,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config", default=DEFAULT_CONFIG)
     parser.add_argument("--validate-only", action="store_true")
-    parser.add_argument("--resume", default="")
+    checkpoint_group = parser.add_mutually_exclusive_group()
+    checkpoint_group.add_argument("--resume", default="")
+    checkpoint_group.add_argument("--initialize-from", default="")
     parser.add_argument("--stop-after-epoch", type=int)
     return parser
 
@@ -452,10 +511,27 @@ def make_loaders(
         )
         generator = torch.Generator()
         generator.manual_seed(config.training.seed + offset)
+        sampler: WeightedRandomSampler | None = None
+        if training and config.data.ema_sampling:
+            sampler = WeightedRandomSampler(
+                generation_sampling_weights(
+                    samples,
+                    current_generation=config.data.current_generation,
+                    generation_decay=config.data.generation_decay,
+                ),
+                num_samples=generation_epoch_sample_count(
+                    samples,
+                    current_generation=config.data.current_generation,
+                    generation_decay=config.data.generation_decay,
+                ),
+                replacement=True,
+                generator=generator,
+            )
         loaders[split_name] = DataLoader(
             dataset,
             batch_size=config.training.batch_size,
-            shuffle=training,
+            shuffle=training and sampler is None,
+            sampler=sampler,
             num_workers=config.data.num_workers,
             pin_memory=device.type == "cuda",
             persistent_workers=config.data.num_workers > 0,
@@ -480,7 +556,10 @@ def evaluate_policy(
     scaler: torch.amp.GradScaler,
     amp_enabled: bool,
 ) -> dict[str, float]:
-    if isinstance(model, AutoregressiveControlTokenViTPolicy):
+    if (
+        isinstance(model, AutoregressiveControlTokenViTPolicy)
+        and config.model.history_update == "predicted_argmax"
+    ):
         return run_rollout_evaluation(
             model=model,
             sessions=sessions,
@@ -694,6 +773,15 @@ def class_weights(
         return None
     if mode != "sqrt_inverse_frequency":
         raise ValueError(f"unsupported class weighting mode: {mode}")
+    sample_weights = (
+        generation_sampling_weights(
+            samples,
+            current_generation=config.data.current_generation,
+            generation_decay=config.data.generation_decay,
+        )
+        if config.data.ema_sampling
+        else None
+    )
     return compute_sqrt_inverse_frequency_weights(
         samples,
         field=field,
@@ -704,7 +792,40 @@ def class_weights(
             if field == "angle_class_id"
             else 0.0
         ),
+        sample_weights=sample_weights,
     ).to(device)
+
+
+def validation_selection_score(
+    metrics: dict[str, float],
+    *,
+    sessions: Sequence[PolicySession],
+    config: TrainConfig,
+) -> float:
+    if not config.data.ema_sampling:
+        return selection_score(metrics)
+    generations = sorted({session.generation for session in sessions})
+    if not generations:
+        raise ValueError("validation split has no generations")
+    future = [
+        generation
+        for generation in generations
+        if generation > config.data.current_generation
+    ]
+    if future:
+        raise ValueError(f"validation contains future generation(s): {future}")
+    weighted_score = 0.0
+    total_mass = 0.0
+    for generation in generations:
+        mass = config.data.generation_decay ** (
+            config.data.current_generation - generation
+        )
+        prefix = f"val_generation_{generation}"
+        weighted_score += mass * (
+            metrics[f"{prefix}_angle_mae"] + 0.25 * metrics[f"{prefix}_speed_mae"]
+        )
+        total_mass += mass
+    return weighted_score / total_mass
 
 
 def checkpoint_payload(
@@ -744,6 +865,68 @@ def checkpoint_payload(
         "best_epoch": best_epoch,
         "epochs_without_improvement": epochs_without_improvement,
         "metrics": metrics,
+    }
+
+
+def initialize_model_weights(
+    *,
+    model: TaskTokenViTPolicy | AutoregressiveControlTokenViTPolicy,
+    checkpoint: str,
+    config: TrainConfig,
+    device: torch.device,
+) -> dict[str, object] | None:
+    """Load model parameters only; optimizer, scheduler, and run state stay fresh."""
+    if not checkpoint:
+        return None
+    checkpoint_path = Path(checkpoint).expanduser().resolve()
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(
+            f"initialization checkpoint does not exist: {checkpoint_path}"
+        )
+    payload = load_checkpoint(checkpoint_path, device)
+    if payload.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
+        raise ValueError("initialization checkpoint schema is incompatible")
+    if payload.get("model_name") != config.model.name:
+        raise ValueError("initialization checkpoint model_name differs from config")
+    checkpoint_config = payload.get("config")
+    checkpoint_model = (
+        checkpoint_config.get("model") if isinstance(checkpoint_config, dict) else None
+    )
+    expected = {
+        "architecture": config.model.architecture,
+        "history_frames": config.model.history_frames,
+        "control_token_type_embedding": config.model.control_token_type_embedding,
+    }
+    actual = {
+        "architecture": (
+            checkpoint_model.get("architecture", "task_tokens")
+            if isinstance(checkpoint_model, dict)
+            else None
+        ),
+        "history_frames": (
+            checkpoint_model.get("history_frames", 0)
+            if isinstance(checkpoint_model, dict)
+            else None
+        ),
+        "control_token_type_embedding": (
+            checkpoint_model.get("control_token_type_embedding", False)
+            if isinstance(checkpoint_model, dict)
+            else None
+        ),
+    }
+    if actual != expected:
+        raise ValueError(
+            "initialization checkpoint model architecture differs from config"
+        )
+    model_state = payload.get("model_state")
+    if not isinstance(model_state, Mapping):
+        raise ValueError("initialization checkpoint has no model_state")
+    model.load_state_dict(model_state, strict=True)
+    return {
+        "mode": "model_weights_only",
+        "checkpoint": str(checkpoint_path),
+        "checkpoint_sha256": sha256_file(checkpoint_path),
+        "source_epoch": int(payload.get("epoch", 0)),
     }
 
 

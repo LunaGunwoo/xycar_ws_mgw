@@ -1,7 +1,8 @@
 # xycar_ai_drive
 
-고정 224x224 TorchScript ViT-tiny 정책으로 `/image_raw`를 계속 추론하고,
-게임패드 A 버튼으로 실제 `/xycar_motor` 발행을 ON/OFF하는 ROS 2 패키지다.
+고정 224x224 TorchScript ViT 정책으로 `/image_raw`를 계속 추론하고,
+게임패드로 일반 AI 주행 또는 사람 보정 기반 고속 데이터 수집을 수행하는
+ROS 2 패키지다.
 모터 메시지는 `std_msgs/Float32MultiArray([angle, speed])`이며 ON/OFF와 관계없이
 20 Hz로 발행한다.
 
@@ -12,8 +13,9 @@
 - 추론은 OFF 상태에서도 최신 camera frame으로 계속 수행한다. ON 상태에서만 최신
   유효 예측을 motor command로 사용하고, OFF 상태에서는 `[0, 0]`을 발행한다.
 - AR artifact는 `(angle=0, speed=25)` class 네 쌍으로 history를 시작하고 성공한
-  argmax 예측만 queue에 추가한다. 추론 실패 또는 성공한 추론 사이가 0.25초 이상
-  벌어지면 초기 history로 reset한다.
+  schema v2에서는 argmax 예측, schema v3에서는 실제 motor에 발행된 명령만
+  queue에 추가한다. 추론됐지만 발행되지 않은 명령은 v3 history에 넣지 않는다.
+  추론 실패 또는 성공한 추론 사이가 0.25초 이상 벌어지면 초기 history로 reset한다.
 - A 버튼으로 ON이 되는 순간에도 AR history와 저장된 예측을 reset한다. reset 뒤
   새 camera frame의 첫 예측이 완료될 때까지 motor output은 `[0, 0]`을 유지한다.
 - angle은 `angle_class_id - 100`이다. speed는
@@ -53,8 +55,82 @@ normalization과 label decode 계약을 검증한다. schema v1 stateless artifa
 RGB `[1,3,224,224]` 하나를 받고 계속 지원한다. schema v2 AR artifact는 RGB image와
 int64 history `[1,4,2]` tuple을 받으며 history pair 순서는
 `[angle_class_id, speed_class_id]`, 시간 순서는 오래된 값부터 최신 값까지다. 이후
-CPU thread 8개로 model을 load하고 3회 warm-up한다. artifact 생성과 배포는 개발
+schema v3는 같은 tensor shape를 사용하지만 history source를 실제 실행 명령으로
+강제한다. CPU thread 8개로 model을 load하고 3회 warm-up한다. artifact 생성과 배포는 개발
 Laptop의 MGW root에서 수행한다.
+
+## 사람 보정 데이터 수집
+
+`guided_policy_collector`는 모델의 angle/speed 두 head를 한 번에 추론하고 사람의
+조향·속도 보정을 합쳐 하나의 motor publisher로 발행한다.
+
+```text
+executed_angle = clamp(model_angle + signed_left_stick * 200, -100, 100)
+executed_speed = clamp(model_speed + RT * 2 - LT * 5, 0, speed_cap)
+```
+
+기본 Remote Gamepad에서는 조향 부호를 반전한다. 값은 모두 hold 동안만 적용되고
+누적 trim으로 남지 않는다. CSV label은 모델 원본이 아니라 실제 발행된
+`executed_angle/executed_speed`이며 model prediction, stick/trigger depth, residual,
+사람 개입 여부와 inference latency도 함께 저장한다. angle/speed는 공통 ViT
+backbone과 별도 출력 head를 공유하므로 한 번의 수집과 학습에서 동시에 다룬다.
+첫 generation의 기본 `speed_cap=27`은 기존 speed 25 모델에 RT `+2`를 허용하기
+위한 값이다. 다른 base model이면 그 모델의 검증된 속도와 이번 라운드의 증분에
+맞춰 명시적으로 낮추거나 올린다.
+
+- Y: DRIVE ON/OFF. 시작은 OFF이며 stick과 trigger를 중립으로 놓고 release 후
+  눌러야 ON이 된다.
+- A: 양수 speed 주행 중 새 session 녹화 시작.
+- B: 주행을 유지하면서 현재 session 정상 저장.
+- X: 주행을 유지하면서 최근 10 frame을 버리고 정상 저장.
+- 녹화 중 Y OFF: 최근 10 frame을 버리고 정상 저장.
+- stale Joy/camera, inference·writer 오류, motor subscriber 소실 또는 경쟁 motor
+  publisher 출현: 즉시 정지하고 session을 incomplete로 마감한다.
+
+raw session은 `recording_root_dir`에 모두 보존한다. `curriculum_generation`은 이
+session을 어느 학습 세대로 취급할지 나타내며, `speed_cap`은 해당 라운드에서
+사람과 모델이 합성한 전진 명령의 상한이다. 두 값은 launch 인자로 지정한다.
+
+아래 명령은 camera, gamepad와 motor publisher를 시작하므로 매 실행 직전 사용자
+승인이 필요하다. 바퀴 지지 또는 안전 주행 공간, motor 전원 차단 수단, Y와
+`Ctrl+C` 정지, 경쟁 publisher 부재를 먼저 확인한다.
+
+```bash
+ssh xytron@xycar-gpu
+cd /home/xytron/xycar_ws_mgw
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+export ROS_DOMAIN_ID=7
+export ROS_NAMESPACE=xycar
+ros2 launch xycar_ai_drive jetson_guided_collection.launch.py \
+  artifact_id:=<schema-v2-or-v3-artifact-id> \
+  curriculum_generation:=1 speed_cap:=27.0 \
+  use_camera:=true use_gamepad:=true allow_motion:=true
+```
+
+이미 준비된 `/image_raw` 또는 `/joy`를 재사용할 때만 각각
+`use_camera:=false`, `use_gamepad:=false`를 지정한다. motor bridge는 이 launch가
+시작하지 않는다. 종료는 Y로 DRIVE OFF한 뒤 `Ctrl+C` 순서다.
+
+CUDA container 없이 host CPU inference를 점검할 때의 일반 launch는 다음과 같다.
+이 명령도 camera와 motor publisher를 열 수 있어 동일한 실행 직전 승인이 필요하다.
+
+```bash
+ros2 launch xycar_ai_drive guided_policy_collection.launch.py \
+  artifact_id:=<schema-v2-or-v3-artifact-id> \
+  curriculum_generation:=1 speed_cap:=27.0 \
+  inference_backend:=local inference_device:=cpu
+```
+
+camera와 Joy publisher가 이미 있고 collector만 직접 시작해야 할 때는 설치된
+parameter file과 versioned artifact를 모두 명시한다.
+
+```bash
+ros2 run xycar_ai_drive guided_policy_collector --ros-args \
+  --params-file /home/xytron/xycar_ws_mgw/install/xycar_ai_drive/share/xycar_ai_drive/config/guided_policy_collection.yaml \
+  -p artifact_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/<artifact-id> \
+  -p curriculum_generation:=1 -p speed_cap:=27.0
+```
 
 기존 artifact의 `full_frame_bicubic_resize`와 새
 `perspective_road_warp_then_bicubic_resize` geometry를 모두 지원한다. road-warp

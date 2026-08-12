@@ -7,9 +7,10 @@ from typing import Any
 
 import yaml
 
-CONFIG_SCHEMA_VERSION = 1
+CONFIG_SCHEMA_VERSIONS = {1, 2}
 CLASS_WEIGHTING_MODES = {"none", "sqrt_inverse_frequency"}
 MODEL_ARCHITECTURES = {"task_tokens", "ar_control_tokens"}
+HISTORY_UPDATE_MODES = {"predicted_argmax", "externally_executed_commands"}
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class ModelConfig:
     control_token_type_embedding: bool = False
     history_initial_angle: int = 0
     history_initial_speed: int = 25
+    history_update: str = "predicted_argmax"
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,11 @@ class DataConfig:
     min_forward_speed: float | None
     num_workers: int
     train_angle_mean_window: int = 1
+    control_modes: tuple[str, ...] = ()
+    current_generation: int = 0
+    generation_decay: float = 1.0
+    legacy_generation: int = 0
+    ema_sampling: bool = False
 
 
 @dataclass(frozen=True)
@@ -133,7 +140,8 @@ def load_train_config(path: str | Path) -> TrainConfig:
         "training config",
         optional={"preprocessing"},
     )
-    if _integer(payload, "schema_version") != CONFIG_SCHEMA_VERSION:
+    schema_version = _integer(payload, "schema_version")
+    if schema_version not in CONFIG_SCHEMA_VERSIONS:
         raise ValueError(f"unsupported training config schema_version in {config_path}")
 
     project_root = config_path.parent.parent
@@ -159,9 +167,10 @@ def load_train_config(path: str | Path) -> TrainConfig:
             "control_token_type_embedding",
             "history_initial_angle",
             "history_initial_speed",
+            "history_update",
         },
     )
-    _expect_data_keys(data_payload)
+    _expect_data_keys(data_payload, schema_version=schema_version)
     if preprocessing_payload is not None:
         _expect_keys(
             preprocessing_payload,
@@ -247,6 +256,11 @@ def load_train_config(path: str | Path) -> TrainConfig:
                 if "history_initial_speed" in model_payload
                 else 25
             ),
+            history_update=(
+                _string(model_payload, "history_update")
+                if "history_update" in model_payload
+                else "predicted_argmax"
+            ),
         ),
         data=DataConfig(
             root=_resolve_project_path(project_root, _string(data_payload, "root")),
@@ -256,7 +270,11 @@ def load_train_config(path: str | Path) -> TrainConfig:
             require_all_matching_sessions=_boolean(
                 data_payload, "require_all_matching_sessions"
             ),
-            control_mode=_string(data_payload, "control_mode"),
+            control_mode=(
+                _string(data_payload, "control_mode")
+                if "control_mode" in data_payload
+                else ""
+            ),
             max_forward_speed=(
                 _number(data_payload, "max_forward_speed")
                 if "max_forward_speed" in data_payload
@@ -273,6 +291,27 @@ def load_train_config(path: str | Path) -> TrainConfig:
                 if "train_angle_mean_window" in data_payload
                 else 1
             ),
+            control_modes=(
+                _string_tuple(data_payload, "control_modes")
+                if "control_modes" in data_payload
+                else ()
+            ),
+            current_generation=(
+                _integer(data_payload, "current_generation")
+                if "current_generation" in data_payload
+                else 0
+            ),
+            generation_decay=(
+                _number(data_payload, "generation_decay")
+                if "generation_decay" in data_payload
+                else 1.0
+            ),
+            legacy_generation=(
+                _integer(data_payload, "legacy_generation")
+                if "legacy_generation" in data_payload
+                else 0
+            ),
+            ema_sampling=schema_version == 2,
         ),
         preprocessing=PreprocessingConfig(
             road_warp_config=(
@@ -342,6 +381,8 @@ def _validate(config: TrainConfig) -> None:
         raise ValueError("the selected pretrained ViT requires image_size 224")
     if config.model.architecture not in MODEL_ARCHITECTURES:
         raise ValueError("unsupported model.architecture")
+    if config.model.history_update not in HISTORY_UPDATE_MODES:
+        raise ValueError("unsupported model.history_update")
     if not -100 <= config.model.history_initial_angle <= 100:
         raise ValueError("model.history_initial_angle must be in [-100, 100]")
     if not -100 <= config.model.history_initial_speed <= 100:
@@ -365,6 +406,20 @@ def _validate(config: TrainConfig) -> None:
             )
     if config.data.num_workers < 0:
         raise ValueError("data.num_workers must be >= 0")
+    if bool(config.data.control_mode) == bool(config.data.control_modes):
+        raise ValueError(
+            "exactly one of data.control_mode or data.control_modes is required"
+        )
+    if config.data.control_modes and len(set(config.data.control_modes)) != len(
+        config.data.control_modes
+    ):
+        raise ValueError("data.control_modes must not contain duplicates")
+    if config.data.current_generation < 0 or config.data.legacy_generation < 0:
+        raise ValueError("data generation numbers must be >= 0")
+    if config.data.legacy_generation > config.data.current_generation:
+        raise ValueError("data.legacy_generation cannot exceed current_generation")
+    if not 0 < config.data.generation_decay <= 1:
+        raise ValueError("data.generation_decay must be in (0, 1]")
     if (
         config.data.train_angle_mean_window <= 0
         or config.data.train_angle_mean_window % 2 == 0
@@ -453,7 +508,36 @@ def _expect_keys(
         )
 
 
-def _expect_data_keys(payload: Mapping[str, object]) -> None:
+def _expect_data_keys(payload: Mapping[str, object], *, schema_version: int) -> None:
+    if schema_version == 2:
+        required = {
+            "root",
+            "split_manifest",
+            "require_all_matching_sessions",
+            "num_workers",
+            "current_generation",
+            "generation_decay",
+            "legacy_generation",
+        }
+        mode_fields = {"control_mode", "control_modes"}
+        filters = {"max_forward_speed", "min_forward_speed"}
+        optional = {"train_angle_mean_window"}
+        actual = set(payload)
+        missing = required - actual
+        extra = actual - required - mode_fields - filters - optional
+        if (
+            missing
+            or extra
+            or len(actual & mode_fields) != 1
+            or len(actual & filters) > 1
+        ):
+            raise ValueError(
+                "data keys mismatch; "
+                f"missing={sorted(missing)}, extra={sorted(extra)}, "
+                "exactly one control mode field and at most one speed filter are required"
+            )
+        return
+
     required = {
         "root",
         "split_manifest",
@@ -473,6 +557,15 @@ def _expect_data_keys(payload: Mapping[str, object]) -> None:
             f"missing={sorted(missing)}, extra={sorted(extra)}, "
             "exactly one of max_forward_speed or min_forward_speed is required"
         )
+
+
+def _string_tuple(payload: Mapping[str, object], key: str) -> tuple[str, ...]:
+    value = payload.get(key)
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{key} must be a non-empty list")
+    if not all(isinstance(item, str) and item for item in value):
+        raise ValueError(f"{key} must contain only non-empty strings")
+    return tuple(value)
 
 
 def _mapping(payload: Mapping[str, object], key: str) -> dict[str, object]:

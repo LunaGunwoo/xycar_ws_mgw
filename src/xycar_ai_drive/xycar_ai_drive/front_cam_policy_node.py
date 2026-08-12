@@ -5,6 +5,7 @@ from __future__ import annotations
 import signal
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Sequence
 
 import numpy as np
@@ -17,12 +18,14 @@ from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import Image, Joy
 from std_msgs.msg import Bool, Float32MultiArray
 
+from xycar_ai_drive.artifact import PolicyArtifact
 from xycar_ai_drive.control import (
     STOP_COMMAND,
     DriveCommand,
     PolicyPrediction,
     ToggleAction,
     ToggleDriveGate,
+    command_class_ids,
     is_fresh,
 )
 from xycar_ai_drive.policy_ipc import UnixSocketPolicyClient
@@ -90,7 +93,6 @@ class FrontCamPolicyNode(Node):
         self._declare_parameters()
         self._read_parameters()
         self._validate_parameters()
-
         self.bridge = CvBridge()
         self._lock = threading.RLock()
         self._frame_condition = threading.Condition(self._lock)
@@ -98,6 +100,9 @@ class FrontCamPolicyNode(Node):
         self._latest_frame: tuple[int, np.ndarray, float] | None = None
         self._frame_sequence = 0
         self._prediction: PolicyPrediction | None = None
+        self._prediction_sequence = 0
+        self._last_executed_prediction_sequence = 0
+        self._history = None
         self._last_joy_monotonic: float | None = None
         self._joy_valid = False
         self._competitors: tuple[str, ...] = ()
@@ -128,6 +133,12 @@ class FrontCamPolicyNode(Node):
         self._publish_enabled(False)
 
         self._policy = self._create_policy(policy_factory)
+        self.artifact: PolicyArtifact | None = getattr(
+            self._policy,
+            'artifact',
+            getattr(self._policy, '_artifact', None),
+        )
+        self._history = self._initial_external_history()
         self._worker = threading.Thread(
             target=self._inference_worker,
             name='front-cam-policy-inference',
@@ -314,6 +325,15 @@ class FrontCamPolicyNode(Node):
             history_reset_timeout_sec=self.inference_timeout_sec,
         )
 
+    def _initial_external_history(self):
+        history = self.artifact.history if self.artifact is not None else None
+        if history is None or history.update != 'externally_executed_commands':
+            return None
+        return deque(
+            [history.initial_class_ids] * history.frames,
+            maxlen=history.frames,
+        )
+
     def _on_joy(self, message: Joy) -> None:
         now = time.monotonic()
         if len(message.buttons) <= self.a_button_index:
@@ -333,6 +353,7 @@ class FrontCamPolicyNode(Node):
             )
             if action == ToggleAction.ENABLED:
                 self._policy.reset_history()
+                self._history = self._initial_external_history()
                 self._prediction = None
                 self._awaiting_post_reset_prediction = True
                 self._history_reset_monotonic = now
@@ -350,7 +371,8 @@ class FrontCamPolicyNode(Node):
         elif action == ToggleAction.REJECTED:
             self._publish_stop()
             self.get_logger().warning(
-                'A toggle rejected because motion prerequisites are not ready; '
+                'A toggle rejected because motion prerequisites are not '
+                'ready; '
                 'release and press A again.',
                 throttle_duration_sec=1.0,
             )
@@ -396,8 +418,16 @@ class FrontCamPolicyNode(Node):
                     continue
                 sequence, image, source_monotonic = self._latest_frame
                 processed_sequence = sequence
+                history = (
+                    None
+                    if self._history is None
+                    else tuple(self._history)
+                )
             try:
-                result = self._policy.infer(image)
+                if history is None:
+                    result = self._policy.infer(image)
+                else:
+                    result = self._policy.infer(image, history)
             except Exception as exc:  # noqa: BLE001 - fail closed at boundary
                 self._force_off(f'policy inference failed: {exc}')
                 continue
@@ -433,8 +463,11 @@ class FrontCamPolicyNode(Node):
                         self._history_reset_monotonic = None
                 if not reset_again:
                     self._prediction = prediction
+                    self._prediction_sequence = sequence
             if reset_again:
                 self._policy.reset_history()
+                with self._lock:
+                    self._history = self._initial_external_history()
                 continue
             message = Float32MultiArray()
             message.data = [
@@ -458,6 +491,17 @@ class FrontCamPolicyNode(Node):
                     # worker-thread fault. A fault that waits on this lock
                     # will publish its stop command after this command.
                     self._publish(prediction.command)
+                    if (
+                        self._history is not None
+                        and self._prediction_sequence
+                        != self._last_executed_prediction_sequence
+                    ):
+                        self._history.append(
+                            command_class_ids(prediction.command)
+                        )
+                        self._last_executed_prediction_sequence = (
+                            self._prediction_sequence
+                        )
                     return
         if reason is not None:
             self._force_off(reason)

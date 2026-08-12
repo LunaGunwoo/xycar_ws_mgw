@@ -84,6 +84,25 @@ motor
 xycar-ai-gpu
 ```
 
+기본 `xycar-ai-gpu`는 `front_cam_policy.launch.py`를 실행한다. 사람 보정 데이터
+수집은 source checkout의 Jetson 전용 launch를 사용한다. 이 launch는 wrapper에
+`HOST_POLICY_LAUNCH=guided_policy_collection.launch.py`를 전달하고 generation과
+speed cap을 host collector까지 전달한다.
+
+```bash
+cd /home/xytron/xycar_ws_mgw
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch xycar_ai_drive jetson_guided_collection.launch.py \
+  artifact_id:=<schema-v2-or-v3-artifact-id> \
+  curriculum_generation:=1 speed_cap:=27.0 \
+  use_camera:=true use_gamepad:=true allow_motion:=true
+```
+
+이 명령도 camera·gamepad·motor publisher를 시작하므로 실행마다 별도 실차 승인이
+필요하다. `run_gpu_policy.sh`의 `HOST_POLICY_LAUNCH`는 허용된 host launch 선택용이며
+GPU server의 network-none, versioned artifact와 Unix socket 안전 경계는 동일하다.
+
 GPU server는 network와 hardware device 없이 실행되고, host Humble node와 권한
 `0600` Unix socket으로만 통신한다. server 단절·timeout·artifact/device mismatch는
 CPU fallback 없이 motion OFF와 `[0,0]`으로 처리한다.

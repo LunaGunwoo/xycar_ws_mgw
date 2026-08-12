@@ -21,7 +21,7 @@ from xycar_ai.front_cam_policy_model import (
 )
 
 LEGACY_ARTIFACT_SCHEMA_VERSION = 1
-AR_ARTIFACT_SCHEMA_VERSION = 2
+AR_ARTIFACT_SCHEMA_VERSION = 3
 ARTIFACT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 DEFAULT_OUTPUT_ROOT = Path("artifacts/models")
 MODEL_FILENAME = "model.ts"
@@ -311,7 +311,7 @@ def _build_manifest(
             "time_order": "oldest_to_newest",
             "initial_command": [initial_angle, initial_speed],
             "initial_class_ids": [initial_angle + 100, initial_speed + 100],
-            "update": "predicted_argmax",
+            "update": "externally_executed_commands",
         }
         schema_version = AR_ARTIFACT_SCHEMA_VERSION
     else:

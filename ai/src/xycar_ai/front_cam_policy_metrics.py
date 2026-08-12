@@ -38,6 +38,9 @@ class ClassificationMetricAccumulator:
     bucket_counts: dict[str, int] = field(default_factory=dict)
     bucket_abs_error_sums: dict[str, float] = field(default_factory=dict)
     bucket_within_10_counts: dict[str, int] = field(default_factory=dict)
+    generation_counts: dict[int, int] = field(default_factory=dict)
+    generation_angle_abs_error_sums: dict[int, float] = field(default_factory=dict)
+    generation_speed_abs_error_sums: dict[int, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for bucket in ANGLE_BUCKETS:
@@ -67,6 +70,9 @@ class ClassificationMetricAccumulator:
         horizontal_flipped = _tensor(
             batch.get("horizontal_flipped", False), outputs["angle_logits"].device
         ).bool()
+        generation = _tensor(
+            batch.get("generation", 0), outputs["angle_logits"].device
+        ).long()
         batch_size = int(angle_true.numel())
 
         angle_pred_class = outputs["angle_logits"].argmax(dim=1)
@@ -98,6 +104,21 @@ class ClassificationMetricAccumulator:
             (speed_expected - speed_true).abs().sum().cpu()
         )
         self.horizontal_flip_count += int(horizontal_flipped.sum())
+        for value in generation.unique().tolist():
+            generation_id = int(value)
+            mask = generation == generation_id
+            generation_count = int(mask.sum())
+            self.generation_counts[generation_id] = (
+                self.generation_counts.get(generation_id, 0) + generation_count
+            )
+            self.generation_angle_abs_error_sums[generation_id] = (
+                self.generation_angle_abs_error_sums.get(generation_id, 0.0)
+                + float(angle_error[mask].sum().cpu())
+            )
+            self.generation_speed_abs_error_sums[generation_id] = (
+                self.generation_speed_abs_error_sums.get(generation_id, 0.0)
+                + float(speed_error[mask].sum().cpu())
+            )
         for bucket, (low, high) in ANGLE_BUCKETS.items():
             mask = (angle_true >= low) & (angle_true <= high)
             bucket_count = int(mask.sum())
@@ -144,6 +165,16 @@ class ClassificationMetricAccumulator:
                 self.bucket_within_10_counts[bucket] / bucket_count
                 if bucket_count
                 else 0.0
+            )
+        for generation in sorted(self.generation_counts):
+            generation_count = self.generation_counts[generation]
+            generation_prefix = f"{prefix}_generation_{generation}"
+            metrics[f"{generation_prefix}_sample_count"] = float(generation_count)
+            metrics[f"{generation_prefix}_angle_mae"] = (
+                self.generation_angle_abs_error_sums[generation] / generation_count
+            )
+            metrics[f"{generation_prefix}_speed_mae"] = (
+                self.generation_speed_abs_error_sums[generation] / generation_count
             )
         return metrics
 

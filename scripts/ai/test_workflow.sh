@@ -6,7 +6,7 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
 xycar_ai_require_command mktemp
 xycar_ai_require_command mkfifo
 xycar_ai_require_command rsync
-[[ "${XYCAR_AI_DEFAULT_VEHICLE_SSH}" == "xytron@xycar" ]] ||
+[[ "${XYCAR_AI_DEFAULT_VEHICLE_SSH}" == "xytron@xycar-gpu" ]] ||
   xycar_ai_die "unexpected default vehicle Tailscale SSH target"
 xycar_ai_validate_ssh_target \
   "${XYCAR_AI_DEFAULT_VEHICLE_SSH}" "default vehicle SSH target"

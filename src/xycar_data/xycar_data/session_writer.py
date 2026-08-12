@@ -36,6 +36,15 @@ CSV_FIELDS = (
     "lidar_stamp_nanosec",
     "lidar_received_wall_time_ns",
     "lidar_skew_sec",
+    "model_angle",
+    "model_speed",
+    "steering_axis",
+    "steering_residual",
+    "lt_depth",
+    "rt_depth",
+    "speed_delta",
+    "human_correction",
+    "inference_ms",
 )
 
 
@@ -71,6 +80,15 @@ class CameraSample:
     input_key: str
     lidar: Optional[LidarSnapshot]
     lidar_skew_sec: Optional[float]
+    model_angle: Optional[float] = None
+    model_speed: Optional[float] = None
+    steering_axis: Optional[float] = None
+    steering_residual: Optional[float] = None
+    lt_depth: Optional[float] = None
+    rt_depth: Optional[float] = None
+    speed_delta: Optional[float] = None
+    human_correction: Optional[bool] = None
+    inference_ms: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -313,6 +331,19 @@ class AsyncSessionWriter:
                 "lidar_skew_sec": ""
                 if sample.lidar_skew_sec is None
                 else f"{sample.lidar_skew_sec:.6f}",
+                "model_angle": _optional_float(sample.model_angle),
+                "model_speed": _optional_float(sample.model_speed),
+                "steering_axis": _optional_float(sample.steering_axis),
+                "steering_residual": _optional_float(
+                    sample.steering_residual
+                ),
+                "lt_depth": _optional_float(sample.lt_depth),
+                "rt_depth": _optional_float(sample.rt_depth),
+                "speed_delta": _optional_float(sample.speed_delta),
+                "human_correction": ""
+                if sample.human_correction is None
+                else str(sample.human_correction).lower(),
+                "inference_ms": _optional_float(sample.inference_ms),
             }
         )
         session.csv_file.flush()
@@ -444,6 +475,10 @@ class AsyncSessionWriter:
 
 def _session_timestamp(value: datetime) -> str:
     return value.strftime("%Y%m%d_%H%M%S_%f")[:-3]
+
+
+def _optional_float(value: Optional[float]) -> str:
+    return "" if value is None else f"{value:.6f}"
 
 
 def _unique_path(base: Path) -> Path:

@@ -14,6 +14,7 @@ from xycar_ai.train_front_cam_policy import (
     build_label_contract,
     build_preprocessing_contract,
     early_stopping_triggered,
+    initialize_model_weights,
     load_configured_road_warp,
     main,
     validate_resume_payload,
@@ -46,6 +47,46 @@ def test_early_stopping_patience_counts_consecutive_non_improvements():
     assert early_stopping_triggered(5, 5)
 
 
+def test_initialize_from_loads_model_weights_only(tmp_path: Path):
+    split_path = tmp_path / "config" / "split.yaml"
+    config = load_train_config(
+        _write_config(tmp_path, split_path, epochs=1, flip_probability=0.0)
+    )
+    source = torch.nn.Linear(3, 2)
+    target = torch.nn.Linear(3, 2)
+    with torch.no_grad():
+        source.weight.fill_(2.0)
+        source.bias.fill_(3.0)
+        target.weight.zero_()
+        target.bias.zero_()
+    checkpoint_path = tmp_path / "source.pt"
+    torch.save(
+        {
+            "schema_version": 1,
+            "epoch": 7,
+            "model_name": config.model.name,
+            "config": config.serializable(),
+            "model_state": source.state_dict(),
+            "optimizer_state": {"must_not": "load"},
+        },
+        checkpoint_path,
+    )
+
+    metadata = initialize_model_weights(
+        model=target,
+        checkpoint=str(checkpoint_path),
+        config=config,
+        device=torch.device("cpu"),
+    )
+
+    assert torch.equal(target.weight, source.weight)
+    assert torch.equal(target.bias, source.bias)
+    assert metadata is not None
+    assert metadata["mode"] == "model_weights_only"
+    assert metadata["source_epoch"] == 7
+    assert len(metadata["checkpoint_sha256"]) == 64
+
+
 def test_small_config_uses_minimum_speed_and_flip():
     project_root = Path(__file__).parents[1]
     config = load_train_config(
@@ -60,6 +101,19 @@ def test_small_config_uses_minimum_speed_and_flip():
     assert config.output.run_name == "vit_small_hflip_p05_seed20260810"
     assert config.preprocessing.road_warp_config is None
     assert config.data.train_angle_mean_window == 1
+
+
+def test_guided_ema_config_uses_external_history_and_generation_decay():
+    project_root = Path(__file__).parents[1]
+    config = load_train_config(
+        project_root / "config" / "front_cam_policy_train_guided_ema.yaml"
+    )
+
+    assert config.model.history_update == "externally_executed_commands"
+    assert config.data.ema_sampling
+    assert config.data.control_modes == ("gamepad", "guided_policy")
+    assert config.data.current_generation == 0
+    assert config.data.generation_decay == 0.5
 
 
 def test_small_warp_config_embeds_preprocessing_contract():

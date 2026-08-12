@@ -35,6 +35,8 @@ def write_session(
     max_forward_speed: float = 25.0,
     control_mode: str = "gamepad",
     complete: bool = True,
+    generation: int | None = None,
+    initial_history_class_ids: list[list[int]] | None = None,
 ) -> Path:
     session = root / name
     images = session / "Images"
@@ -75,6 +77,11 @@ def write_session(
         "sample_count": len(label_list),
         "gamepad": {"max_forward_speed": max_forward_speed},
     }
+    if generation is not None:
+        metadata["curriculum"] = {
+            "generation": generation,
+            "initial_history_class_ids": initial_history_class_ids or [[100, 125]] * 4,
+        }
     (session / "metadata.yaml").write_text(
         yaml.safe_dump(metadata, sort_keys=True), encoding="utf-8"
     )
