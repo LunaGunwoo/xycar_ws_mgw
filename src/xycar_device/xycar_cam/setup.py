@@ -21,7 +21,7 @@ setup(
     zip_safe=True,
     maintainer='xytron',
     maintainer_email='xytron@todo.todo',
-    description='usb_cam node',
+    description='V4L2 camera launch for the Xycar front camera.',
     license='Apache-2.0',
     tests_require=['pytest'],
     entry_points={

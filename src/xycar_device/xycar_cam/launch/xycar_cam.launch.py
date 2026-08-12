@@ -12,44 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-
-from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    ld = LaunchDescription()
-
-    usb_cam_dir = get_package_share_directory('usb_cam')
-
-    # usb_cam package revisions in Humble use either params.yaml or
-    # params_1.yaml.  Keep the vehicle launch compatible with both layouts.
-    params_path = next((
-        os.path.join(usb_cam_dir, 'config', filename)
-        for filename in ('params.yaml', 'params_1.yaml')
-        if os.path.isfile(os.path.join(usb_cam_dir, 'config', filename))
-    ), None)
-    if params_path is None:
-        raise RuntimeError('usb_cam parameter file was not found')
-
-    print(params_path)
-
-    ld.add_action(Node(
-        package='usb_cam',
-        executable='usb_cam_node_exe',
-        name='xycar_cam',
-        arguments=['--ros-args', '--log-level', 'error'],
-        parameters=[
-            params_path,
-            {
-                'video_device': '/dev/videoCAM',
-                'image_raw.enable_pub_plugins': [
-                    'image_transport/raw',
+    return LaunchDescription(
+        [
+            Node(
+                package='v4l2_camera',
+                executable='v4l2_camera_node',
+                name='xycar_cam',
+                output='screen',
+                parameters=[
+                    {
+                        'video_device': '/dev/videoCAM',
+                        'pixel_format': 'YUYV',
+                        'output_encoding': 'rgb8',
+                        'image_size': [640, 480],
+                        'time_per_frame': [1, 30],
+                        'camera_frame_id': 'camera',
+                    }
                 ],
-            },
+            )
         ]
-        ))
-
-    return ld
+    )

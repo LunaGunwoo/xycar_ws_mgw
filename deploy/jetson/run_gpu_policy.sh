@@ -10,12 +10,53 @@ ARTIFACT_ROOT=${ARTIFACT_ROOT:-/home/xytron/xycar_ws_mgw/artifacts/models}
 SOCKET_DIR="/run/user/$(id -u)/xycar-ai"
 SOCKET_PATH="${SOCKET_DIR}/policy.sock"
 CONTAINER=xycar_ai_gpu
+INNER_LAUNCH_PID=""
+
+# Vehicle ROS packages use the Ubuntu/ROS Python ABI.  Ignore arbitrary
+# per-user pip packages (notably NumPy 2.x) for this host-side launch while
+# leaving the isolated CUDA container and AI training environments unchanged.
+export PYTHONNOUSERSITE=1
 
 cleanup() {
     set +e
+    if [ -n "${INNER_LAUNCH_PID}" ] && kill -0 "${INNER_LAUNCH_PID}" 2>/dev/null; then
+        kill -INT -- "-${INNER_LAUNCH_PID}" 2>/dev/null
+        sleep 1
+        kill -TERM -- "-${INNER_LAUNCH_PID}" 2>/dev/null
+        wait "${INNER_LAUNCH_PID}" 2>/dev/null
+    fi
     docker stop --time 3 "${CONTAINER}" >/dev/null 2>&1
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# ROS/colcon setup files are not guaranteed to be nounset-clean.  Keep the
+# wrapper strict, but suspend nounset only while loading the generated setup.
+set +u
+source /opt/ros/humble/setup.bash
+source /home/xytron/xycar_ws_mgw/install/setup.bash
+set -u
+export ROS_DOMAIN_ID=7
+export ROS_LOCALHOST_ONLY=1
+export ROS_NAMESPACE=xycar
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+
+# Humble cv_bridge and Ubuntu OpenCV are built against the NumPy 1.x ABI.
+# Validate before opening the camera or starting the CUDA container so a
+# user-site NumPy 2.x override fails without leaving hardware processes behind.
+python3 - <<'PY'
+import numpy
+
+if int(numpy.__version__.split('.', maxsplit=1)[0]) >= 2:
+    raise SystemExit(
+        '[ERROR] ROS host requires NumPy 1.x; loaded '
+        f'{numpy.__version__} from {numpy.__file__}'
+    )
+
+import cv2  # noqa: F401
+from cv_bridge import CvBridge  # noqa: F401
+PY
 
 if [ ! -f "${ARTIFACT_ROOT}/${ARTIFACT_ID}/SHA256SUMS" ]; then
     echo "[ERROR] model artifact가 없습니다: ${ARTIFACT_ID}" >&2
@@ -56,14 +97,18 @@ if [ ! -S "${SOCKET_PATH}" ]; then
     exit 1
 fi
 
-source /opt/ros/humble/setup.bash
-source /home/xytron/xycar_ws_mgw/install/setup.bash
-export ROS_DOMAIN_ID=7
-export ROS_NAMESPACE=xycar
-export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-ros2 launch xycar_ai_drive front_cam_policy.launch.py \
+setsid ros2 launch xycar_ai_drive front_cam_policy.launch.py \
     artifact_id:="${ARTIFACT_ID}" \
     inference_backend:=unix \
     inference_device:=cuda \
     inference_socket_path:="${SOCKET_PATH}" \
-    inference_rpc_timeout_sec:=0.20
+    inference_rpc_timeout_sec:=0.20 \
+    "$@" &
+INNER_LAUNCH_PID=$!
+
+set +e
+wait "${INNER_LAUNCH_PID}"
+STATUS=$?
+set -e
+INNER_LAUNCH_PID=""
+exit "${STATUS}"

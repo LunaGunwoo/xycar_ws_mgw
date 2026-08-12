@@ -34,6 +34,7 @@ packages=(
     docker.io
     git
     libserial-dev
+    patch
     python3-colcon-common-extensions
     python3-opencv
     python3-rosdep
@@ -54,6 +55,7 @@ packages=(
     ros-humble-diagnostic-aggregator
     ros-humble-image-transport-plugins
     ros-humble-image-view
+    ros-humble-joy
     ros-humble-rmw-fastrtps-cpp
     ros-humble-rosbridge-server
     ros-humble-rqt-runtime-monitor
@@ -61,7 +63,9 @@ packages=(
     ros-humble-serial-driver
     ros-humble-tf-transformations
     ros-humble-usb-cam
+    ros-humble-v4l2-camera
     ros-humble-web-video-server
+    usbutils
     v4l-utils
 )
 missing=()
@@ -88,6 +92,8 @@ if grep -Eq '^Remv (nvidia-|libnvidia-|cuda-|jetpack|nvidia-l4t)' \
 fi
 sudo apt-get install -y --no-remove "${packages[@]}"
 rm -f "${apt_simulation}"
+
+"${SCRIPT_DIR}/install_gc300_xpad.sh"
 
 if [ ! -e /etc/ros/rosdep/sources.list.d/20-default.list ]; then
     sudo rosdep init
@@ -143,17 +149,21 @@ install -m 0755 \
 
 managed_start='# >>> xycar jetson environment >>>'
 managed_end='# <<< xycar jetson environment <<<'
-if ! grep -Fq "${managed_start}" "${HOME}/.bashrc"; then
-    {
-        echo "${managed_start}"
-        echo 'source /opt/ros/humble/setup.bash'
-        echo 'export ROS_DOMAIN_ID=7'
-        echo 'export ROS_NAMESPACE=xycar'
-        echo 'export RMW_IMPLEMENTATION=rmw_fastrtps_cpp'
-        echo 'export PATH=/usr/local/cuda/bin:$HOME/.local/bin:$PATH'
-        echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}'
-        echo "${managed_end}"
-    } >> "${HOME}/.bashrc"
+if grep -Fq "${managed_start}" "${HOME}/.bashrc"; then
+    sed -i \
+        "\|^${managed_start}$|,\|^${managed_end}$|d" \
+        "${HOME}/.bashrc"
 fi
+{
+    echo "${managed_start}"
+    echo 'source /opt/ros/humble/setup.bash'
+    echo 'export ROS_DOMAIN_ID=7'
+    echo 'export ROS_LOCALHOST_ONLY=1'
+    echo 'export ROS_NAMESPACE=xycar'
+    echo 'export RMW_IMPLEMENTATION=rmw_fastrtps_cpp'
+    echo 'export PATH=/usr/local/cuda/bin:$HOME/.local/bin:$PATH'
+    echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}'
+    echo "${managed_end}"
+} >> "${HOME}/.bashrc"
 
 echo "Host provisioning 완료. docker/dialout group 반영을 위해 다시 로그인하세요."

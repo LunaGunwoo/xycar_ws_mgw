@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -22,6 +23,17 @@ from xycar_ai_drive.policy_runtime import (
     PolicyRuntimeError,
     preprocess_rgb_frame,
 )
+
+
+def test_motor_relay_default_is_explicit_in_vehicle_config():
+    config_path = (
+        Path(__file__).parents[1]
+        / 'config'
+        / 'front_cam_policy.yaml'
+    )
+    config = yaml.safe_load(config_path.read_text(encoding='utf-8'))
+    parameters = config['front_cam_policy']['ros__parameters']
+    assert parameters['allowed_motor_relay_nodes'] == ['/ros_bridge']
 
 
 def test_a_button_toggle_requires_release_and_fault_rearming():

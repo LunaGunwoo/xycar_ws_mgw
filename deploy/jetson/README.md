@@ -8,6 +8,10 @@ source는 `images.lock.env`의 digest·commit으로 고정한다.
 보존하고, 앞으로의 model 배포와 실차 inference는 Jetson `xycar-gpu`의 CUDA GPU
 runtime을 기본으로 한다. GPU 오류 시 `xycar`로 자동 fallback하지 않고 motion
 OFF와 `[0,0]`으로 fail-closed한다.
+두 PC는 fallback을 위해 같은 domain ID 7 설정을 보존하지만, Jetson runtime은
+`ROS_LOCALHOST_ONLY=1`로 제한한다. 따라서 켜져 있는 기존 CPU PC의 camera, Joy,
+bridge publisher가 Jetson의 절대 토픽에 섞이지 않는다. Jetson motor bridge
+container는 host network를 사용하므로 같은 loopback graph에서 통신한다.
 Bridge image는 전체 Humble desktop을 중복 빌드하지 않고 `ros1_bridge`의
 build·exec dependency closure만 Focal 안에서 source build한다.
 Focal GCC에서 필요한 `rmw/time.h`의 `<stdbool.h>` 호환 patch는 적용 전
@@ -27,9 +31,30 @@ cd /home/xytron/xycar_ws_mgw
 ./deploy/jetson/install_runtime.sh
 ```
 
+`provision_host.sh`는 JetPack 6.2.1의 `5.15.148-tegra` kernel header로 MSI
+FORCE GC300 WIRELESS용 `xpad` module을 빌드한다. upstream Linux 5.15.148
+source checksum을 검증하고 MSI vendor alias만 백포트하며, kernel이나 L4T
+package를 교체하지 않는다. module은 `/lib/modules/.../updates/xycar/`에 설치되고
+재부팅 때 자동 load된다. 검증된 kernel release와 다르면 설치를 중단한다.
+
+GC300이 연결된 상태에서 `/dev/input/js0`와 ROS Joy 메시지는 다음처럼 확인한다.
+실제 USB gamepad 접근이므로 하네스의 매 실행 전 승인 규칙을 적용한다.
+
+```bash
+ls -l /dev/input/js0
+ros2 run joy game_controller_node --ros-args \
+  -p device_id:=0 -p autorepeat_rate:=20.0
+# 별도 terminal
+ROS_DOMAIN_ID=7 ros2 topic echo /joy
+```
+
 `install_runtime.sh`는 기존 `~/.local/bin/motor`와
-`~/xycar_ws/etc/gui-shell/x27.sh`를 timestamped migration backup에 보존한 뒤,
-Desktop `x27.desktop`이 Jetson motor wrapper를 절대 경로로 실행하도록 설치한다.
+`~/.local/bin/xycar-ai-gpu`, `~/xycar_ws/etc/gui-shell/x27.sh`를 timestamped
+migration backup에 보존한 뒤, Desktop `x27.desktop`이 Jetson motor wrapper를
+절대 경로로 실행하도록 설치한다. GPU wrapper와 image lock은
+`~/.local/lib/xycar-ai-gpu/`에 함께 복사하므로 source checkout 위치나 이후의
+부분 빌드에 의존하지 않는다. motor wrapper와 lock도 같은 이유로
+`~/.local/lib/xycar-motor/`에 복사한다.
 
 학습용 `ai/uv.lock`은 4090 Laptop CUDA 환경이므로 Jetson에서 `uv sync`하지 않는다.
 GPU image build context는 runtime package인 `src/xycar_ai_drive`로 제한하며 dataset,

@@ -134,6 +134,10 @@ class FrontCamPolicyNode(Node):
         self.declare_parameter('joy_topic', '/joy')
         self.declare_parameter('motor_topic', '/xycar_motor')
         self.declare_parameter(
+            'allowed_motor_relay_nodes',
+            ['/ros_bridge'],
+        )
+        self.declare_parameter(
             'prediction_topic',
             '/front_cam_policy/prediction',
         )
@@ -160,13 +164,17 @@ class FrontCamPolicyNode(Node):
         self.camera_topic = str(self.get_parameter('camera_topic').value)
         self.joy_topic = str(self.get_parameter('joy_topic').value)
         self.motor_topic = str(self.get_parameter('motor_topic').value)
+        self.allowed_motor_relay_nodes = tuple(
+            str(value)
+            for value in self.get_parameter(
+                'allowed_motor_relay_nodes'
+            ).value
+        )
         self.prediction_topic = str(
             self.get_parameter('prediction_topic').value
         )
         self.enabled_topic = str(self.get_parameter('enabled_topic').value)
-        self.a_button_index = int(
-            self.get_parameter('a_button_index').value
-        )
+        self.a_button_index = int(self.get_parameter('a_button_index').value)
         self.allow_motion = bool(self.get_parameter('allow_motion').value)
         self.publish_rate_hz = float(
             self.get_parameter('publish_rate_hz').value
@@ -214,6 +222,12 @@ class FrontCamPolicyNode(Node):
                 raise ValueError(f'{label} must not be empty')
         if self.a_button_index < 0:
             raise ValueError('a_button_index must be non-negative')
+        for node in self.allowed_motor_relay_nodes:
+            if not node.startswith('/') or node.endswith('/'):
+                raise ValueError(
+                    'allowed_motor_relay_nodes entries must be fully '
+                    'qualified node names'
+                )
         for label, value in (
             ('publish_rate_hz', self.publish_rate_hz),
             ('joy_timeout_sec', self.joy_timeout_sec),
@@ -423,9 +437,13 @@ class FrontCamPolicyNode(Node):
                 and publisher.node_namespace == self.get_namespace()
             ):
                 continue
-            competitors.append(
-                _node_label(publisher.node_namespace, publisher.node_name)
+            label = _node_label(
+                publisher.node_namespace,
+                publisher.node_name,
             )
+            if label in self.allowed_motor_relay_nodes:
+                continue
+            competitors.append(label)
         has_motor_subscriber = bool(
             self.get_subscriptions_info_by_topic(topic)
         )

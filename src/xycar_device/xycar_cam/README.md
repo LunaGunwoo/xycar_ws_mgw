@@ -1,8 +1,8 @@
 # xycar_cam
 
 `xycar_cam`은 차량 USB camera의 RGB 영상을 `/image_raw`로 발행한다. 모든 명령은
-차량 `xytron@xycar:/home/xytron/xycar_ws_mgw`에 Tailscale SSH로 접속한 상태를 기준으로
-한다.
+활성 차량 `xytron@xycar-gpu:/home/xytron/xycar_ws_mgw`에 Tailscale SSH로 접속한
+상태를 기준으로 한다.
 
 camera 장치를 여는 명령이므로 매 실행 직전에 사용자 승인을 받고, 다른 camera
 node가 `/dev/video*` 또는 `/image_raw`를 사용 중이지 않은지 확인한다.
@@ -24,11 +24,11 @@ export ROS_NAMESPACE=xycar
 ros2 launch xycar_cam xycar_cam.launch.py
 ```
 
-Humble `usb_cam` package의 `params.yaml`/`params_1.yaml` layout을 모두 지원하고,
-udev alias `/dev/videoCAM`을 사용해 640x480, 30 Hz, `rgb8` `/image_raw`를 발행한다.
-publisher plugin은 `image_transport/raw`만 활성화한다. RGB frame을 depth 전용
-`compressedDepth` plugin으로 보내면서 발생하는 반복 compression 오류를 막고,
-recorder가 사용하는 raw topic 계약을 유지하기 위한 설정이다.
+Humble `v4l2_camera`와 udev alias `/dev/videoCAM`을 사용해 카메라가 지원하는
+YUYV 640x480, 30 Hz를 요청하고 `rgb8` `/image_raw`를 발행한다. Jetson에서
+`usb_cam` 0.8.1의 FFmpeg 색상 변환 경로가 `char*` 예외로 abort한 현장 결과 때문에
+FFmpeg를 사용하지 않는 V4L2 변환 경로를 기준으로 한다. AI와 recorder가 사용하는
+raw topic과 image 계약은 바뀌지 않는다.
 
 ## Camera viewer
 
@@ -36,8 +36,7 @@ recorder가 사용하는 raw topic 계약을 유지하기 위한 설정이다.
 ros2 launch xycar_cam xycar_cam_viewer.launch.py
 ```
 
-camera와 `show_image.py` GUI를 함께 실행하며 raw transport 제한은 headless
-launch와 같다. GUI와 camera 장치를 모두 사용하므로 이 명령도 매번 별도 승인이
-필요하다.
+camera와 `image_view` GUI를 함께 실행한다. GUI와 camera 장치를 모두 사용하므로
+이 명령도 매번 별도 승인이 필요하다.
 
 두 launch 모두 `Ctrl+C`로 종료한다.

@@ -17,6 +17,10 @@
 - Joy 또는 camera prediction이 0.25초 이상 stale, 추론/변환 오류, motor
   subscriber 소실, 다른 motor publisher 출현 시 즉시 OFF와 `[0, 0]`으로
   전환한다. 조건이 복구돼도 A release 후 새 press가 있어야 다시 ON된다.
+- Jetson의 양방향 parameter bridge `/ros_bridge`는
+  `allowed_motor_relay_nodes`에 명시된 필수 relay라 경쟁 publisher 판정에서
+  제외한다. `gamepad_teleop`을 포함한 그 밖의 publisher는 계속 fail-closed로
+  주행을 차단한다.
 - 기본 launch의 `allow_motion:=true`는 A toggle 후 실제로 움직일 수 있다.
   `allow_motion:=false`는 nonzero command를 차단하는 점검용 gate지만 node 자체가
   motor publisher이므로 실행 전 승인 규칙은 그대로 적용된다.
@@ -152,5 +156,20 @@ ros2 run xycar_ai_drive front_cam_policy_gpu_server -- \
 cd /home/xytron/xycar_ws_mgw
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-xycar-ai-gpu
+ros2 launch xycar_ai_drive jetson_gpu_policy.launch.py \
+  artifact_id:=front-cam-policy-tiny-hflip-p05-patience5-e5-20260811 \
+  use_camera:=true use_gamepad:=true allow_motion:=true
 ```
+
+이 Jetson 전용 launch는 checksum이 있는 versioned artifact와 CUDA server
+container를 먼저 준비하고 Unix socket이 열린 뒤 camera, gamepad와 policy node를
+시작한다. motor bridge는 시작하지 않으므로 별도 terminal의 `motor` 또는
+`x27.desktop`으로 사용자가 직접 관리한다. 종료는 `Ctrl+C`이며 launch가
+container도 함께 정리한다. 이미 camera나 gamepad publisher가 있으면
+`use_camera:=false` 또는 `use_gamepad:=false`를 지정한다. 기존 `xycar-ai-gpu`
+wrapper와 `ARTIFACT_ID=<id>` 방식도 호환을 위해 계속 지원한다.
+
+wrapper는 camera를 열기 전에 host NumPy 1.x, OpenCV와 `cv_bridge` import를
+검사한다. user site-packages의 NumPy 2.x가 ROS Humble ABI를 가리면 즉시 종료하며
+camera나 CUDA container를 남기지 않는다. policy node가 오류로 종료돼도 같은
+launch의 camera와 gamepad를 종료하고 CUDA container를 정리한다.

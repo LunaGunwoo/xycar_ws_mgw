@@ -7,6 +7,9 @@
   <maintainer email="xytron@todo.todo">xytron</maintainer>
   <license>Apache-2.0</license>
 
+  <exec_depend>image_view</exec_depend>
+  <exec_depend>v4l2_camera</exec_depend>
+
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>

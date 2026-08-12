@@ -11,6 +11,7 @@ front_cam_policy:
     camera_topic: /image_raw
     joy_topic: /joy
     motor_topic: /xycar_motor
+    allowed_motor_relay_nodes: ['/ros_bridge']
     prediction_topic: /front_cam_policy/prediction
     enabled_topic: /front_cam_policy/enabled
 
