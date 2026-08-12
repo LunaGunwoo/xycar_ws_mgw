@@ -71,6 +71,7 @@ fi
 docker run --detach \
     --name "${BRIDGE_CONTAINER}" \
     --network host \
+    --ipc host \
     --env ROS_MASTER_URI=http://127.0.0.1:11311 \
     --env ROS_DOMAIN_ID=7 \
     --env ROS_LOCALHOST_ONLY=1 \

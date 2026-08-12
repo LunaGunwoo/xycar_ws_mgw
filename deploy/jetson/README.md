@@ -67,7 +67,10 @@ none만 사용한다.
 Motor bridge는 ROS 1 subscriber만 있을 때 type을 추론하지 못하는 dynamic bridge를
 사용하지 않는다. `/ros1_bridge/topics`에 `/xycar_motor`의 양쪽 type을 고정한
 parameter bridge를 사용하고, host와 container 사이 Fast DDS data path는
-`FASTDDS_BUILTIN_TRANSPORTS=UDPv4`로 고정한다.
+`FASTDDS_BUILTIN_TRANSPORTS=UDPv4`로 고정한다. Fast DDS가 host ROS 2 process와
+bridge container를 같은 machine의 shared-memory participant로 판단하므로 bridge는
+`--ipc host`를 사용한다. 이 설정이 없으면 discovery endpoint는 보이지만 ROS 2
+payload가 ROS 1으로 전달되지 않는다.
 
 ## 실차 실행
 
