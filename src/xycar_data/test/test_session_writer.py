@@ -6,6 +6,7 @@ from datetime import datetime
 import re
 import time
 
+import cv2
 import numpy as np
 import yaml
 
@@ -42,12 +43,14 @@ def _wait_for_result(writer: AsyncSessionWriter):
     raise AssertionError('timed out waiting for dataset writer')
 
 
-def _writer(root):
+def _writer(root, *, image_format='png', jpeg_quality=95):
     return AsyncSessionWriter(
         root,
         png_compression=0,
         queue_size=64,
         min_free_space_mb=0,
+        image_format=image_format,
+        jpeg_quality=jpeg_quality,
     )
 
 
@@ -89,6 +92,35 @@ def test_finish_writes_buffered_final_samples_in_order(tmp_path):
             range(1, 21)
         )
         assert rows[-1]['angle'] == '20.000000'
+    finally:
+        writer.shutdown()
+
+
+def test_jpeg_session_writes_jpg_paths_that_opencv_can_read(tmp_path):
+    writer = _writer(
+        tmp_path / 'teleop',
+        image_format='jpeg',
+        jpeg_quality=95,
+    )
+    try:
+        token = writer.start_session({'control_mode': 'gamepad'})
+        assert token is not None
+        assert writer.submit(token, _sample(1))
+        assert writer.finish(token, 'b_button')
+
+        result = _wait_for_result(writer)
+
+        assert result.completed
+        assert result.path is not None
+        image_path = result.path / 'Images' / '1.jpg'
+        assert image_path.is_file()
+        assert cv2.imread(str(image_path)) is not None
+        with (result.path / 'samples.csv').open(
+            encoding='utf-8',
+            newline='',
+        ) as stream:
+            rows = list(csv.DictReader(stream))
+        assert [row['image'] for row in rows] == ['Images/1.jpg']
     finally:
         writer.shutdown()
 

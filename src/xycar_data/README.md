@@ -16,7 +16,7 @@ CPU inference rollback 재현에만 사용한다.
 ## SSH, 빌드와 환경 적용
 
 ```bash
-ssh -t xytron@xycar
+ssh -t xytron@xycar-gpu
 cd /home/xytron/xycar_ws_mgw
 source /opt/ros/humble/setup.bash
 git pull --ff-only
@@ -41,6 +41,8 @@ Remote Gamepad 휴대폰 앱과 PC 앱을 먼저 연결한다. 차량 바퀴를 
 전진 최고속도는 `7`, 저장 root는
 `/home/xytron/xycar_data/stateless_manual`이다. 각 session metadata에는 profile의
 절대 경로와 SHA-256, 실제 적용된 gamepad·recording·timeout 값이 기록된다.
+Gamepad camera frame은 Jetson에서 30 Hz를 지속 저장할 수 있도록 기본 JPEG 품질
+95로 저장한다. 이미지 형식과 품질은 외부 profile에서 조정할 수 있다.
 
 ```bash
 ros2 launch xycar_data gamepad_teleop.launch.py \
@@ -244,7 +246,7 @@ directory를 만들지 않으므로 빈 세션은 남지 않는다.
 
 ```text
 YYYYMMDD_HHMMSS_mmm_session/
-  Images/1.png
+  Images/1.jpg 또는 Images/1.png
   Lidar/000001.npz
   samples.csv
   metadata.yaml
@@ -252,6 +254,8 @@ YYYYMMDD_HHMMSS_mmm_session/
 
 `samples.csv`의 각 행은 하나의 camera frame이다. `image`, `angle`, `speed`,
 `input_key`, camera stamp/수신 시각과 `lidar_valid`를 기본 학습 label로 사용한다.
+실제 이미지 상대 경로와 확장자는 `image` 열이 기준이다. Gamepad 기본은 JPEG
+품질 95이고 terminal recorder와 과거 session의 PNG도 같은 CSV 계약으로 읽는다.
 유효한 LiDAR가 있으면 `lidar` 경로와 scan timestamp·skew도 기록하며, 하나의
 LiDAR scan이 여러 camera frame에 대응할 때 NPZ 파일을 재사용한다. NPZ에는
 전체 `ranges`, `intensities`, LaserScan geometry·timing·frame metadata가 담긴다.
@@ -281,10 +285,11 @@ tracked seed는 `config/gamepad_stateless_manual.yaml`이다. 기존
 - 필수 camera freshness와 선택 LiDAR 연결 허용 시간
 - headless camera 자동 시작 여부와 graph discovery, frame startup, process
   shutdown timeout
-- dataset root, emergency tail 15 frame, PNG compression, writer queue, 최소
-  디스크 여유
+- dataset root, emergency tail 15 frame, `jpeg|png` 이미지 형식, JPEG 품질,
+  PNG compression, writer queue, 최소 디스크 여유
 
 YAML의 빈 topic, 잘못된 speed/steering 부호·범위, `NaN`·`Inf` 수치, 음수
-timeout, queue 크기와 PNG compression 범위 오류는 node 시작 시 거부된다.
+timeout, queue 크기, 이미지 형식, JPEG 품질과 PNG compression 범위 오류는 node
+시작 시 거부된다.
 실제 차에서는 raised-car 상태에서 A/D 조향 부호와 후진 부호를 먼저
 확인한 뒤 값을 조정한다.

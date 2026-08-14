@@ -96,7 +96,9 @@ session을 어느 학습 세대로 취급할지 나타내며, `speed_cap`은 해
 residual gain, trigger 증감, deadzone, 버튼, timeout과
 `/home/xytron/xycar_data/stateless_guided` 저장 root를 둔다. session metadata는
 profile 경로·SHA-256과 최종 적용된 보정, inference, recording, 안전 parameter를
-기록한다.
+기록한다. 수집 이미지는 30 Hz camera보다 충분한 writer 처리량을 확보하도록 기본
+JPEG 품질 95로 저장하며 `recording_image_format`과
+`recording_jpeg_quality`를 외부 profile에서 조정할 수 있다.
 
 아래 명령은 camera, gamepad와 motor publisher를 시작하므로 매 실행 직전 사용자
 승인이 필요하다. 바퀴 지지 또는 안전 주행 공간, motor 전원 차단 수단, Y와

@@ -103,6 +103,8 @@ def ros_harness(monkeypatch, tmp_path):
         Parameter('stop_publish_count', value=1),
         Parameter('recording_root_dir', value=str(tmp_path / 'teleop')),
         Parameter('emergency_discard_frames', value=15),
+        Parameter('recording_image_format', value='jpeg'),
+        Parameter('recording_jpeg_quality', value=95),
         Parameter('recording_png_compression', value=0),
         Parameter('recording_queue_size', value=64),
         Parameter('recording_min_free_space_mb', value=0),
@@ -318,6 +320,8 @@ def test_a_waits_for_forward_and_b_saves_all_frames_without_stopping(
     ) as stream:
         rows = list(csv.DictReader(stream))
     assert len(rows) == 20
+    assert all(row['image'].endswith('.jpg') for row in rows)
+    assert all((sessions[0] / row['image']).is_file() for row in rows)
     assert {row['angle'] for row in rows} == {'-25.000000'}
     assert {row['speed'] for row in rows} == {'7.000000'}
     assert {row['input_key'] for row in rows} == {'gamepad'}
@@ -334,6 +338,8 @@ def test_a_waits_for_forward_and_b_saves_all_frames_without_stopping(
     assert metadata['recording']['root_dir'] == str(
         harness['recording_root']
     )
+    assert metadata['recording']['image_format'] == 'jpeg'
+    assert metadata['recording']['jpeg_quality'] == 95
 
 
 def test_nonpositive_speed_discards_fifteen_and_keeps_driving(
@@ -384,6 +390,7 @@ def test_nonpositive_speed_discards_fifteen_and_keeps_driving(
     _spin_for(harness, 0.10, _joy_message(rt=0.5))
     _spin_for(harness, 0.15, forward_with_a)
     assert teleop._recording_gate.state == RecordingState.RECORDING
+    _publish_camera_frames(harness, 3, forward_with_a)
     _spin_for(harness, 0.15, _joy_message(rt=0.5, b=True))
     assert _spin_until(
         harness,
@@ -391,4 +398,13 @@ def test_nonpositive_speed_discards_fifteen_and_keeps_driving(
         2.0,
         _joy_message(rt=0.5),
     )
-    assert len(list(harness['recording_root'].glob('*_session*'))) == 1
+    sessions = list(harness['recording_root'].glob('*_session*'))
+    assert len(sessions) == 2
+    sample_counts = []
+    for session in sessions:
+        with (session / 'samples.csv').open(
+            encoding='utf-8',
+            newline='',
+        ) as stream:
+            sample_counts.append(len(list(csv.DictReader(stream))))
+    assert sorted(sample_counts) == [3, 5]

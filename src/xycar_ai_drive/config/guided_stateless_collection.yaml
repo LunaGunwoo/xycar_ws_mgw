@@ -42,6 +42,8 @@ guided_policy_collector:
     warmup_count: 3
     recording_root_dir: /home/xytron/xycar_data/stateless_guided
     tail_discard_frames: 10
+    recording_image_format: jpeg
+    recording_jpeg_quality: 95
     recording_png_compression: 3
     recording_queue_size: 128
     recording_min_free_space_mb: 1024

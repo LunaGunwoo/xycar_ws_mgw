@@ -192,6 +192,8 @@ class GuidedPolicyCollectorNode(Node):
             png_compression=self.recording_png_compression,
             queue_size=self.recording_queue_size,
             min_free_space_mb=self.recording_min_free_space_mb,
+            image_format=self.recording_image_format,
+            jpeg_quality=self.recording_jpeg_quality,
         )
 
         self.motor_publisher = self.create_publisher(
@@ -290,6 +292,8 @@ class GuidedPolicyCollectorNode(Node):
             '/home/xytron/xycar_data/teleop',
         )
         self.declare_parameter('tail_discard_frames', 10)
+        self.declare_parameter('recording_image_format', 'jpeg')
+        self.declare_parameter('recording_jpeg_quality', 95)
         self.declare_parameter('recording_png_compression', 3)
         self.declare_parameter('recording_queue_size', 128)
         self.declare_parameter('recording_min_free_space_mb', 1024)
@@ -312,8 +316,10 @@ class GuidedPolicyCollectorNode(Node):
             'inference_device',
             'inference_socket_path',
             'recording_root_dir',
+            'recording_image_format',
         ):
             setattr(self, name, str(value(name)))
+        self.recording_image_format = self.recording_image_format.strip().lower()
         self.allowed_motor_relay_nodes = tuple(
             str(item) for item in value('allowed_motor_relay_nodes')
         )
@@ -329,6 +335,7 @@ class GuidedPolicyCollectorNode(Node):
             'torch_num_threads',
             'warmup_count',
             'tail_discard_frames',
+            'recording_jpeg_quality',
             'recording_png_compression',
             'recording_queue_size',
             'recording_min_free_space_mb',
@@ -412,6 +419,10 @@ class GuidedPolicyCollectorNode(Node):
             raise ValueError(
                 'tail discard and generation must be non-negative'
             )
+        if self.recording_image_format not in {'jpeg', 'png'}:
+            raise ValueError('recording_image_format must be jpeg or png')
+        if not 1 <= self.recording_jpeg_quality <= 100:
+            raise ValueError('recording_jpeg_quality must be in [1,100]')
         if not 0 <= self.recording_png_compression <= 9:
             raise ValueError('recording_png_compression must be in [0,9]')
         if self.recording_queue_size < 1 or self.stop_publish_count < 1:
@@ -845,6 +856,8 @@ class GuidedPolicyCollectorNode(Node):
             'recording': {
                 'root_dir': self.recording_root_dir,
                 'tail_discard_frames': self.tail_discard_frames,
+                'image_format': self.recording_image_format,
+                'jpeg_quality': self.recording_jpeg_quality,
                 'png_compression': self.recording_png_compression,
                 'queue_size': self.recording_queue_size,
                 'min_free_space_mb': self.recording_min_free_space_mb,

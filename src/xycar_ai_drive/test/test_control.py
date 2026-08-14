@@ -216,6 +216,8 @@ def test_stateless_external_collection_templates_and_launch_contract():
     assert profile['lt_speed_decrement'] == 5.0
     assert profile['curriculum_generation'] == 1
     assert profile['allow_motion'] is False
+    assert profile['recording_image_format'] == 'jpeg'
+    assert profile['recording_jpeg_quality'] == 95
     assert "['params_file:=', params_file]" in launch_text
     assert 'OpaqueFunction(function=_require_params_file)' in launch_text
     for metadata_group in (

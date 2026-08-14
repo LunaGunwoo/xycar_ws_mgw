@@ -340,6 +340,8 @@ def test_pending_writer_finish_is_retried_until_accepted():
         ('record_start_button', -1),
         ('record_stop_button', -1),
         ('emergency_discard_frames', -1),
+        ('recording_image_format', 'bmp'),
+        ('recording_jpeg_quality', 0),
         ('recording_png_compression', 10),
         ('recording_queue_size', 0),
         ('recording_min_free_space_mb', -1),
@@ -352,6 +354,8 @@ def test_invalid_recording_parameter_is_rejected(field, value):
         'record_start_button': 0,
         'record_stop_button': 1,
         'emergency_discard_frames': 15,
+        'recording_image_format': 'jpeg',
+        'recording_jpeg_quality': 95,
         'recording_png_compression': 3,
         'recording_queue_size': 128,
         'recording_min_free_space_mb': 0,
@@ -369,6 +373,8 @@ def test_recording_buttons_must_be_distinct():
             record_start_button=0,
             record_stop_button=0,
             emergency_discard_frames=15,
+            recording_image_format='jpeg',
+            recording_jpeg_quality=95,
             recording_png_compression=3,
             recording_queue_size=128,
             recording_min_free_space_mb=0,
@@ -388,4 +394,6 @@ def test_stateless_manual_template_keeps_initial_speed_and_separate_root():
 
     assert config['max_forward_speed'] == 7.0
     assert config['recording_root_dir'].endswith('/stateless_manual')
+    assert config['recording_image_format'] == 'jpeg'
+    assert config['recording_jpeg_quality'] == 95
     assert "'collection_profile_path': ParameterValue(" in launch_text

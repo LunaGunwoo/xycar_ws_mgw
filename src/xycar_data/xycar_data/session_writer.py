@@ -154,9 +154,17 @@ class AsyncSessionWriter:
         png_compression: int,
         queue_size: int,
         min_free_space_mb: int,
+        image_format: str = "png",
+        jpeg_quality: int = 95,
     ) -> None:
         self.root_dir = Path(root_dir).expanduser()
         self.png_compression = int(png_compression)
+        self.image_format = str(image_format).strip().lower()
+        self.jpeg_quality = int(jpeg_quality)
+        if self.image_format not in {"jpeg", "png"}:
+            raise ValueError("image_format must be jpeg or png")
+        if not 1 <= self.jpeg_quality <= 100:
+            raise ValueError("jpeg_quality must be in [1, 100]")
         self.min_free_space_bytes = int(min_free_space_mb) * 1024 * 1024
         self._queue: queue.Queue[object] = queue.Queue(maxsize=queue_size)
         self._results: queue.SimpleQueue[SessionResult] = queue.SimpleQueue()
@@ -289,9 +297,10 @@ class AsyncSessionWriter:
             raise RuntimeError("session storage was not initialized")
 
         sample_index = session.sample_count + 1
-        image_relative = f"Images/{sample_index}.png"
+        image_extension = ".jpg" if self.image_format == "jpeg" else ".png"
+        image_relative = f"Images/{sample_index}{image_extension}"
         image_path = session.temp_dir / image_relative
-        self._write_png(image_path, sample.image)
+        self._write_image(image_path, sample.image)
 
         lidar_relative = ""
         lidar = sample.lidar
@@ -382,12 +391,16 @@ class AsyncSessionWriter:
                 f"{minimum_mb} MiB required"
             )
 
-    def _write_png(self, path: Path, image: np.ndarray) -> None:
+    def _write_image(self, path: Path, image: np.ndarray) -> None:
         temporary = path.with_name(f"{path.stem}.tmp{path.suffix}")
+        if self.image_format == "jpeg":
+            parameters = [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
+        else:
+            parameters = [cv2.IMWRITE_PNG_COMPRESSION, self.png_compression]
         if not cv2.imwrite(
             str(temporary),
             image,
-            [cv2.IMWRITE_PNG_COMPRESSION, self.png_compression],
+            parameters,
         ):
             raise RuntimeError(f"failed to write image: {path}")
         os.replace(temporary, path)

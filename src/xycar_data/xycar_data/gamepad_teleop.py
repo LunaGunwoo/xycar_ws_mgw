@@ -369,6 +369,8 @@ def _validate_recording_parameters(
     record_start_button: int,
     record_stop_button: int,
     emergency_discard_frames: int,
+    recording_image_format: str,
+    recording_jpeg_quality: int,
     recording_png_compression: int,
     recording_queue_size: int,
     recording_min_free_space_mb: int,
@@ -383,6 +385,10 @@ def _validate_recording_parameters(
         raise ValueError('record start and stop buttons must be different')
     if emergency_discard_frames < 0:
         raise ValueError('emergency_discard_frames must be non-negative')
+    if recording_image_format not in {'jpeg', 'png'}:
+        raise ValueError('recording_image_format must be jpeg or png')
+    if not 1 <= recording_jpeg_quality <= 100:
+        raise ValueError('recording_jpeg_quality must be in [1, 100]')
     if not 0 <= recording_png_compression <= 9:
         raise ValueError('recording_png_compression must be in [0, 9]')
     if recording_queue_size < 1:
@@ -433,6 +439,8 @@ class GamepadTeleopNode(Node):
             '/home/xytron/xycar_data/teleop',
         )
         self.declare_parameter('emergency_discard_frames', 15)
+        self.declare_parameter('recording_image_format', 'jpeg')
+        self.declare_parameter('recording_jpeg_quality', 95)
         self.declare_parameter('recording_png_compression', 3)
         self.declare_parameter('recording_queue_size', 128)
         self.declare_parameter('recording_min_free_space_mb', 1024)
@@ -494,6 +502,12 @@ class GamepadTeleopNode(Node):
         self.emergency_discard_frames = int(
             self.get_parameter('emergency_discard_frames').value
         )
+        self.recording_image_format = str(
+            self.get_parameter('recording_image_format').value
+        ).strip().lower()
+        self.recording_jpeg_quality = int(
+            self.get_parameter('recording_jpeg_quality').value
+        )
         self.recording_png_compression = int(
             self.get_parameter('recording_png_compression').value
         )
@@ -536,6 +550,8 @@ class GamepadTeleopNode(Node):
             png_compression=self.recording_png_compression,
             queue_size=self.recording_queue_size,
             min_free_space_mb=self.recording_min_free_space_mb,
+            image_format=self.recording_image_format,
+            jpeg_quality=self.recording_jpeg_quality,
         )
 
         self.motor_publisher = self.create_publisher(
@@ -582,7 +598,9 @@ class GamepadTeleopNode(Node):
             f'dataset_root={self.recording_root_dir}, '
             f'A=buttons[{self.record_start_button}], '
             f'B=buttons[{self.record_stop_button}], '
-            f'emergency_discard_frames={self.emergency_discard_frames}'
+            f'emergency_discard_frames={self.emergency_discard_frames}, '
+            f'image_format={self.recording_image_format}, '
+            f'jpeg_quality={self.recording_jpeg_quality}'
         )
 
     def _validate_parameters(self) -> None:
@@ -605,6 +623,8 @@ class GamepadTeleopNode(Node):
             record_start_button=self.record_start_button,
             record_stop_button=self.record_stop_button,
             emergency_discard_frames=self.emergency_discard_frames,
+            recording_image_format=self.recording_image_format,
+            recording_jpeg_quality=self.recording_jpeg_quality,
             recording_png_compression=self.recording_png_compression,
             recording_queue_size=self.recording_queue_size,
             recording_min_free_space_mb=(
@@ -737,6 +757,8 @@ class GamepadTeleopNode(Node):
             },
             'recording': {
                 'root_dir': self.recording_root_dir,
+                'image_format': self.recording_image_format,
+                'jpeg_quality': self.recording_jpeg_quality,
                 'png_compression': self.recording_png_compression,
                 'queue_size': self.recording_queue_size,
                 'min_free_space_mb': self.recording_min_free_space_mb,

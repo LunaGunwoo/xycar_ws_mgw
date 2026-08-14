@@ -44,6 +44,8 @@ gamepad_teleop:
     # as terminal teleop. The newest 15 frames are held back while recording.
     recording_root_dir: /home/xytron/xycar_data/teleop
     emergency_discard_frames: 15
+    recording_image_format: jpeg
+    recording_jpeg_quality: 95
     recording_png_compression: 3
     recording_queue_size: 128
     recording_min_free_space_mb: 1024
