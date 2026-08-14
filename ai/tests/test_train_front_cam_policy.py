@@ -136,6 +136,7 @@ def test_stateless_ema_config_uses_two_qualified_sources_and_raw_angle(
     assert config.data.ema_sampling
     assert config.data.current_generation == 0
     assert config.data.generation_decay == 0.5
+    assert config.training.early_stopping_patience == 5
     assert [(source.source_id, source.fixed_generation) for source in config.data.sources] == [
         ("manual", 0),
         ("guided", None),

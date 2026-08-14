@@ -434,6 +434,264 @@ grep -Fq '*deleting managed session 20260811_020208_001_session' \
 [[ -f \
   "${XYCAR_DIRECT_DESTINATION}/${XYCAR_AI_LOCAL_DATASET_MARKER_NAME}" ]]
 
+XYCAR_LAN_FAKE_BIN="${XYCAR_TEST_ROOT}/lan-fake-bin"
+XYCAR_LAN_SOURCE="${XYCAR_TEST_ROOT}/lan-source"
+XYCAR_LAN_DESTINATION="${XYCAR_TEST_ROOT}/lan-destination"
+mkdir -p \
+  "${XYCAR_LAN_FAKE_BIN}" \
+  "${XYCAR_LAN_SOURCE}/20260814_010101_001_session/Images" \
+  "${XYCAR_LAN_SOURCE}/20260814_010102_001_incomplete/Images" \
+  "${XYCAR_LAN_SOURCE}/_recording_20260814_010103_001/Images"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'if [[ "${XYCAR_TEST_POWERSHELL_FAIL:-0}" == "1" ]]; then' \
+  '  exit 1' \
+  'fi' \
+  'printf "%s" "${XYCAR_TEST_POWERSHELL_OUTPUT:-100 Mbps|Ethernet|192.168.50.0/24|192.168.50.1}"' \
+  >"${XYCAR_LAN_FAKE_BIN}/powershell.exe"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'while (($#)); do' \
+  '  case "$1" in' \
+  '    -o|-l|-p|-i|-F|-J)' \
+  '      shift 2' \
+  '      ;;' \
+  '    --)' \
+  '      shift' \
+  '      break' \
+  '      ;;' \
+  '    -*)' \
+  '      shift' \
+  '      ;;' \
+  '    *)' \
+  '      shift' \
+  '      break' \
+  '      ;;' \
+  '  esac' \
+  'done' \
+  '(($#)) || exit 2' \
+  'if (($# == 1)); then' \
+  '  exec bash -c "$1"' \
+  'fi' \
+  'exec "$@"' \
+  >"${XYCAR_LAN_FAKE_BIN}/ssh"
+chmod +x \
+  "${XYCAR_LAN_FAKE_BIN}/powershell.exe" \
+  "${XYCAR_LAN_FAKE_BIN}/ssh"
+printf 'manual-one\n' \
+  >"${XYCAR_LAN_SOURCE}/20260814_010101_001_session/Images/1.jpg"
+printf 'sample_index,image,angle,speed\n1,Images/1.jpg,0,7\n' \
+  >"${XYCAR_LAN_SOURCE}/20260814_010101_001_session/samples.csv"
+printf 'incomplete-one\n' \
+  >"${XYCAR_LAN_SOURCE}/20260814_010102_001_incomplete/Images/1.jpg"
+printf 'active-one\n' \
+  >"${XYCAR_LAN_SOURCE}/_recording_20260814_010103_001/Images/1.jpg"
+printf 'partial\n' \
+  >"${XYCAR_LAN_SOURCE}/20260814_010101_001_session/frame.part"
+printf 'temporary\n' \
+  >"${XYCAR_LAN_SOURCE}/20260814_010102_001_incomplete/frame.tmp"
+
+XYCAR_LAN_ENV=(
+  env
+  PATH="${XYCAR_LAN_FAKE_BIN}:${PATH}"
+  XYCAR_AI_ALLOW_ANY_CHECKOUT=1
+  XYCAR_AI_LAN_ALLOW_NON_EXT4_DESTINATION=1
+  XYCAR_AI_LAN_EXPECTED_HOSTNAME="$(hostname -s)"
+  XYCAR_AI_LAN_VEHICLE_DATASET_ROOT="${XYCAR_LAN_SOURCE}"
+  XYCAR_AI_LAN_LOCAL_DATASET_ROOT="${XYCAR_LAN_DESTINATION}"
+)
+"${XYCAR_AI_SCRIPT_DIR}/sync_stateless_manual_lan.sh" --help |
+  grep -q '^usage:'
+if "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_manual_lan.sh" --unknown \
+  >/dev/null 2>&1; then
+  xycar_ai_die "LAN sync accepted an unknown argument"
+fi
+"${XYCAR_LAN_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_manual_lan.sh" >/dev/null
+[[ -f \
+  "${XYCAR_LAN_DESTINATION}/${XYCAR_AI_LOCAL_DATASET_MARKER_NAME}" ]]
+[[ -d "${XYCAR_LAN_DESTINATION}/20260814_010101_001_session" ]]
+[[ -d "${XYCAR_LAN_DESTINATION}/20260814_010102_001_incomplete" ]]
+[[ ! -e "${XYCAR_LAN_DESTINATION}/_recording_20260814_010103_001" ]]
+[[ ! -e \
+  "${XYCAR_LAN_DESTINATION}/20260814_010101_001_session/frame.part" ]]
+[[ ! -e \
+  "${XYCAR_LAN_DESTINATION}/20260814_010102_001_incomplete/frame.tmp" ]]
+
+printf 'dry-run-only\n' \
+  >"${XYCAR_LAN_SOURCE}/20260814_010101_001_session/Images/dry-run.jpg"
+"${XYCAR_LAN_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_manual_lan.sh" --dry-run >/dev/null
+[[ ! -e \
+  "${XYCAR_LAN_DESTINATION}/20260814_010101_001_session/Images/dry-run.jpg" ]]
+find "${XYCAR_LAN_SOURCE}/20260814_010101_001_session/Images/dry-run.jpg" \
+  -maxdepth 0 -type f -delete
+
+printf 'manual-one-changed\n' \
+  >"${XYCAR_LAN_SOURCE}/20260814_010101_001_session/Images/1.jpg"
+printf 'manual-two\n' \
+  >"${XYCAR_LAN_SOURCE}/20260814_010101_001_session/Images/2.jpg"
+printf 'destination-only\n' >"${XYCAR_LAN_DESTINATION}/destination-only"
+"${XYCAR_LAN_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_manual_lan.sh" --checksum >/dev/null
+[[ "$(<"${XYCAR_LAN_DESTINATION}/20260814_010101_001_session/Images/1.jpg")" == \
+  "manual-one-changed" ]]
+[[ -f \
+  "${XYCAR_LAN_DESTINATION}/20260814_010101_001_session/Images/2.jpg" ]]
+[[ ! -e "${XYCAR_LAN_DESTINATION}/destination-only" ]]
+
+find "${XYCAR_LAN_SOURCE}/20260814_010102_001_incomplete" \
+  -depth -mindepth 1 -delete
+rmdir "${XYCAR_LAN_SOURCE}/20260814_010102_001_incomplete"
+"${XYCAR_LAN_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_manual_lan.sh" >/dev/null
+[[ ! -e "${XYCAR_LAN_DESTINATION}/20260814_010102_001_incomplete" ]]
+[[ -f \
+  "${XYCAR_LAN_DESTINATION}/${XYCAR_AI_LOCAL_DATASET_MARKER_NAME}" ]]
+
+XYCAR_LAN_UNMARKED="${XYCAR_TEST_ROOT}/lan-unmarked"
+mkdir -p "${XYCAR_LAN_UNMARKED}"
+printf 'do-not-delete\n' >"${XYCAR_LAN_UNMARKED}/owned-file"
+if env \
+  PATH="${XYCAR_LAN_FAKE_BIN}:${PATH}" \
+  XYCAR_AI_ALLOW_ANY_CHECKOUT=1 \
+  XYCAR_AI_LAN_ALLOW_NON_EXT4_DESTINATION=1 \
+  XYCAR_AI_LAN_EXPECTED_HOSTNAME="$(hostname -s)" \
+  XYCAR_AI_LAN_VEHICLE_DATASET_ROOT="${XYCAR_LAN_SOURCE}" \
+  XYCAR_AI_LAN_LOCAL_DATASET_ROOT="${XYCAR_LAN_UNMARKED}" \
+  "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_manual_lan.sh" \
+  >/dev/null 2>&1; then
+  xycar_ai_die "LAN sync accepted an unmarked non-empty destination"
+fi
+[[ -f "${XYCAR_LAN_UNMARKED}/owned-file" ]]
+
+XYCAR_LAN_LINK="${XYCAR_TEST_ROOT}/lan-destination-link"
+ln -s "${XYCAR_LAN_DESTINATION}" "${XYCAR_LAN_LINK}"
+if env \
+  PATH="${XYCAR_LAN_FAKE_BIN}:${PATH}" \
+  XYCAR_AI_ALLOW_ANY_CHECKOUT=1 \
+  XYCAR_AI_LAN_ALLOW_NON_EXT4_DESTINATION=1 \
+  XYCAR_AI_LAN_EXPECTED_HOSTNAME="$(hostname -s)" \
+  XYCAR_AI_LAN_VEHICLE_DATASET_ROOT="${XYCAR_LAN_SOURCE}" \
+  XYCAR_AI_LAN_LOCAL_DATASET_ROOT="${XYCAR_LAN_LINK}" \
+  "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_manual_lan.sh" \
+  >/dev/null 2>&1; then
+  xycar_ai_die "LAN sync accepted a symlink destination"
+fi
+
+if env \
+  PATH="${XYCAR_LAN_FAKE_BIN}:${PATH}" \
+  XYCAR_AI_ALLOW_ANY_CHECKOUT=1 \
+  XYCAR_AI_LAN_ALLOW_NON_EXT4_DESTINATION=1 \
+  XYCAR_AI_LAN_EXPECTED_HOSTNAME=wrong-host \
+  XYCAR_AI_LAN_VEHICLE_DATASET_ROOT="${XYCAR_LAN_SOURCE}" \
+  XYCAR_AI_LAN_LOCAL_DATASET_ROOT="${XYCAR_LAN_DESTINATION}" \
+  "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_manual_lan.sh" \
+  >/dev/null 2>&1; then
+  xycar_ai_die "LAN sync accepted the wrong vehicle hostname"
+fi
+if env \
+  PATH="${XYCAR_LAN_FAKE_BIN}:${PATH}" \
+  XYCAR_AI_ALLOW_ANY_CHECKOUT=1 \
+  XYCAR_AI_LAN_ALLOW_NON_EXT4_DESTINATION=1 \
+  XYCAR_AI_LAN_EXPECTED_HOSTNAME="$(hostname -s)" \
+  XYCAR_AI_LAN_VEHICLE_DATASET_ROOT="${XYCAR_TEST_ROOT}/missing-lan-source" \
+  XYCAR_AI_LAN_LOCAL_DATASET_ROOT="${XYCAR_LAN_DESTINATION}" \
+  "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_manual_lan.sh" \
+  >/dev/null 2>&1; then
+  xycar_ai_die "LAN sync accepted a missing vehicle root"
+fi
+if env \
+  PATH="${XYCAR_LAN_FAKE_BIN}:${PATH}" \
+  XYCAR_TEST_POWERSHELL_OUTPUT='100 Mbps|Wi-Fi|192.168.50.0/24|192.168.50.1' \
+  XYCAR_AI_ALLOW_ANY_CHECKOUT=1 \
+  XYCAR_AI_LAN_ALLOW_NON_EXT4_DESTINATION=1 \
+  XYCAR_AI_LAN_EXPECTED_HOSTNAME="$(hostname -s)" \
+  XYCAR_AI_LAN_VEHICLE_DATASET_ROOT="${XYCAR_LAN_SOURCE}" \
+  XYCAR_AI_LAN_LOCAL_DATASET_ROOT="${XYCAR_LAN_DESTINATION}" \
+  "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_manual_lan.sh" \
+  >/dev/null 2>&1; then
+  xycar_ai_die "LAN sync accepted an unexpected Windows route"
+fi
+if env \
+  PATH="${XYCAR_LAN_FAKE_BIN}:${PATH}" \
+  XYCAR_TEST_POWERSHELL_FAIL=1 \
+  XYCAR_AI_ALLOW_ANY_CHECKOUT=1 \
+  XYCAR_AI_LAN_ALLOW_NON_EXT4_DESTINATION=1 \
+  XYCAR_AI_LAN_EXPECTED_HOSTNAME="$(hostname -s)" \
+  XYCAR_AI_LAN_VEHICLE_DATASET_ROOT="${XYCAR_LAN_SOURCE}" \
+  XYCAR_AI_LAN_LOCAL_DATASET_ROOT="${XYCAR_LAN_DESTINATION}" \
+  "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_manual_lan.sh" \
+  >/dev/null 2>&1; then
+  xycar_ai_die "LAN sync accepted an unreachable vehicle SSH port"
+fi
+
+XYCAR_LAN_BAD_FS_BIN="${XYCAR_TEST_ROOT}/lan-bad-fs-bin"
+mkdir -p "${XYCAR_LAN_BAD_FS_BIN}"
+printf '%s\n' '#!/usr/bin/env bash' 'printf "xfs\\n"' \
+  >"${XYCAR_LAN_BAD_FS_BIN}/findmnt"
+chmod +x "${XYCAR_LAN_BAD_FS_BIN}/findmnt"
+if env \
+  PATH="${XYCAR_LAN_BAD_FS_BIN}:${XYCAR_LAN_FAKE_BIN}:${PATH}" \
+  XYCAR_AI_ALLOW_ANY_CHECKOUT=1 \
+  XYCAR_AI_LAN_EXPECTED_HOSTNAME="$(hostname -s)" \
+  XYCAR_AI_LAN_VEHICLE_DATASET_ROOT="${XYCAR_LAN_SOURCE}" \
+  XYCAR_AI_LAN_LOCAL_DATASET_ROOT="${XYCAR_LAN_DESTINATION}" \
+  "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_manual_lan.sh" \
+  >/dev/null 2>&1; then
+  xycar_ai_die "LAN sync accepted a non-ext4 destination"
+fi
+
+(
+  exec 8>"$(dirname -- "${XYCAR_LAN_DESTINATION}")/.stateless_manual_lan_sync.lock"
+  flock -n 8
+  if "${XYCAR_LAN_ENV[@]}" \
+    "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_manual_lan.sh" \
+    >/dev/null 2>&1; then
+    xycar_ai_die "LAN sync accepted a concurrent run"
+  fi
+)
+
+XYCAR_LAN_EMPTY_SOURCE="${XYCAR_TEST_ROOT}/lan-empty-source"
+mkdir -p "${XYCAR_LAN_EMPTY_SOURCE}"
+printf 'remove-me\n' >"${XYCAR_LAN_DESTINATION}/remove-for-empty-mirror"
+XYCAR_LAN_EMPTY_ENV=(
+  env
+  PATH="${XYCAR_LAN_FAKE_BIN}:${PATH}"
+  XYCAR_AI_ALLOW_ANY_CHECKOUT=1
+  XYCAR_AI_LAN_ALLOW_NON_EXT4_DESTINATION=1
+  XYCAR_AI_LAN_EXPECTED_HOSTNAME="$(hostname -s)"
+  XYCAR_AI_LAN_VEHICLE_DATASET_ROOT="${XYCAR_LAN_EMPTY_SOURCE}"
+  XYCAR_AI_LAN_LOCAL_DATASET_ROOT="${XYCAR_LAN_DESTINATION}"
+)
+if "${XYCAR_LAN_EMPTY_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_manual_lan.sh" \
+  >/dev/null 2>&1; then
+  xycar_ai_die "LAN sync accepted an empty source without explicit approval"
+fi
+[[ -f "${XYCAR_LAN_DESTINATION}/remove-for-empty-mirror" ]]
+"${XYCAR_LAN_EMPTY_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_manual_lan.sh" \
+  --allow-empty-source >/dev/null
+[[ ! -e "${XYCAR_LAN_DESTINATION}/remove-for-empty-mirror" ]]
+[[ -f \
+  "${XYCAR_LAN_DESTINATION}/${XYCAR_AI_LOCAL_DATASET_MARKER_NAME}" ]]
+
+XYCAR_LAN_EXISTING_EMPTY_DESTINATION="${XYCAR_TEST_ROOT}/lan-existing-empty"
+mkdir -p "${XYCAR_LAN_EXISTING_EMPTY_DESTINATION}"
+env \
+  PATH="${XYCAR_LAN_FAKE_BIN}:${PATH}" \
+  XYCAR_AI_ALLOW_ANY_CHECKOUT=1 \
+  XYCAR_AI_LAN_ALLOW_NON_EXT4_DESTINATION=1 \
+  XYCAR_AI_LAN_EXPECTED_HOSTNAME="$(hostname -s)" \
+  XYCAR_AI_LAN_VEHICLE_DATASET_ROOT="${XYCAR_LAN_SOURCE}" \
+  XYCAR_AI_LAN_LOCAL_DATASET_ROOT="${XYCAR_LAN_EXISTING_EMPTY_DESTINATION}" \
+  "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_manual_lan.sh" >/dev/null
+[[ -f \
+  "${XYCAR_LAN_EXISTING_EMPTY_DESTINATION}/${XYCAR_AI_LOCAL_DATASET_MARKER_NAME}" ]]
+
 mkdir -p "${XYCAR_TEST_ROOT}/artifact"
 printf 'schema_version: 1\nartifact_id: fixture\n' \
   >"${XYCAR_TEST_ROOT}/artifact/manifest.yaml"

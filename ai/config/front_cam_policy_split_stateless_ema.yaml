@@ -1,7 +1,18 @@
 schema_version: 2
-dataset_snapshot: stateless_ema_manual_review_required
+dataset_snapshot: stateless_manual_20260814_generation0_11_sessions_13249_samples
 splits:
-  # Add only reviewed source-qualified IDs, for example manual/<session-id>.
-  train: []
-  val: []
-  test: []
+  # Chronological session split. The one-sample 111008 session is excluded.
+  train:
+    - manual/20260814_110252_187_session
+    - manual/20260814_110339_629_session
+    - manual/20260814_110509_566_session
+    - manual/20260814_110525_487_session
+    - manual/20260814_110644_783_session
+    - manual/20260814_110752_810_session
+    - manual/20260814_110848_884_session
+  val:
+    - manual/20260814_110929_321_session
+    - manual/20260814_111046_600_session
+  test:
+    - manual/20260814_111142_290_session
+    - manual/20260814_111231_359_session

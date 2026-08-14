@@ -36,6 +36,85 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 
 ## Dataset 동기화와 외장 SSD 공유
 
+### Stateless manual 직결 LAN 미러
+
+`stateless_manual` 대용량 전송은 Windows와 활성 Jetson을 LAN cable로 직접 연결한
+전용 경로를 쓴다. 이 경로는 일반 Tailscale SSH와 섞거나 자동 fallback하지 않는다.
+고정 계약은 Windows `Ethernet`의 `192.168.50.1/24`, Jetson `enP8p1s0`의
+`192.168.50.2/24`이며 Jetson 유선 profile에는 gateway와 DNS를 넣지 않아 Wi-Fi
+기본 경로를 유지한다.
+
+최초 한 번 Windows 관리자 PowerShell에서 `Ethernet`의 기존 IPv4 주소를 정리하고
+고정 주소를 만든다. 이 작업은 해당 Ethernet adapter의 기존 IPv4 설정을 바꾸므로
+직결 cable에 사용하는 adapter인지 먼저 확인한다.
+
+```powershell
+$InterfaceAlias = 'Ethernet'
+Get-NetIPAddress -InterfaceAlias $InterfaceAlias -AddressFamily IPv4 |
+  Remove-NetIPAddress -Confirm:$false
+Set-NetIPInterface -InterfaceAlias $InterfaceAlias -AddressFamily IPv4 -Dhcp Disabled
+New-NetIPAddress -InterfaceAlias $InterfaceAlias `
+  -IPAddress 192.168.50.1 -PrefixLength 24
+Set-DnsClientServerAddress -InterfaceAlias $InterfaceAlias -ResetServerAddresses
+```
+
+Jetson에서는 다음 profile을 한 번 만든다. 기존 profile이 있으면 `add` 대신
+`modify` branch가 실행된다. `sudo`는 이 최초 설정과 profile 활성화에만 필요하다.
+
+```bash
+ssh xytron@xycar-gpu
+if nmcli -t -f NAME connection show | grep -Fxq xycar-direct-lan; then
+  sudo nmcli connection modify xycar-direct-lan \
+    connection.interface-name enP8p1s0 \
+    ipv4.method manual ipv4.addresses 192.168.50.2/24 \
+    ipv4.gateway '' ipv4.dns '' ipv4.never-default yes \
+    ipv6.method disabled connection.autoconnect yes
+else
+  sudo nmcli connection add type ethernet ifname enP8p1s0 \
+    con-name xycar-direct-lan \
+    ipv4.method manual ipv4.addresses 192.168.50.2/24 \
+    ipv4.never-default yes ipv6.method disabled \
+    connection.autoconnect yes
+fi
+sudo nmcli connection up xycar-direct-lan
+```
+
+설정 뒤 WSL의 MGW root에서 다음 명령을 실행한다. 인자 없는 기본 명령이 곧 실제
+미러 적용이다. 차량 source가 authoritative하므로 새 파일과 변경 파일을 복사하고,
+차량에서 없어진 파일·session 및 WSL에만 있는 파일은 복사가 성공한 뒤
+`--delete-delay`로 삭제한다. 차량 원본은 읽기만 한다.
+
+```bash
+cd /home/xytron/xycar_ws/apps/xycar_ws_mgw
+./scripts/ai/sync_stateless_manual_lan.sh
+```
+
+source는 `xytron@192.168.50.2:/home/xytron/xycar_data/stateless_manual`, destination은
+내부 ext4 `ai/datasets/stateless_manual`로 고정한다. 실행마다 Windows link,
+직결 route와 `192.168.50.2:22`, 검증된 `xycar-gpu` SSH host key, 원격 hostname과
+source 절대 경로를 검사한다. 처음 대상이 없거나 비어 있으면
+`.xycar-ai-local-dataset` marker를 만들며, 비어 있지 않은 unmarked 대상,
+symlink와 ext4가 아닌 대상은 거부한다. 중복 실행도 lock으로 거부한다.
+
+정상·`*_incomplete*`를 포함한 닫힌 session은 그대로 보존한다. 아직 쓰는 중인
+`_recording_*`, `.rsync-partial`, `*.partial`, `*.part`, `*.tmp`는 전송하지 않는다.
+빈 차량 source는 WSL 전체 삭제 사고를 막기 위해 거부하며 의도적인 빈 미러에만
+`--allow-empty-source`를 쓴다. 비교만 하거나 내용 checksum까지 확인하는 명령은
+다음과 같다.
+
+```bash
+./scripts/ai/sync_stateless_manual_lan.sh --dry-run
+./scripts/ai/sync_stateless_manual_lan.sh --checksum
+./scripts/ai/sync_stateless_manual_lan.sh --dry-run --checksum
+./scripts/ai/sync_stateless_manual_lan.sh --allow-empty-source
+./scripts/ai/sync_stateless_manual_lan.sh --help
+```
+
+JPEG에는 SSH/rsync 압축을 쓰지 않으며 진행률, 변경 항목, 통계와 Windows가 보고한
+link speed를 출력한다. 현재 협상 속도 `100 Mbps full-duplex`에서는 1.2 GB 최초
+복사가 대략 2분 안팎이다. split manifest는 자동 수정하지 않으므로 복사 후 완료
+session을 검토하고 `manual/<session-id>` train/validation 배치를 수동 승인한다.
+
 ### 기존 Windows C: snapshot 미러 (선택 사항)
 
 아래 T7·Windows 절은 기존 `datasets/teleop` rollback dataset을 유지할 때만
@@ -175,12 +254,15 @@ export XYCAR_AI_SHARED_DATASET_ROOT=/mnt/e/xycar-ai-dataset
 ./scripts/ai/pull_dataset_ssd.sh --apply
 ```
 
-차량 sync와 marker 기반 SSD publish/pull은 `_recording_*`, rsync partial과 partial 파일을
+일반 Tailscale 차량 sync와 marker 기반 SSD publish/pull은 `_recording_*`, rsync partial과 partial 파일을
 제외하고 새 파일과 변경 파일만 복사한다. 이 두 경로는 destination-only 파일을
 보존하며 `--delete`를 사용하지 않는다. SSD marker가 없거나 경로가 mount된 별도
 filesystem이 아니면 작업을 거부한다. Windows→WSL 명령만 앞 절의 완전 미러
 계약을 사용한다. `D:\teleop` direct 모드는 marker 기반 공유 동작을 변경하지
-않으며 삭제는 `--direct --mirror --apply`에서만 수행한다.
+않으며 삭제는 `--direct --mirror --apply`에서만 수행한다. 별도
+`sync_stateless_manual_lan.sh`만 차량 manual source의 exact mirror이므로 기본
+실행에서 WSL destination-only 데이터를 삭제하며 이 일반 no-delete 계약을 바꾸지
+않는다.
 
 ## Front-camera policy 학습
 
@@ -367,12 +449,21 @@ datasets/stateless_guided  # control_mode=guided_policy, curriculum.generation �
 `vit_small_patch16_224`, `task_tokens`, history 0, 224x224 road warp와 raw instantaneous
 angle(`train_angle_mean_window: 1`)을 강제하는 schema 3 설정이다. AR 학습 설정과
 schema v2/v3 runtime은 rollback용으로 남아 있지만 새 데이터에는 사용하지 않는다.
+validation selection score가 5 epochs 연속 개선되지 않으면 조기 종료하며, 다음
+generation에서도 이 patience를 유지한다.
 
 split은 `config/front_cam_policy_split_stateless_ema.yaml`을 사람이 검토해 갱신한다.
 ID는 반드시 `manual/<session-id>` 또는 `guided/<session-id>`로 적는다. 서로 다른
 root에 같은 session directory 이름이 있어도 source-qualified ID가 다르므로
 충돌하지 않는다. guided session에 generation이 없거나 train split에
 `current_generation` sample이 없거나 더 미래 generation이 있으면 검증을 거부한다.
+
+현재 generation 0 snapshot은 2026-08-14 manual 12개 중 1 sample뿐인 session을
+제외한 11개, 총 13,249 samples다. 시간상 인접한 frame이 split 사이에 직접 섞이지
+않도록 session timestamp 순서로 train 7개/8,589, validation 2개/2,126, test
+2개/2,534 samples를 배치했다. 이 snapshot의 train speed는 전부 15이므로 첫
+모델의 speed head는 사실상 15 유지 baseline이며, 실제 증감속 학습은 generation 1
+guided correction부터 시작한다.
 
 train epoch의 세대별 총 sampling mass는 다음과 같고 같은 세대 안에서는 frame을
 균등하게 뽑는다. raw session은 삭제하지 않으며 과거 영향은 sampling mass로만
@@ -424,17 +515,13 @@ export는 schema v1을 명시적으로 요구한다. stateless가 아닌 checkpo
   --require-schema-version 1
 ```
 
-차량 두 root를 Laptop으로 가져올 때는 하나의 directory로 합치지 않고 같은 sync
-script를 환경변수를 바꿔 두 번 실행한다. 각각 dry-run을 검토한 뒤 `--apply`한다.
+차량 두 root를 Laptop으로 가져올 때는 하나의 directory로 합치지 않는다. manual은
+직결 LAN exact mirror를 쓰고, guided는 기존 Tailscale no-delete script를 먼저
+dry-run한 뒤 `--apply`한다.
 
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw
-XYCAR_AI_VEHICLE_DATASET_ROOT=/home/xytron/xycar_data/stateless_manual \
-XYCAR_AI_LOCAL_DATASET_ROOT="$PWD/ai/datasets/stateless_manual" \
-  ./scripts/ai/sync_dataset.sh
-XYCAR_AI_VEHICLE_DATASET_ROOT=/home/xytron/xycar_data/stateless_manual \
-XYCAR_AI_LOCAL_DATASET_ROOT="$PWD/ai/datasets/stateless_manual" \
-  ./scripts/ai/sync_dataset.sh --apply
+./scripts/ai/sync_stateless_manual_lan.sh
 
 XYCAR_AI_VEHICLE_DATASET_ROOT=/home/xytron/xycar_data/stateless_guided \
 XYCAR_AI_LOCAL_DATASET_ROOT="$PWD/ai/datasets/stateless_guided" \
