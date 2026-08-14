@@ -76,8 +76,10 @@ Motor bridge는 ROS 1 subscriber만 있을 때 type을 추론하지 못하는 dy
 parameter bridge를 사용하고, host와 container 사이 Fast DDS data path는
 `FASTDDS_BUILTIN_TRANSPORTS=UDPv4`로 고정한다. Fast DDS가 host ROS 2 process와
 bridge container를 같은 machine의 shared-memory participant로 판단하므로 bridge는
-`--ipc host`를 사용한다. 이 설정이 없으면 discovery endpoint는 보이지만 ROS 2
-payload가 ROS 1으로 전달되지 않는다.
+`--ipc host`와 wrapper를 실행한 host 사용자의 UID/GID를 함께 사용한다. IPC가
+분리되거나 bridge를 root로 실행해 shared-memory port가 `root:root 0644`가 되면
+discovery endpoint는 보여도 host 사용자의 ROS 2 payload가 ROS 1으로 전달되지
+않는다.
 
 ## 실차 실행
 

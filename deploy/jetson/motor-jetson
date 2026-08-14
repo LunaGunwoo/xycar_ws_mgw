@@ -43,6 +43,8 @@ for container in "${MOTOR_CONTAINER}" "${BRIDGE_CONTAINER}"; do
 done
 
 dialout_gid=$(getent group dialout | cut -d: -f3)
+bridge_uid=$(id -u)
+bridge_gid=$(id -g)
 docker run --detach \
     --name "${MOTOR_CONTAINER}" \
     --network host \
@@ -72,6 +74,8 @@ docker run --detach \
     --name "${BRIDGE_CONTAINER}" \
     --network host \
     --ipc host \
+    --user "${bridge_uid}:${bridge_gid}" \
+    --env HOME=/tmp \
     --env ROS_MASTER_URI=http://127.0.0.1:11311 \
     --env ROS_DOMAIN_ID=7 \
     --env ROS_LOCALHOST_ONLY=1 \
