@@ -211,7 +211,7 @@ def test_stateless_external_collection_templates_and_launch_contract():
     ).read_text(encoding='utf-8')
 
     assert profile['recording_root_dir'].endswith('/stateless_guided')
-    assert profile['speed_cap'] == 9.0
+    assert profile['speed_cap'] == 30.0
     assert profile['rt_speed_increment'] == 2.0
     assert profile['lt_speed_decrement'] == 5.0
     assert profile['curriculum_generation'] == 1

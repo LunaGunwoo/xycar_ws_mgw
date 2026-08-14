@@ -68,7 +68,12 @@ Laptop의 MGW root에서 수행한다.
 
 ```text
 executed_angle = clamp(model_angle + signed_left_stick * 200, -100, 100)
-executed_speed = clamp(model_speed + RT * 2 - LT * 5, 0, speed_cap)
+executed_speed = clamp(
+  model_speed
+  + RT_depth * rt_speed_increment
+  - LT_depth * lt_speed_decrement,
+  0,
+  speed_cap)
 ```
 
 기본 Remote Gamepad에서는 조향 부호를 반전한다. 값은 모두 hold 동안만 적용되고
@@ -76,9 +81,12 @@ executed_speed = clamp(model_speed + RT * 2 - LT * 5, 0, speed_cap)
 `executed_angle/executed_speed`이며 model prediction, stick/trigger depth, residual,
 사람 개입 여부와 inference latency도 함께 저장한다. angle/speed는 공통 ViT
 backbone과 별도 출력 head를 공유하므로 한 번의 수집과 학습에서 동시에 다룬다.
-첫 guided round는 generation 1, `speed_cap=9`, RT `+2`, LT `-5`로 시작한다.
-다음 cap은 이전 라운드의 실차 결과를 검토한 뒤 명시적으로만 바꾸며 자동으로
-증가하지 않는다.
+새 stateless curriculum의 모든 guided round는 `speed_cap=30`을 사용한다. 이 값은
+목표 속도나 최소 속도가 아니라 합성 결과에 대한 hard ceiling이다. 세대별 실제
+속도 분포는 parent model의 speed와 YAML의 RT/LT 보정량으로 점진적으로 넓히며,
+사용자 지시 없이 cap을 30보다 낮추지 않는다. 예를 들어 speed 15 Base에 RT/LT
+`+5/-5`를 적용하면 첫 round의 실행 범위는 대체로 10~20이지만 30까지는 계속
+허용된다.
 
 - Y: DRIVE ON/OFF. 시작은 OFF이며 stick과 trigger를 중립으로 놓고 release 후
   눌러야 ON이 된다.
@@ -114,7 +122,7 @@ export ROS_NAMESPACE=xycar
 ros2 launch xycar_ai_drive jetson_guided_collection.launch.py \
   params_file:=/home/xytron/.config/xycar/guided_stateless_collection.yaml \
   artifact_id:=<schema-v1-stateless-artifact-id> \
-  curriculum_generation:=1 speed_cap:=9.0 \
+  curriculum_generation:=1 speed_cap:=30.0 \
   use_camera:=true use_gamepad:=true allow_motion:=true
 ```
 
@@ -129,7 +137,7 @@ CUDA container 없이 host CPU inference를 점검할 때의 일반 launch는 �
 ros2 launch xycar_ai_drive guided_policy_collection.launch.py \
   params_file:=/home/xytron/.config/xycar/guided_stateless_collection.yaml \
   artifact_id:=<schema-v1-stateless-artifact-id> \
-  curriculum_generation:=1 speed_cap:=9.0 allow_motion:=false \
+  curriculum_generation:=1 speed_cap:=30.0 allow_motion:=false \
   inference_backend:=local inference_device:=cpu
 ```
 
@@ -141,7 +149,7 @@ ros2 run xycar_ai_drive guided_policy_collector --ros-args \
   --params-file /home/xytron/.config/xycar/guided_stateless_collection.yaml \
   -p collection_profile_path:=/home/xytron/.config/xycar/guided_stateless_collection.yaml \
   -p artifact_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/<schema-v1-artifact-id> \
-  -p curriculum_generation:=1 -p speed_cap:=9.0 -p allow_motion:=false
+  -p curriculum_generation:=1 -p speed_cap:=30.0 -p allow_motion:=false
 ```
 
 기존 artifact의 `full_frame_bicubic_resize`와 새

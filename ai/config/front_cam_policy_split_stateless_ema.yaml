@@ -1,18 +1,29 @@
 schema_version: 2
-dataset_snapshot: stateless_manual_20260814_generation0_11_sessions_13249_samples
+dataset_snapshot: stateless_manual_rebuilt_20260814_generation0_21_sessions_17967_samples
 splits:
-  # Chronological session split. The one-sample 111008 session is excluded.
+  # Session-disjoint chronological split of the rebuilt manual Base dataset.
+  # No previous manual or guided session is included.
   train:
-    - manual/20260814_110252_187_session
-    - manual/20260814_110339_629_session
-    - manual/20260814_110509_566_session
-    - manual/20260814_110525_487_session
-    - manual/20260814_110644_783_session
-    - manual/20260814_110752_810_session
-    - manual/20260814_110848_884_session
+    - manual/20260814_143421_593_session
+    - manual/20260814_143456_353_session
+    - manual/20260814_143529_479_session
+    - manual/20260814_143616_923_session
+    - manual/20260814_143637_766_session
+    - manual/20260814_143913_676_session
+    - manual/20260814_144023_694_session
+    - manual/20260814_144123_010_session
+    - manual/20260814_144218_880_session
+    - manual/20260814_144248_511_session
+    - manual/20260814_144308_183_session
+    - manual/20260814_144329_572_session
+    - manual/20260814_144656_955_session
   val:
-    - manual/20260814_110929_321_session
-    - manual/20260814_111046_600_session
+    - manual/20260814_144751_162_session
+    - manual/20260814_145026_519_session
+    - manual/20260814_145039_866_session
+    - manual/20260814_145157_807_session
   test:
-    - manual/20260814_111142_290_session
-    - manual/20260814_111231_359_session
+    - manual/20260814_145227_082_session
+    - manual/20260814_145312_687_session
+    - manual/20260814_145439_956_session
+    - manual/20260814_145610_816_session

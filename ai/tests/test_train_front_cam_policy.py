@@ -142,7 +142,7 @@ def test_stateless_ema_config_uses_two_qualified_sources_and_raw_angle(
         ("guided", None),
     ]
     assert config.data.sources[1].require_curriculum_generation
-    assert config.output.run_name == "vit_small_stateless_ema_generation0"
+    assert config.output.run_name == "vit_small_stateless_base_rebuilt_generation0"
     validate_incremental_initialization(
         config, initialize_from="", resume=""
     )
@@ -216,6 +216,8 @@ def test_stateless_two_root_config_validate_only_with_synthetic_sessions(
     payload["data"]["sources"]["manual"]["root"] = str(manual_root)
     payload["data"]["sources"]["guided"]["root"] = str(guided_root)
     payload["data"]["split_manifest"] = str(split_path)
+    payload["data"]["current_generation"] = 0
+    payload["output"]["run_name"] = "vit_small_stateless_ema_generation0"
     payload["preprocessing"]["road_warp_config"] = str(
         project_root / "config" / "front_cam_policy_preprocess.yaml"
     )
