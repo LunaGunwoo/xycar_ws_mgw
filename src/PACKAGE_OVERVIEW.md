@@ -6,17 +6,18 @@
 
 ### `xycar_data`
 
-- camera-first Teleop recorder: `ros2 run xycar_data teleop_recorder`
+- Gamepad Teleop node: `ros2 run xycar_data gamepad_teleop`
+- Gamepad·camera 통합 launch: `ros2 launch xycar_data gamepad_teleop.launch.py`
 - 센서 전용 launch: `ros2 launch xycar_data teleop_sensors.launch.py`
-- 설정: `xycar_data/config/teleop_recorder.yaml`
+- 설정: `xycar_data/config/gamepad_teleop.yaml`,
+  `xycar_data/config/gamepad_stateless_manual.yaml`
 
-터미널 방향키로 `Float32MultiArray([angle, speed])` motor command를 발행하고,
-`R`/`W` 세션 사이의 유효 방향키 입력에서 들어온 **모든 camera frame**을 PNG와
-연속형 angle/speed label로 저장한다. LiDAR는 선택적 NPZ 보조 정보다. LiDAR가
-없어도 camera sample은 계속 저장되며 `lidar_valid=false`가 기록된다. camera stale,
-경쟁 motor publisher, motor subscriber 부재, writer 오류에서는 stop-first로
-동작한다. TTY recorder와 sensor launch 모두 실차 명령이므로 매 실행 전 승인이
-필요하다. 실제 SSH 실행 방법은 `xycar_data/README.md`를 기준으로 한다.
+왼쪽 stick과 LT/RT를 `Float32MultiArray([angle, speed])` motor command로 변환한다.
+A로 양수 속도 session 녹화를 시작하고 B 또는 speed 0 이하에서 실제 발행값과
+camera frame을 저장한다. Joy stale, 경쟁 motor publisher, motor subscriber 부재와
+writer 오류에서는 stop-first로 동작한다. Gamepad launch와 sensor launch는 실제
+장치를 열 수 있으므로 매 실행 전 승인이 필요하다. 실제 SSH 실행 방법은
+`xycar_data/README.md`를 기준으로 한다.
 
 ### `track_drive`
 

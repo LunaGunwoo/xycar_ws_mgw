@@ -1,8 +1,7 @@
 # xycar_data
 
-`xycar_data`는 게임패드·터미널로 Xycar를 조종하고 카메라 기반
-behavior-cloning 모델 학습용 데이터를 수집하는 패키지다. 두 Teleop 모두
-카메라 frame을 학습 입력으로 사용하고 각 PNG에는 그 순간 실제 발행한 연속형
+`xycar_data`는 게임패드로 Xycar를 조종하고 카메라 기반 behavior-cloning 모델
+학습용 데이터를 수집하는 패키지다. 카메라 frame마다 그 순간 실제 발행한 연속형
 `angle`, `speed`를 label로 저장한다. 게임패드 주행은 카메라가 없어도 유지되며
 녹화 중 누락된 camera frame만 건너뛴다.
 
@@ -27,9 +26,6 @@ export ROS_DOMAIN_ID=7
 export ROS_NAMESPACE=xycar
 export ROS_LOCALHOST_ONLY=1
 ```
-
-`teleop_recorder`는 GUI나 창을 만들지 않는 CLI 전용 node다. 키보드 TTY가
-필요하므로 `ros2 launch`로 실행하지 않고 SSH 연결에도 `-t`를 유지한다.
 
 ## Remote Gamepad Teleop
 
@@ -149,9 +145,7 @@ ros2 launch xycar_data teleop_sensors.launch.py use_lidar:=false
 ```
 
 이미 `/image_raw`와 `/scan`이 다른 승인된 node에서 publish 중이면 이 launch를
-중복 실행하지 않는다. `/scan`은 없어도 recorder가 동작하며 해당 sample은
-`lidar_valid=false`로 저장된다. Terminal `teleop_recorder`는 필요한 headless
-camera를 자체 준비하므로 이 sensor launch를 먼저 실행할 필요가 없다.
+중복 실행하지 않는다.
 
 기본 Gamepad launch는 camera를 직접 포함하므로 별도의 sensor launch가 필요하지
 않다. `use_camera:=false`로 실행했다면 `/image_raw`를 기존 camera node에서 받아야
@@ -159,90 +153,12 @@ camera를 자체 준비하므로 이 sensor launch를 먼저 실행할 필요가
 구간의 frame만 저장되지 않는다. camera가 복구되면 같은 세션에서 새 frame 저장을
 계속한다.
 
-## Terminal Teleop과 수집
-
-SSH TTY에서 environment를 적용한 뒤 실행한다. 이 한 명령은 필요하면 camera
-driver를 시작하고 `/xycar_motor`에 `Float32MultiArray([angle, speed])`를
-publish할 수 있다. 따라서 camera 장치 접근과 motor 명령을 합친 실차 실행으로
-간주하며 매 실행 직전에 두 동작 모두에 대한 승인이 필요하다.
-
-```bash
-ros2 run xycar_data teleop_recorder
-```
-
-recorder는 키 입력을 받기 전에 ROS graph를 1초간 확인한다.
-
-- `/image_raw` publisher와 해석 가능한 최신 frame이 있으면 기존 headless
-  camera를 재사용한다.
-- publisher가 없으면 GUI 없는
-  `ros2 launch xycar_cam xycar_cam.launch.py`를 자동 시작하고 최대 10초간
-  해석 가능한 frame을 기다린다.
-- publisher는 있지만 frame이 없거나 decode할 수 없으면 camera를 중복 시작하지
-  않고 원인을 출력한 뒤 종료한다.
-- `/examine_image`가 발견되면 GUI viewer가 실행 중인 것으로 보고 시작을
-  거부한다. `xycar_cam_viewer.launch.py`를 종료한 뒤 recorder를 다시 실행한다.
-
-recorder가 직접 시작한 camera만 종료 시 SIGINT, SIGTERM 순서로 정리한다.
-사용자가 따로 시작한 headless camera는 재사용만 하고 종료하지 않는다. 현재
-차량에서 확인한 `/image_raw` 계약은 `sensor_msgs/Image`, `rgb8`, 약 30 Hz이며
-recorder는 이를 OpenCV BGR frame으로 변환한다.
-
-다른 YAML을 시험할 때는 ROS parameter로 경로를 바꾼다.
-
-```bash
-ros2 run xycar_data teleop_recorder --ros-args \
-  -p tuning_file:=/home/xytron/xycar_ws_mgw/src/xycar_data/config/teleop_recorder.yaml
-```
-
-기본 키와 명령은 다음과 같다.
-
-| 키 | `[angle, speed]` | 동작 |
-| --- | --- | --- |
-| W | speed `8` | 현재 angle을 유지하고 전진 속도 즉시 적용 |
-| Shift+W | speed `12` | 전진 속도 `8`의 1.5배를 즉시 적용 |
-| S, Shift+S | speed `-8` | 현재 angle을 유지하고 후진 속도 즉시 적용 |
-| A | angle `-10`, 최소 `-100` | 현재 speed를 유지하고 좌측 조향 누적 |
-| D | angle `+10`, 최대 `100` | 현재 speed를 유지하고 우측 조향 누적 |
-| E | — | 새 기록 세션 시작 |
-| Q | 현재 명령 유지 | 현재 세션 저장·마감 |
-| Space | `[0, 0]` | 세션을 유지한 즉시 정지 |
-| Esc, Ctrl+C | `[0, 0]` | 정지 명령 5회 후 종료 |
-
-W/S에는 증분이 없으며 한 번의 입력으로 각각 `8`과 `-8`을 설정한다. CLI/SSH
-TTY는 Shift 단독 event를 전달하지 않으므로 대문자 `W`를 Shift+W로 해석해
-`12`를 설정한다. 대문자·소문자 S는 모두 `-8`이며 후진 boost는 없다.
-
-A/D는 OS key-repeat으로 누적 조정된다. 기본 angle step `10`은 10회 입력으로
-중립에서 `±100`에 도달하며, terminal repeat가 30 Hz이면 repeat 시작 뒤 약
-0.3초가 걸린다. 실제 시간은 OS/SSH key-repeat 설정에 따라 달라진다. 모든
-WASD 입력이 0.25초 끊기면 angle과 speed 상태를 모두 초기화하고 즉시 `[0, 0]`을
-발행한다. W로 정한 speed는 A/D가 계속 입력되는 동안 유지된다. 방향키는 주행
-입력으로 사용하지 않는다.
-
-기록 세션이 없어도 수동 주행은 가능하지만, `E` 이후 speed가 0이 아닌 유효
-WASD 명령과 최신 camera frame이 동시에 있을 때만 파일을 저장한다. speed가
-0인 조향-only frame과 입력 timeout 상태는 저장하지 않는다. `Q`는 세션만
-저장·마감하며 현재 차량 명령을 별도로 정지시키지 않는다.
-
-시작 전과 주행 중에는 다음 안전 gate가 적용된다.
-
-- 카메라가 0.25초 이상 stale이면 즉시 정지하고 새 WASD 입력이 필요하다.
-- recorder가 자동 시작한 camera process가 종료되면 즉시 `[0, 0]`으로 정지하고
-  활성 세션을 incomplete로 마감한 뒤 오류 종료한다.
-- 다른 `/xycar_motor` publisher가 있으면 주행을 거부한다. 주행 중 발견되면
-  정지 후 오류 종료한다.
-- motor subscriber가 없으면 command와 sample 저장을 거부한다.
-- LiDAR는 선택적이다. 최신 scan이 없으면 경고만 남기고 camera sample을 저장한다.
-- writer queue 포화, 디스크 여유 부족, 이미지·NPZ 쓰기 오류는 정지와
-  `YYYYMMDD_HHMMSS_mmm_incomplete` 세션 보존으로 처리한다.
-
 ## 데이터 형식
 
 새 gamepad stateless 저장 위치는
-`/home/xytron/xycar_data/stateless_manual`이다. 터미널과 기존 호환 profile의
-기본값 `/home/xytron/xycar_data/teleop`은 각각 `config/teleop_recorder.yaml`,
-`config/gamepad_teleop.yaml`에서 바꿀 수 있다. 첫 유효 sample 전에는
-directory를 만들지 않으므로 빈 세션은 남지 않는다.
+`/home/xytron/xycar_data/stateless_manual`이다. 기존 호환 profile의 기본값
+`/home/xytron/xycar_data/teleop`은 `config/gamepad_teleop.yaml`에서 바꿀 수 있다.
+첫 유효 sample 전에는 directory를 만들지 않으므로 빈 세션은 남지 않는다.
 
 ```text
 YYYYMMDD_HHMMSS_mmm_session/
@@ -255,16 +171,16 @@ YYYYMMDD_HHMMSS_mmm_session/
 `samples.csv`의 각 행은 하나의 camera frame이다. `image`, `angle`, `speed`,
 `input_key`, camera stamp/수신 시각과 `lidar_valid`를 기본 학습 label로 사용한다.
 실제 이미지 상대 경로와 확장자는 `image` 열이 기준이다. Gamepad 기본은 JPEG
-품질 95이고 terminal recorder와 과거 session의 PNG도 같은 CSV 계약으로 읽는다.
+품질 95이고 과거 PNG session도 같은 CSV 계약으로 읽는다.
 유효한 LiDAR가 있으면 `lidar` 경로와 scan timestamp·skew도 기록하며, 하나의
 LiDAR scan이 여러 camera frame에 대응할 때 NPZ 파일을 재사용한다. NPZ에는
 전체 `ranges`, `intensities`, LaserScan geometry·timing·frame metadata가 담긴다.
-Gamepad sample은 `input_key=gamepad`, `lidar_valid=false`로 기록되고
-`metadata.yaml`의 `control_mode=gamepad`로 터미널 세션과 구분한다.
+Gamepad sample은 `input_key=gamepad`, `lidar_valid=false`와
+`metadata.yaml`의 `control_mode=gamepad`로 기록된다.
 
-정상 `Q` 또는 종료는 임시 `_recording_...` directory를
-`YYYYMMDD_HHMMSS_mmm_session`으로
-atomic rename한다. 쓰기 실패나 경쟁 motor publisher로 중단되면
+정상 B 종료 또는 speed 0 이하 종료는 임시 `_recording_...` directory를
+`YYYYMMDD_HHMMSS_mmm_session`으로 atomic rename한다. 쓰기 실패나 경쟁 motor
+publisher로 중단되면
 `YYYYMMDD_HHMMSS_mmm_incomplete`로 남고 `metadata.yaml`의 `stop_reason`에서
 원인을 확인할 수 있다. Gamepad B 종료는 `stop_reason=b_button`, speed 0 이하 종료는
 `stop_reason=speed_nonpositive`와 실제 `emergency_discard_count`를 남긴다.
@@ -273,23 +189,18 @@ atomic rename한다. 쓰기 실패나 경쟁 motor publisher로 중단되면
 ## 튜닝
 
 새 수집은 외부 `~/.config/xycar/gamepad_stateless_manual.yaml`을 조정한다.
-tracked seed는 `config/gamepad_stateless_manual.yaml`이다. 기존
-`config/teleop_recorder.yaml`과 `config/gamepad_teleop.yaml`도 다음 계약을
-같은 방식으로 분리한다.
+tracked seed는 `config/gamepad_stateless_manual.yaml`이다. 기존 rollback profile은
+`config/gamepad_teleop.yaml`에 둔다.
 
-- camera, LiDAR, motor topic
-- WASD angle step, 즉시 speed와 boost, 20 Hz publish rate, key timeout,
-  stop 반복 횟수
+- camera, Joy와 motor topic
 - gamepad axis·button mapping, trigger 부호 profile, 중립 재활성 임계값과
   출력 한계
-- 필수 camera freshness와 선택 LiDAR 연결 허용 시간
-- headless camera 자동 시작 여부와 graph discovery, frame startup, process
-  shutdown timeout
+- Joy freshness, graph 확인 주기, 20 Hz publish rate와 stop 반복 횟수
 - dataset root, emergency tail 15 frame, `jpeg|png` 이미지 형식, JPEG 품질,
   PNG compression, writer queue, 최소 디스크 여유
 
 YAML의 빈 topic, 잘못된 speed/steering 부호·범위, `NaN`·`Inf` 수치, 음수
 timeout, queue 크기, 이미지 형식, JPEG 품질과 PNG compression 범위 오류는 node
 시작 시 거부된다.
-실제 차에서는 raised-car 상태에서 A/D 조향 부호와 후진 부호를 먼저
+실제 차에서는 raised-car 상태에서 왼쪽 stick 조향 부호와 후진 부호를 먼저
 확인한 뒤 값을 조정한다.

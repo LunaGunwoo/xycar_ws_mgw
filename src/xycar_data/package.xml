@@ -3,7 +3,7 @@
 <package format="3">
   <name>xycar_data</name>
   <version>0.1.0</version>
-  <description>Gamepad/terminal teleop and camera-first dataset tools for Xycar.</description>
+  <description>Gamepad teleop and camera-first dataset tools for Xycar.</description>
   <maintainer email="moongunwoo7019@naver.com">Gunwoo Moon</maintainer>
   <license>Apache-2.0</license>
 
