@@ -36,6 +36,8 @@ FORCE GC300 WIRELESS용 `xpad` module을 빌드한다. upstream Linux 5.15.148
 source checksum을 검증하고 MSI vendor alias만 백포트하며, kernel이나 L4T
 package를 교체하지 않는다. module은 `/lib/modules/.../updates/xycar/`에 설치되고
 재부팅 때 자동 load된다. 검증된 kernel release와 다르면 설치를 중단한다.
+같은 script가 설치하는 camera udev 규칙은 USB 장치의 V4L2 index 0 capture node만
+`/dev/videoCAM`에 연결하며 index 1 보조 node는 제외한다.
 
 GC300이 연결된 상태에서 `/dev/input/js0`와 ROS Joy 메시지는 다음처럼 확인한다.
 실제 USB gamepad 접근이므로 하네스의 매 실행 전 승인 규칙을 적용한다.

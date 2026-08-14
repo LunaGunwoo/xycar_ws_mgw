@@ -30,6 +30,11 @@ YUYV 640x480, 30 Hz를 요청하고 `rgb8` `/image_raw`를 발행한다. Jetson�
 FFmpeg를 사용하지 않는 V4L2 변환 경로를 기준으로 한다. AI와 recorder가 사용하는
 raw topic과 image 계약은 바뀌지 않는다.
 
+이 USB camera는 같은 물리 장치에서 V4L2 index 0 capture node와 index 1 보조
+node를 함께 만든다. Jetson udev 규칙은 `ATTR{index}=="0"`인 capture node만
+`/dev/videoCAM`으로 연결한다. 별칭이 index 1을 가리키면 node endpoint는 생겨도
+`Failed mapping device memory`와 함께 `/image_raw` frame이 발행되지 않는다.
+
 ## Camera viewer
 
 ```bash
