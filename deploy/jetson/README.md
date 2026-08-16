@@ -50,19 +50,21 @@ ros2 run joy game_controller_node --ros-args \
 ROS_DOMAIN_ID=7 ros2 topic echo /joy
 ```
 
-`install_runtime.sh`는 기존 `~/.local/bin/motor`와
-`~/.local/bin/xycar-ai-gpu`, `~/xycar_ws/etc/gui-shell/x27.sh`를 timestamped
+`install_runtime.sh`는 기존 `~/.local/bin/motor`,
+`~/.local/bin/xycar-ai-gpu`, `~/.local/bin/xycar-ai-competition`과
+`~/xycar_ws/etc/gui-shell/x27.sh`를 timestamped
 migration backup에 보존한 뒤, Desktop `x27.desktop`이 Jetson motor wrapper를
 절대 경로로 실행하도록 설치한다. GPU wrapper와 image lock은
 `~/.local/lib/xycar-ai-gpu/`에 함께 복사하므로 source checkout 위치나 이후의
 부분 빌드에 의존하지 않는다. motor wrapper와 lock도 같은 이유로
 `~/.local/lib/xycar-motor/`에 복사한다.
-stateless 수집 profile 두 개는 `~/.config/xycar/`에 파일이 없을 때만 설치한다.
+수집 profile 세 개는 `~/.config/xycar/`에 파일이 없을 때만 설치한다.
 차량에서 튜닝한 기존 profile은 이후 재설치에서도 덮어쓰지 않는다.
 
 ```text
 ~/.config/xycar/gamepad_stateless_manual.yaml
 ~/.config/xycar/guided_stateless_collection.yaml
+~/.config/xycar/competition_mission_collection.yaml
 ```
 
 학습용 `ai/uv.lock`은 4090 Laptop CUDA 환경이므로 Jetson에서 `uv sync`하지 않는다.
@@ -118,3 +120,36 @@ GPU server의 network-none, versioned artifact와 Unix socket 안전 경계는 �
 GPU server는 network와 hardware device 없이 실행되고, host Humble node와 권한
 `0600` Unix socket으로만 통신한다. server 단절·timeout·artifact/device mismatch는
 CPU fallback 없이 motion OFF와 `[0,0]`으로 처리한다.
+
+## Competition bundle wrapper
+
+`xycar-ai-competition`은 Base, signal과 shortcut model을 하나의 CUDA container에
+모두 preload/warm-up한 뒤 competition host launch를 시작한다. 기본 mode는 motor
+publisher가 없는 `signal_shadow`다.
+
+```bash
+COMPETITION_BUNDLE_ID=<competition-bundle-id> \
+COMPETITION_RUN_MODE=signal_shadow \
+xycar-ai-competition
+```
+
+camera device를 여는 shadow 실행도 매번 승인이 필요하다. 아래 moving mode는
+camera, gamepad와 motor publisher를 시작하므로 별도 `motor` 실행을 포함해 각각
+실행 직전 승인을 다시 받고 바퀴 지지/안전 공간, 전원 차단, A와 `Ctrl+C` 정지,
+경쟁 publisher 부재를 확인한다.
+
+```bash
+COMPETITION_BUNDLE_ID=<competition-bundle-id> \
+COMPETITION_RUN_MODE=shortcut_only ALLOW_MOTION=true \
+xycar-ai-competition
+
+COMPETITION_BUNDLE_ID=<competition-bundle-id> \
+COMPETITION_RUN_MODE=combined ALLOW_MOTION=true \
+xycar-ai-competition
+```
+
+moving mode는 DRIVE OFF로 시작하고 A release 뒤 rising edge로만 활성화된다.
+`shortcut_only`는 persistent handoff 확인 뒤 자동 정지한다. wrapper는 GPU
+container에 network나 hardware device를 주지 않고 artifact root를 read-only로
+mount한다. competition socket은 기존 stateless policy socket과 분리된
+`/run/user/<uid>/xycar-ai/competition.sock`을 사용한다.

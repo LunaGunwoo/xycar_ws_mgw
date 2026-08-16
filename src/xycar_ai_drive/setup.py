@@ -46,6 +46,18 @@ setup(
                 'guided_policy_collector = '
                 'xycar_ai_drive.guided_policy_collector:main'
             ),
+            (
+                'competition_policy = '
+                'xycar_ai_drive.competition_policy_node:main'
+            ),
+            (
+                'competition_policy_gpu_server = '
+                'xycar_ai_drive.competition_ipc:main'
+            ),
+            (
+                'competition_replay = '
+                'xycar_ai_drive.competition_replay:main'
+            ),
         ],
     },
 )

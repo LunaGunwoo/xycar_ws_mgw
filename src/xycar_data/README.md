@@ -204,3 +204,64 @@ timeout, queue 크기, 이미지 형식, JPEG 품질과 PNG compression 범위 �
 시작 시 거부된다.
 실제 차에서는 raised-car 상태에서 왼쪽 stick 조향 부호와 후진 부호를 먼저
 확인한 뒤 값을 조정한다.
+
+## 대회 mission sequence 수집
+
+`mission_sequence_collection.launch.py`는 신호등 정지·재출발과 지름길 전체를
+한 session으로 보존하는 별도 수집 mode다. 기존 stateless 수집 동작은 그대로
+유지한다. mission mode에서는 A rising edge에 즉시 시작하고 speed가 0 또는
+음수가 되어도 자동 종료하지 않으며 B를 눌렀을 때만 정상 저장한다.
+
+아래 launch는 camera, gamepad와 `/xycar_motor` publisher를 시작한다. 매 실행
+직전 camera launch와 motor publisher 각각 사용자 승인을 받고 바퀴 지지/안전
+공간, 전원 차단, `Ctrl+C`, 경쟁 publisher 부재를 확인한다. motor bridge는 별도
+terminal에서 승인 후 실행한다.
+
+```bash
+ssh xytron@xycar-gpu
+cd /home/xytron/xycar_ws_mgw
+source /opt/ros/humble/setup.bash
+source /home/xytron/xycar_ws_mgw/install/setup.bash
+export ROS_DOMAIN_ID=7
+export ROS_NAMESPACE=xycar
+
+ros2 launch xycar_data mission_sequence_collection.launch.py \
+  params_file:=/home/xytron/.config/xycar/competition_mission_collection.yaml \
+  capture_kind:=signal
+```
+
+완전한 지름길 시범은 별도 실행에서 다음처럼 선택한다.
+
+```bash
+ros2 launch xycar_data mission_sequence_collection.launch.py \
+  params_file:=/home/xytron/.config/xycar/competition_mission_collection.yaml \
+  capture_kind:=shortcut
+```
+
+camera와 Joy가 이미 승인된 별도 node에서 발행 중일 때 collector만 직접 실행할
+수 있다. 이 명령도 motor publisher를 만들므로 실행 직전 별도 승인이 필요하다.
+
+```bash
+ros2 run xycar_data mission_sequence_collector --ros-args \
+  --params-file /home/xytron/.config/xycar/competition_mission_collection.yaml \
+  -p capture_kind:=signal \
+  -p collection_profile_path:=/home/xytron/.config/xycar/competition_mission_collection.yaml
+```
+
+- A를 놓았다가 한 번 누르면 현재 speed와 관계없이 녹화가 시작된다.
+- RT/LT와 왼쪽 stick으로 계속 사람이 운전한다.
+- 빨간불에서 RT를 놓아도 `speed=0` frame이 같은 session에 남는다.
+- B는 session을 저장하지만 vehicle을 자동 정지하지 않는다.
+- B 저장 뒤 trigger 중립, launch `Ctrl+C`, motor `Ctrl+C` 순서로 종료한다.
+
+기본 저장 root는 `/home/xytron/xycar_data/competition_manual`이다. 정상 metadata는
+`dataset_kind=competition_mission_sequence`,
+`control_mode=gamepad_mission_sequence`, `mission.capture_kind`와
+`mission.records_stationary_frames=true`를 기록한다. 수집 profile seed는
+`config/competition_mission_collection.yaml`이고 Jetson runtime 설치 시
+`~/.config/xycar/competition_mission_collection.yaml`이 없을 때만 복사한다.
+
+정확히 모아야 할 상태별 session 수, 각 sequence 시작/종료 지점과 라벨 검수
+항목은 상위 하네스의 `docs/competition_ai_data_checklist.md`를 따른다. active
+`_recording_*`과 `_incomplete`는 학습 도구가 제외하며, 실패 자료를 정상
+session처럼 rename하지 않는다.

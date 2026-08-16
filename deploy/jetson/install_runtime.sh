@@ -19,6 +19,11 @@ if [ -e "${HOME}/.local/bin/xycar-ai-gpu" ] \
     cp -a "${HOME}/.local/bin/xycar-ai-gpu" \
         "${backup_root}/xycar-ai-gpu"
 fi
+if [ -e "${HOME}/.local/bin/xycar-ai-competition" ] \
+    || [ -L "${HOME}/.local/bin/xycar-ai-competition" ]; then
+    cp -a "${HOME}/.local/bin/xycar-ai-competition" \
+        "${backup_root}/xycar-ai-competition"
+fi
 if [ ! -f "${x27_path}" ]; then
     echo "[ERROR] ${x27_path}를 찾을 수 없습니다." >&2
     exit 1
@@ -37,6 +42,10 @@ install -m 0755 "${SCRIPT_DIR}/run_gpu_policy.sh" \
     "${gpu_runtime_dir}/run_gpu_policy.sh"
 ln -sfn "${gpu_runtime_dir}/run_gpu_policy.sh" \
     "${HOME}/.local/bin/xycar-ai-gpu"
+install -m 0755 "${SCRIPT_DIR}/run_gpu_competition.sh" \
+    "${gpu_runtime_dir}/run_gpu_competition.sh"
+ln -sfn "${gpu_runtime_dir}/run_gpu_competition.sh" \
+    "${HOME}/.local/bin/xycar-ai-competition"
 install -m 0755 "${SCRIPT_DIR}/x27-jetson.sh" "${x27_path}"
 if [ ! -e "${profile_dir}/gamepad_stateless_manual.yaml" ] \
     && [ ! -L "${profile_dir}/gamepad_stateless_manual.yaml" ]; then
@@ -49,5 +58,11 @@ if [ ! -e "${profile_dir}/guided_stateless_collection.yaml" ] \
     install -m 0644 \
         "${repo_root}/src/xycar_ai_drive/config/guided_stateless_collection.yaml" \
         "${profile_dir}/guided_stateless_collection.yaml"
+fi
+if [ ! -e "${profile_dir}/competition_mission_collection.yaml" ] \
+    && [ ! -L "${profile_dir}/competition_mission_collection.yaml" ]; then
+    install -m 0644 \
+        "${repo_root}/src/xycar_data/config/competition_mission_collection.yaml" \
+        "${profile_dir}/competition_mission_collection.yaml"
 fi
 echo "Runtime wrapper와 x27 launcher 설치 완료; backup=${backup_root}"

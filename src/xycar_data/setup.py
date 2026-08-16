@@ -36,6 +36,10 @@ setup(
     entry_points={
         "console_scripts": [
             "gamepad_teleop = xycar_data.gamepad_teleop:main",
+            (
+                "mission_sequence_collector = "
+                "xycar_data.gamepad_teleop:main"
+            ),
         ],
     },
 )

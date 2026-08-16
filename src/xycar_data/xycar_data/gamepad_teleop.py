@@ -207,6 +207,52 @@ class RecordingGate:
         self.state = RecordingState.IDLE
 
 
+@dataclass
+class MissionSequenceRecordingGate:
+    """Record complete mission sequences, including stationary frames."""
+
+    state: RecordingState = RecordingState.IDLE
+    a_pressed: bool = False
+    b_pressed: bool = False
+    start_rearmed: bool = True
+
+    def observe_buttons(
+        self,
+        *,
+        a_pressed: bool,
+        b_pressed: bool,
+    ) -> RecordingAction:
+        a_rising = a_pressed and not self.a_pressed
+        b_rising = b_pressed and not self.b_pressed
+        self.a_pressed = a_pressed
+        self.b_pressed = b_pressed
+        if not a_pressed:
+            self.start_rearmed = True
+        if self.state == RecordingState.FINISHING:
+            return RecordingAction.NONE
+        if b_rising and self.state == RecordingState.RECORDING:
+            self.state = RecordingState.FINISHING
+            return RecordingAction.FINISH_NORMAL
+        if (
+            a_rising
+            and self.start_rearmed
+            and self.state == RecordingState.IDLE
+        ):
+            self.start_rearmed = False
+            self.state = RecordingState.RECORDING
+            return RecordingAction.START_RECORDING
+        return RecordingAction.NONE
+
+    def observe_published_speed(self, _speed: float) -> RecordingAction:
+        return RecordingAction.NONE
+
+    def force_finishing(self) -> None:
+        self.state = RecordingState.FINISHING
+
+    def finish_completed(self) -> None:
+        self.state = RecordingState.IDLE
+
+
 @dataclass(frozen=True)
 class _PendingRecordingFinish:
     token: int
@@ -434,6 +480,8 @@ class GamepadTeleopNode(Node):
         )
         self.declare_parameter('record_start_button', 0)
         self.declare_parameter('record_stop_button', 1)
+        self.declare_parameter('recording_mode', 'positive_speed_segment')
+        self.declare_parameter('capture_kind', '')
         self.declare_parameter(
             'recording_root_dir',
             '/home/xytron/xycar_data/teleop',
@@ -496,6 +544,12 @@ class GamepadTeleopNode(Node):
         self.record_stop_button = int(
             self.get_parameter('record_stop_button').value
         )
+        self.recording_mode = str(
+            self.get_parameter('recording_mode').value
+        ).strip()
+        self.capture_kind = str(
+            self.get_parameter('capture_kind').value
+        ).strip()
         self.recording_root_dir = str(
             self.get_parameter('recording_root_dir').value
         )
@@ -534,7 +588,11 @@ class GamepadTeleopNode(Node):
         self._has_motor_subscriber = False
         self._next_graph_check_monotonic = 0.0
         self._stop_reason: Optional[str] = None
-        self._recording_gate = RecordingGate()
+        self._recording_gate = (
+            MissionSequenceRecordingGate()
+            if self.recording_mode == 'mission_sequence'
+            else RecordingGate()
+        )
         self._recording_tail: deque[CameraSample] = deque()
         self._camera_sequence = 0
         self._session_token: Optional[int] = None
@@ -577,9 +635,18 @@ class GamepadTeleopNode(Node):
         )
         self._refresh_graph(time.monotonic())
         self.publish_stop_burst()
+        if self.recording_mode == 'mission_sequence':
+            recording_help = (
+                'press A once to start a full mission sequence, keep recording '
+                'through speed=0 stops, and press B to save'
+            )
+        else:
+            recording_help = (
+                'hold A to wait for positive speed recording, and press B to save'
+            )
         self.get_logger().warning(
             'Gamepad teleop started disarmed. Release LT and RT once to arm; '
-            'hold A to wait for positive speed recording, and press B to save.'
+            f'{recording_help}.'
         )
         steering_sign = '-' if self.config.invert_steering else ''
         self.get_logger().info(
@@ -598,6 +665,8 @@ class GamepadTeleopNode(Node):
             f'dataset_root={self.recording_root_dir}, '
             f'A=buttons[{self.record_start_button}], '
             f'B=buttons[{self.record_stop_button}], '
+            f'recording_mode={self.recording_mode}, '
+            f'capture_kind={self.capture_kind or "none"}, '
             f'emergency_discard_frames={self.emergency_discard_frames}, '
             f'image_format={self.recording_image_format}, '
             f'jpeg_quality={self.recording_jpeg_quality}'
@@ -631,6 +700,26 @@ class GamepadTeleopNode(Node):
                 self.recording_min_free_space_mb
             ),
         )
+        if self.recording_mode not in {
+            'positive_speed_segment',
+            'mission_sequence',
+        }:
+            raise ValueError(
+                'recording_mode must be positive_speed_segment or '
+                'mission_sequence'
+            )
+        if self.recording_mode == 'mission_sequence' and self.capture_kind not in {
+            'signal',
+            'shortcut',
+        }:
+            raise ValueError(
+                'mission_sequence recording requires capture_kind signal or '
+                'shortcut'
+            )
+        if self.recording_mode != 'mission_sequence' and self.capture_kind:
+            raise ValueError(
+                'capture_kind is only valid for mission_sequence recording'
+            )
         for node in self.allowed_motor_relay_nodes:
             if not node.startswith('/') or node.endswith('/'):
                 raise ValueError(
@@ -726,6 +815,8 @@ class GamepadTeleopNode(Node):
             )
         elif action == RecordingAction.WAITING_CANCELLED:
             self.get_logger().info('Recording wait cancelled.')
+        elif action == RecordingAction.START_RECORDING:
+            self._start_recording()
         elif action == RecordingAction.FINISH_NORMAL:
             self._finish_recording(
                 reason='b_button',
@@ -740,11 +831,18 @@ class GamepadTeleopNode(Node):
         ):
             self._recording_gate.force_finishing()
             return
+        mission_sequence = self.recording_mode == 'mission_sequence'
         metadata = {
-            'dataset_kind': 'camera_first_teleop_behavior_cloning',
+            'dataset_kind': (
+                'competition_mission_sequence'
+                if mission_sequence
+                else 'camera_first_teleop_behavior_cloning'
+            ),
             'camera_is_primary': True,
             'lidar_is_optional': False,
-            'control_mode': 'gamepad',
+            'control_mode': (
+                'gamepad_mission_sequence' if mission_sequence else 'gamepad'
+            ),
             'topics': {
                 'camera_topic': self.camera_topic,
                 'motor_topic': self.motor_topic,
@@ -780,6 +878,12 @@ class GamepadTeleopNode(Node):
                 ),
             },
         }
+        if mission_sequence:
+            metadata['mission'] = {
+                'capture_kind': self.capture_kind,
+                'records_stationary_frames': True,
+                'annotation_status': 'unlabeled',
+            }
         token = self.writer.start_session(metadata)
         if token is None:
             self._recording_failure(
@@ -788,9 +892,15 @@ class GamepadTeleopNode(Node):
             return
         self._session_token = token
         self._recording_tail.clear()
-        self.get_logger().info(
-            'Gamepad recording started after a positive motor command.'
-        )
+        if mission_sequence:
+            self.get_logger().info(
+                f'{self.capture_kind} mission sequence recording started; '
+                'stationary frames will be retained.'
+            )
+        else:
+            self.get_logger().info(
+                'Gamepad recording started after a positive motor command.'
+            )
 
     def _on_camera(self, message: Image) -> None:
         if (
@@ -811,7 +921,10 @@ class GamepadTeleopNode(Node):
             return
 
         command = self._last_published_command
-        if command.speed <= 0.0:
+        if (
+            self.recording_mode != 'mission_sequence'
+            and command.speed <= 0.0
+        ):
             return
         self._camera_sequence += 1
         stamp = message.header.stamp

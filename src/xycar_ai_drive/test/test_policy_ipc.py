@@ -8,6 +8,16 @@ import pytest
 import yaml
 
 from xycar_ai_drive.control import DriveCommand
+from xycar_ai_drive.competition_artifact import load_competition_bundle
+from xycar_ai_drive.competition_gpu_runtime import (
+    CompetitionInference,
+    SignalObservation,
+    ShortcutObservation,
+)
+from xycar_ai_drive.competition_ipc import (
+    CompetitionIpcClient,
+    CompetitionIpcServer,
+)
 from xycar_ai_drive.policy_ipc import PolicyIpcServer, UnixSocketPolicyClient
 from xycar_ai_drive.policy_runtime import InferenceResult, PolicyRuntimeError
 
@@ -210,3 +220,139 @@ def test_ipc_server_disconnect_closes_client_fail_closed(tmp_path):
     with pytest.raises(PolicyRuntimeError, match='failed closed'):
         client.infer(np.zeros((8, 12, 3), dtype=np.uint8))
     assert client._socket is None
+
+
+class _FakeCompetitionRuntime:
+    def __init__(self, artifact):
+        self.artifact = load_competition_bundle(artifact)
+        self.device_name = 'cuda'
+        self.reset_all_count = 0
+        self.reset_shortcut_count = 0
+
+    def infer(self, _image, *, mode, previous_command):
+        assert mode == 'normal'
+        assert previous_command == DriveCommand(1.0, 2.0)
+        return CompetitionInference(
+            base_command=DriveCommand(-3.0, 15.0),
+            base_confidence=0.8,
+            signal=SignalObservation(
+                approach=0.9,
+                visible=0.8,
+                readable=0.7,
+                red=0.1,
+                yellow=0.2,
+                left=0.95,
+                green=0.6,
+                bbox=(0.1, 0.2, 0.3, 0.4),
+                progress=0.5,
+            ),
+            shortcut=ShortcutObservation(
+                command=DriveCommand(4.0, 14.0),
+                phase=2,
+                handoff_probability=0.25,
+            ),
+            inference_ms=4.5,
+        )
+
+    def reset_all(self):
+        self.reset_all_count += 1
+
+    def reset_shortcut(self):
+        self.reset_shortcut_count += 1
+
+
+def _competition_artifact(tmp_path):
+    root = tmp_path / 'competition-fixture'
+    root.mkdir()
+    for name in ('base_model.ts', 'signal_model.ts', 'shortcut_model.ts'):
+        (root / name).write_bytes(b'model')
+    manifest = {
+        'schema_version': 1,
+        'artifact_kind': 'competition_bundle',
+        'artifact_id': root.name,
+        'models': {
+            'base': {
+                'file': 'base_model.ts',
+                'model': {'input': {'shape': [1, 3, 16, 16]}},
+                'preprocessing': {
+                    'geometry': 'full_frame_bicubic_resize',
+                    'mean': [0.5, 0.5, 0.5],
+                    'std': [0.5, 0.5, 0.5],
+                },
+            },
+            'signal': {
+                'file': 'signal_model.ts',
+                'config': {'hidden_size': 8},
+                'preprocessing': {
+                    'geometry': 'upper_two_thirds_bicubic_resize',
+                    'input_shape': [1, 3, 8, 12],
+                    'mean': [0.5, 0.5, 0.5],
+                    'std': [0.5, 0.5, 0.5],
+                },
+            },
+            'shortcut': {
+                'file': 'shortcut_model.ts',
+                'config': {'hidden_size': 8, 'horizon_steps': 3},
+                'preprocessing': {
+                    'geometry': 'full_frame_bicubic_resize_unwarped',
+                    'input_shape': [1, 3, 16, 16],
+                    'mean': [0.5, 0.5, 0.5],
+                    'std': [0.5, 0.5, 0.5],
+                },
+            },
+        },
+        'mission': {
+            'signal_probability_threshold': 0.5,
+            'stop_votes': {'required': 2, 'window': 3},
+            'go_votes': {'required': 4, 'window': 5},
+            'decision_progress_deadline': 0.9,
+            'handoff_probability_threshold': 0.9,
+            'handoff_consecutive_frames': 5,
+            'handoff_max_angle_difference': 25.0,
+            'shortcut_timeout_sec': 12.0,
+            'action_priority': ['STOP', 'LEFT', 'STRAIGHT'],
+        },
+        'runtime': {'maximum_forward_speed': 15.0},
+    }
+    (root / 'manifest.yaml').write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding='utf-8'
+    )
+    files = ('base_model.ts', 'manifest.yaml', 'shortcut_model.ts', 'signal_model.ts')
+    lines = []
+    for name in files:
+        digest = hashlib.sha256((root / name).read_bytes()).hexdigest()
+        lines.append(f'{digest}  {name}\n')
+    (root / 'SHA256SUMS').write_text(''.join(lines), encoding='utf-8')
+    return root
+
+
+def test_competition_ipc_transports_all_policy_outputs(tmp_path):
+    artifact = _competition_artifact(tmp_path)
+    runtime = _FakeCompetitionRuntime(artifact)
+    socket_path = tmp_path / 'competition.sock'
+    server = CompetitionIpcServer(socket_path=str(socket_path), runtime=runtime)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 2.0
+    while not socket_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert socket_path.exists()
+    client = CompetitionIpcClient(
+        artifact_dir=str(artifact),
+        socket_path=str(socket_path),
+        timeout_sec=0.2,
+        required_device='cuda',
+    )
+
+    result = client.infer(
+        np.zeros((8, 12, 3), dtype=np.uint8),
+        mode='normal',
+        previous_command=DriveCommand(1.0, 2.0),
+    )
+
+    assert result.base_command == DriveCommand(-3.0, 15.0)
+    assert result.signal.left == pytest.approx(0.95)
+    assert result.shortcut.phase == 2
+    client.reset_shortcut()
+    assert runtime.reset_shortcut_count == 1
+    _stop_server(client, server, thread)

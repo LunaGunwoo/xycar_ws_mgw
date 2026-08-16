@@ -39,6 +39,7 @@ cd -- "${XYCAR_AI_BUNDLE_ROOT}"
 "${XYCAR_LOCAL_UV}" sync --locked --managed-python
 mkdir -p \
   "${XYCAR_AI_LOCAL_DATASET_ROOT}" \
+  "${XYCAR_AI_BUNDLE_ROOT}/datasets/competition_manual" \
   "${XYCAR_AI_BUNDLE_ROOT}/datasets/stateless_manual" \
   "${XYCAR_AI_BUNDLE_ROOT}/datasets/stateless_guided" \
   "${XYCAR_AI_LOCAL_ARTIFACT_ROOT}"

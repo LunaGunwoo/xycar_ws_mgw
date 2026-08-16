@@ -13,6 +13,7 @@ from xycar_data.gamepad_teleop import (
     GamepadConfig,
     GamepadTeleopNode,
     InvalidJoyInput,
+    MissionSequenceRecordingGate,
     NeutralArmingGate,
     RecordingAction,
     RecordingGate,
@@ -247,6 +248,23 @@ def test_recording_gate_waits_for_positive_published_speed():
         RecordingAction.START_RECORDING
     )
     assert gate.state == RecordingState.RECORDING
+
+
+def test_mission_sequence_gate_starts_immediately_and_ignores_zero_speed():
+    gate = MissionSequenceRecordingGate()
+
+    assert gate.observe_buttons(
+        a_pressed=True,
+        b_pressed=False,
+    ) == RecordingAction.START_RECORDING
+    assert gate.state == RecordingState.RECORDING
+    assert gate.observe_published_speed(0.0) == RecordingAction.NONE
+    assert gate.observe_published_speed(-1.0) == RecordingAction.NONE
+    assert gate.state == RecordingState.RECORDING
+    assert gate.observe_buttons(
+        a_pressed=False,
+        b_pressed=True,
+    ) == RecordingAction.FINISH_NORMAL
 
 
 def test_releasing_a_cancels_waiting_but_not_active_recording():

@@ -1,0 +1,38 @@
+game_controller_node:
+  ros__parameters:
+    device_id: 0
+    deadzone: 0.05
+    autorepeat_rate: 20.0
+    sticky_buttons: false
+    coalesce_interval_ms: 1
+
+mission_sequence_collector:
+  ros__parameters:
+    joy_topic: /joy
+    motor_topic: /xycar_motor
+    camera_topic: /image_raw
+    steering_axis: 0
+    lt_axis: 4
+    rt_axis: 5
+    trigger_axis_mode: negative
+    invert_steering: true
+    max_angle: 100.0
+    max_reverse_speed: 5.0
+    max_forward_speed: 15.0
+    publish_rate_hz: 20.0
+    joy_timeout_sec: 0.25
+    graph_check_period_sec: 0.5
+    neutral_trigger_threshold: 0.05
+    stop_publish_count: 5
+    allowed_motor_relay_nodes: ['/ros_bridge']
+    record_start_button: 0
+    record_stop_button: 1
+    recording_mode: mission_sequence
+    capture_kind: signal
+    recording_root_dir: /home/xytron/xycar_data/competition_manual
+    emergency_discard_frames: 0
+    recording_image_format: jpeg
+    recording_jpeg_quality: 95
+    recording_png_compression: 3
+    recording_queue_size: 128
+    recording_min_free_space_mb: 1024

@@ -1,0 +1,34 @@
+schema_version: 1
+policy_kind: shortcut
+
+model:
+  backbone: vit_tiny_patch16_224.augreg_in21k_ft_in1k
+  pretrained: true
+  hidden_size: 256
+  image_size: 224
+  horizon_steps: 20
+
+data:
+  root: datasets/competition_manual
+  split_manifest: config/competition_shortcut_split.yaml
+  sequence_length: 16
+  sample_rate_hz: 20.0
+  window_step: 4
+  num_workers: 4
+  minimum_shortcut_sessions: 30
+
+training:
+  seed: 20260815
+  device: cuda
+  deterministic: true
+  amp: true
+  batch_size: 4
+  epochs: 50
+  early_stopping_patience: 8
+  learning_rate: 0.00005
+  weight_decay: 0.01
+  grad_clip: 1.0
+
+output:
+  root: artifacts/runs/shortcut_policy
+  run_name: shortcut_vit_tiny_gru_seed20260815

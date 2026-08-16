@@ -676,3 +676,109 @@ exporter는 checkpoint model state를 strict load하고 eager/trace/reload 결�
 생성한다. manifest에는 checkpoint/source/dataset, RGB input, timm preprocessing,
 label decode, CPU thread와 warm-up 계약이 포함된다. 차량 배포와 실행 방법은
 `src/xycar_ai_drive/README.md`를 따른다.
+
+## 대회 신호등·지름길 temporal pipeline
+
+대회 pipeline은 기존 schema v1 Base Lap artifact를 변경하지 않고 signal과
+shortcut policy를 별도로 학습한다. signal은 상단 2/3 RGB의
+MobileNetV3-small+GRU, shortcut은 unwarped full-frame과 직전 실제 명령을 받는
+ViT-tiny+GRU다. 전체 결정은 ROS runtime의 deterministic FSM이 수행한다.
+
+### 데이터 동기화와 승인
+
+Jetson의 `/home/xytron/xycar_data/competition_manual`을 로컬
+`datasets/competition_manual`로 증분 복사한다. 기본은 dry-run이고 `--apply`도
+vehicle source를 삭제하지 않는다.
+
+```bash
+cd /home/xytron/xycar_ws/apps/xycar_ws_mgw
+./scripts/ai/sync_competition_dataset.sh
+./scripts/ai/sync_competition_dataset.sh --apply
+```
+
+각 완료 session은 다음 순서로 라벨링한다. `init`이 생성한
+`mission_annotations.yaml`에서 `annotator`와 null 값을 채운다. signal bbox는 원본
+frame 정규화 좌표고 shortcut phase는 `APPROACH`, `ENTRY_STRAIGHT`, `FIRST_LEFT`,
+`CONNECTOR`, `SECOND_LEFT`, `REACQUIRE` 순서다. 초안 작성자와 다른 사람이
+연속 frame을 검수한 뒤에만 approve한다. approve는 annotation을 원본
+`samples.csv` SHA-256과 함께 고정한다.
+
+```bash
+cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
+/home/xytron/.local/bin/uv run --locked xycar-competition-data init \
+  --session datasets/competition_manual/<session-id>
+/home/xytron/.local/bin/uv run --locked xycar-competition-data validate \
+  --session datasets/competition_manual/<session-id>
+/home/xytron/.local/bin/uv run --locked xycar-competition-data approve \
+  --session datasets/competition_manual/<session-id> --reviewer <reviewer>
+/home/xytron/.local/bin/uv run --locked xycar-competition-data validate \
+  --dataset-root datasets/competition_manual --require-approved
+```
+
+학습 최소치는 red/yellow/left/straight-green 각각 20 session, 신호가 없는
+negative 10 session과 완전한 shortcut 30 session이다. 세부 현장 체크는 상위
+하네스의 `docs/competition_ai_data_checklist.md`를 따른다.
+
+### Session-disjoint split과 학습
+
+signal split에는 signal과 shortcut capture를 모두 넣어 shortcut 접근 중의 신호도
+학습한다. shortcut split은 `capture_kind=shortcut`만 사용한다. 생성된 split
+파일은 실제 dataset snapshot의 session ID를 담는 실험 입력이다. 기존 파일을
+덮어쓰지 않으므로 새 snapshot이면 ID 또는 output 경로를 바꾼다.
+
+```bash
+/home/xytron/.local/bin/uv run --locked xycar-competition-data make-split \
+  --dataset-root datasets/competition_manual \
+  --output config/competition_signal_split.yaml --seed 20260815
+/home/xytron/.local/bin/uv run --locked xycar-competition-data make-split \
+  --dataset-root datasets/competition_manual \
+  --output config/competition_shortcut_split.yaml --seed 20260815 \
+  --capture-kind shortcut
+
+/home/xytron/.local/bin/uv run --locked xycar-train-signal \
+  --config config/traffic_signal_policy.yaml --validate-only
+/home/xytron/.local/bin/uv run --locked xycar-train-shortcut \
+  --config config/shortcut_policy.yaml --validate-only
+/home/xytron/.local/bin/uv run --locked xycar-train-signal \
+  --config config/traffic_signal_policy.yaml
+/home/xytron/.local/bin/uv run --locked xycar-train-shortcut \
+  --config config/shortcut_policy.yaml
+```
+
+signal train loader는 red, yellow, left, green, approach-unknown, background window가
+epoch마다 같은 총 sampling mass를 갖도록 inverse-frequency sampler를 사용한다.
+validation과 test는 실제 분포를 유지한다. split별로 모든 lamp와 negative가 한
+session 이상 없으면 학습을 거부하므로, 그 경우 새 seed로 split을 생성한다.
+horizontal flip은 신호 의미와 지름길 geometry를 바꾸므로 사용하지 않는다.
+
+run은 `config.yaml`, session/annotation checksum provenance, `metrics.csv`,
+`best.pt`, `last.pt`, `test_metrics.json`을 남긴다. 같은 run directory는
+덮어쓰지 않는다. best 선택은 단순 평균 loss가 아니라 signal의 stop
+false-negative/false-left 또는 shortcut의 early-handoff/angle MAE를 크게 벌점으로
+주는 validation safety score를 사용한다.
+
+### Export와 competition bundle
+
+signal test의 stop false-negative와 false-left가 모두 0, shortcut test의 early
+handoff가 0이고 first-step angle MAE가 10 이하일 때만 기본 export가
+race-qualified가 된다. gate 미통과 model은
+`--development-artifact`로 개별 offline 분석용 export만 가능하고 bundle에는
+들어갈 수 없다.
+
+```bash
+/home/xytron/.local/bin/uv run --locked xycar-export-signal \
+  --checkpoint artifacts/runs/traffic_signal_policy/<run-id>/best.pt \
+  --artifact-id <signal-artifact-id>
+/home/xytron/.local/bin/uv run --locked xycar-export-shortcut \
+  --checkpoint artifacts/runs/shortcut_policy/<run-id>/best.pt \
+  --artifact-id <shortcut-artifact-id>
+/home/xytron/.local/bin/uv run --locked xycar-build-competition-bundle \
+  --base-artifact artifacts/models/<schema-v1-base-artifact-id> \
+  --signal-artifact artifacts/models/<signal-artifact-id> \
+  --shortcut-artifact artifacts/models/<shortcut-artifact-id> \
+  --artifact-id <competition-bundle-id>
+```
+
+bundle은 `base_model.ts`, `signal_model.ts`, `shortcut_model.ts`, 세 source
+manifest, FSM threshold와 전체 `SHA256SUMS`를 포함한다. runtime은 세 model을
+시작 시 CUDA memory에 모두 올리고 warm-up하므로 주행 중 model load는 없다.

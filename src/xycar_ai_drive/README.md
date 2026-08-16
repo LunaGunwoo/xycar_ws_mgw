@@ -280,3 +280,94 @@ wrapper는 camera를 열기 전에 host NumPy 1.x, OpenCV와 `cv_bridge` import�
 검사한다. user site-packages의 NumPy 2.x가 ROS Humble ABI를 가리면 즉시 종료하며
 camera나 CUDA container를 남기지 않는다. policy node가 오류로 종료돼도 같은
 launch의 camera와 gamepad를 종료하고 CUDA container를 정리한다.
+
+## 대회 signal + shortcut 통합 runtime
+
+Competition runtime은 하나의 bundle에서 기존 Base Lap, signal temporal policy와
+shortcut temporal policy를 CUDA memory에 모두 preload하고 warm-up한다. 상태별로
+필요한 branch만 실행하며 주행 도중 model file을 다시 load하지 않는다.
+
+- `signal_shadow`: signal만 실행하며 motor publisher를 만들지 않는다.
+- `normal`/`signal_stop`: Base와 signal을 함께 실행한다.
+- `shortcut`: shortcut만 실행한다.
+- `handoff_verify`: Base와 shortcut을 함께 실행한다.
+
+FSM은 STOP(red/yellow) > LEFT > STRAIGHT 우선순위, stop 2/3 vote, go 4/5 vote,
+결정 deadline unknown-stop, shortcut 1회 latch와 12초 timeout을 적용한다.
+handoff는 REACQUIRE와 probability 0.9, Base/shortcut angle 차이 25 이하가 5 frame
+연속일 때만 완료한다. `shortcut_only`에서는 완료 즉시 zero command와 DRIVE OFF,
+`combined`에서는 Base로 복귀한다.
+
+Unix GPU server를 직접 진단하는 entry point는 다음과 같다. 일반 운용은 Jetson
+wrapper가 network-none container, read-only artifact와 mode `0600` socket을
+구성한다.
+
+```bash
+ros2 run xycar_ai_drive competition_policy_gpu_server -- \
+  --artifact-dir /artifacts/<competition-bundle-id> \
+  --socket-path /run/user/1000/xycar-ai/competition.sock \
+  --device cuda --warmup-count 3
+```
+
+recorded session replay는 camera와 motor를 열지 않는다. `signal_only`,
+`shortcut_only`, `combined` 중 하나를 선택하고 transition, fault와 p50/p95/p99
+latency JSON을 확인한다.
+
+```bash
+ros2 run xycar_ai_drive competition_replay -- \
+  --artifact-dir /home/xytron/xycar_ws_mgw/artifacts/models/<competition-bundle-id> \
+  --session /home/xytron/xycar_data/competition_manual/<session-id> \
+  --run-mode combined --device cuda \
+  --output /home/xytron/competition-replay.json
+```
+
+### 실시간 shadow와 실제 주행
+
+설치된 `xycar-ai-competition` wrapper는 먼저 GPU container에서 세 model을
+preload/warm-up하고 socket 준비를 확인한 뒤 host launch를 시작한다.
+`signal_shadow`는 motor publisher가 없고 gamepad도 시작하지 않지만 camera device를
+열기 때문에 매 실행 직전 승인이 필요하다.
+
+```bash
+COMPETITION_BUNDLE_ID=<competition-bundle-id> \
+COMPETITION_RUN_MODE=signal_shadow \
+xycar-ai-competition
+```
+
+아래 두 mode는 camera, gamepad와 motor publisher를 시작하므로 각각 매 실행 직전
+사용자 승인이 필요하다. 별도 승인한 motor bridge, 바퀴 지지/안전 공간, 전원
+차단, A와 `Ctrl+C` 정지, 경쟁 publisher 부재를 먼저 확인한다.
+
+```bash
+COMPETITION_BUNDLE_ID=<competition-bundle-id> \
+COMPETITION_RUN_MODE=shortcut_only ALLOW_MOTION=true \
+xycar-ai-competition
+
+COMPETITION_BUNDLE_ID=<competition-bundle-id> \
+COMPETITION_RUN_MODE=combined ALLOW_MOTION=true \
+xycar-ai-competition
+```
+
+두 moving mode는 항상 DRIVE OFF로 시작하며 A release 뒤 rising edge가 있어야
+움직인다. A 재입력, stale Joy/camera/inference, socket 오류, motor subscriber
+유실과 경쟁 publisher는 zero command와 DRIVE OFF를 만든다. 자동 완료나 fault
+뒤에도 A를 놓았다가 다시 눌러야 재활성화할 수 있다. CPU로 자동 fallback하지
+않는다.
+
+host launch를 직접 구성해야 할 때는 다음 명령을 사용할 수 있지만 GPU server가
+같은 artifact와 socket으로 이미 준비돼 있어야 한다. 움직이는 실행은 동일한
+승인 규칙을 적용한다.
+
+```bash
+ros2 launch xycar_ai_drive competition_policy.launch.py \
+  artifact_id:=<competition-bundle-id> \
+  run_mode:=signal_shadow allow_motion:=false \
+  inference_socket_path:=/run/user/1000/xycar-ai/competition.sock
+```
+
+관측 topic은 `/competition_ai/enabled`, `/competition_ai/mode`,
+`/competition_ai/active_command`, `/competition_ai/signal_probabilities`,
+`/competition_ai/shortcut_state`, `/competition_ai/fault`다. signal probability 배열
+순서는 approach, visible, readable, red, yellow, left, green, progress이고 shortcut
+배열은 phase index와 handoff probability다. 전체 설계와 검증 단계는 상위
+하네스의 `docs/competition_ai_architecture.md`를 따른다.

@@ -1,0 +1,31 @@
+game_controller_node:
+  ros__parameters:
+    device_id: 0
+    deadzone: 0.05
+    autorepeat_rate: 20.0
+    sticky_buttons: false
+    coalesce_interval_ms: 1
+
+competition_policy:
+  ros__parameters:
+    camera_topic: /image_raw
+    joy_topic: /joy
+    motor_topic: /xycar_motor
+    allowed_motor_relay_nodes: ['/ros_bridge']
+    enabled_topic: /competition_ai/enabled
+    mode_topic: /competition_ai/mode
+    command_topic: /competition_ai/active_command
+    signal_topic: /competition_ai/signal_probabilities
+    shortcut_topic: /competition_ai/shortcut_state
+    fault_topic: /competition_ai/fault
+    a_button_index: 0
+    allow_motion: false
+    run_mode: combined
+    publish_rate_hz: 20.0
+    joy_timeout_sec: 0.25
+    inference_timeout_sec: 0.15
+    graph_check_period_sec: 0.5
+    stop_publish_count: 5
+    inference_device: cuda
+    inference_socket_path: /run/user/1000/xycar-ai/competition.sock
+    inference_rpc_timeout_sec: 0.12
