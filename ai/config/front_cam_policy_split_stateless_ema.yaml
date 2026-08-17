@@ -1,8 +1,8 @@
 schema_version: 2
-dataset_snapshot: stateless_manual_rebuilt_20260814_generation0_21_sessions_17967_samples
+dataset_snapshot: stateless_manual_20260817_generation0_32_sessions_30889_samples
 splits:
-  # Session-disjoint chronological split of the rebuilt manual Base dataset.
-  # No previous manual or guided session is included.
+  # Session-disjoint chronological split of the complete manual Base dataset.
+  # 25/3/4 sessions give 22,958/3,886/4,045 train/val/test samples.
   train:
     - manual/20260814_143421_593_session
     - manual/20260814_143456_353_session
@@ -17,13 +17,24 @@ splits:
     - manual/20260814_144308_183_session
     - manual/20260814_144329_572_session
     - manual/20260814_144656_955_session
-  val:
     - manual/20260814_144751_162_session
     - manual/20260814_145026_519_session
     - manual/20260814_145039_866_session
     - manual/20260814_145157_807_session
-  test:
     - manual/20260814_145227_082_session
     - manual/20260814_145312_687_session
     - manual/20260814_145439_956_session
     - manual/20260814_145610_816_session
+    - manual/20260817_093555_268_session
+    - manual/20260817_093649_191_session
+    - manual/20260817_093746_308_session
+    - manual/20260817_093909_087_session
+  val:
+    - manual/20260817_093952_505_session
+    - manual/20260817_094040_776_session
+    - manual/20260817_094130_894_session
+  test:
+    - manual/20260817_094232_302_session
+    - manual/20260817_094321_719_session
+    - manual/20260817_094406_449_session
+    - manual/20260817_094423_426_session

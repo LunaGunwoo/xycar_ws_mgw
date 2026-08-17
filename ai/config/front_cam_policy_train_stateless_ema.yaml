@@ -67,4 +67,4 @@ loss:
 
 output:
   root: artifacts/runs/front_cam_policy
-  run_name: vit_small_stateless_base_rebuilt_generation0
+  run_name: vit_small_stateless_manual_20260817_generation0

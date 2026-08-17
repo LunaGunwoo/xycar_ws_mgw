@@ -142,7 +142,7 @@ def test_stateless_ema_config_uses_two_qualified_sources_and_raw_angle(
         ("guided", None),
     ]
     assert config.data.sources[1].require_curriculum_generation
-    assert config.output.run_name == "vit_small_stateless_base_rebuilt_generation0"
+    assert config.output.run_name == "vit_small_stateless_manual_20260817_generation0"
     validate_incremental_initialization(
         config, initialize_from="", resume=""
     )

@@ -458,13 +458,13 @@ root에 같은 session directory 이름이 있어도 source-qualified ID가 다�
 충돌하지 않는다. guided session에 generation이 없거나 train split에
 `current_generation` sample이 없거나 더 미래 generation이 있으면 검증을 거부한다.
 
-현재 활성 Base snapshot은 2026-08-14에 다시 수집한 manual generation 0의
-21 sessions/17,967 samples만 사용한다. 이전 manual과 guided sample은 split에
-포함하지 않는다. 시간상 인접한 frame이 split 사이에 직접 섞이지 않도록 session
-timestamp 순서로 train 13개/13,021, validation 4개/3,050, test 4개/1,896 samples로
-배치했다. speed label은 17,948개가 15이고 나머지 19개만 trigger 전환 구간의
-9.675~14.442이므로 이 Base의 speed head는 사실상 15 유지 모델이다. generation 0은
-EMA mass 1.0으로만 sampling하며 ImageNet pretrained weight에서 새로 시작한다.
+현재 활성 Base snapshot은 2026-08-14와 2026-08-17에 수집한 manual generation 0의
+32 sessions/30,889 samples를 사용한다. guided sample은 split에 포함하지 않는다.
+시간상 인접한 frame이 split 사이에 직접 섞이지 않도록 session timestamp 순서로
+train 25개/22,958, validation 3개/3,886, test 4개/4,045 samples로 배치했다. speed
+label은 30,859개가 15이고 나머지 30개만 trigger 전환 구간의 6.703~14.628이므로 이
+Base의 speed head는 사실상 15 유지 모델이다. generation 0은 EMA mass 1.0으로만
+sampling하며 ImageNet pretrained weight에서 새로 시작한다.
 
 train epoch의 세대별 총 sampling mass는 다음과 같고 같은 세대 안에서는 frame을
 균등하게 뽑는다. raw session은 삭제하지 않으며 과거 영향은 sampling mass로만
