@@ -13,6 +13,11 @@ from typing import Any
 import yaml
 
 from xycar_ai_drive.artifact import RoadWarpParameters
+from xycar_ai_drive.steering_contract import (
+    SteeringContract,
+    parse_steering_contract,
+    require_normalized_steering_contract,
+)
 
 
 class CompetitionArtifactError(ValueError):
@@ -56,6 +61,7 @@ class CompetitionBundle:
     signal: ImageContract
     shortcut: ImageContract
     mission: MissionContract
+    steering_contract: SteeringContract
 
 
 def load_competition_bundle(root: str | Path) -> CompetitionBundle:
@@ -71,6 +77,16 @@ def load_competition_bundle(root: str | Path) -> CompetitionBundle:
         raise CompetitionArtifactError("bundle schema_version must be 1")
     if manifest.get("artifact_kind") != "competition_bundle":
         raise CompetitionArtifactError("artifact is not a competition bundle")
+    try:
+        steering_contract = require_normalized_steering_contract(
+            parse_steering_contract(
+                manifest.get("steering_contract"),
+                context="manifest.steering_contract",
+            ),
+            context="competition bundle steering contract",
+        )
+    except ValueError as exc:
+        raise CompetitionArtifactError(str(exc)) from exc
     artifact_id = _required_string(manifest, "artifact_id", "manifest")
     if artifact_id != bundle_root.name:
         raise CompetitionArtifactError("bundle artifact_id does not match directory")
@@ -147,6 +163,7 @@ def load_competition_bundle(root: str | Path) -> CompetitionBundle:
         signal=signal,
         shortcut=shortcut,
         mission=mission,
+        steering_contract=steering_contract,
     )
 
 

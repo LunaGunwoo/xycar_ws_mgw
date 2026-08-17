@@ -18,6 +18,7 @@ from torchvision.transforms import functional as transform_functional
 
 from xycar_ai.config import AugmentationConfig, DataConfig, DataSourceConfig
 from xycar_ai.front_cam_policy_warp import RoadWarpConfig, warp_pil_image
+from xycar_ai.steering_contract import metadata_has_required_steering_contract
 
 COMMAND_MIN = -100
 COMMAND_MAX = 100
@@ -311,7 +312,14 @@ def discover_policy_sessions(config: DataConfig) -> tuple[PolicySession, ...]:
     sessions: list[PolicySession] = []
     if config.sources:
         for source in config.sources:
-            sessions.extend(_discover_source_sessions(source))
+            sessions.extend(
+                _discover_source_sessions(
+                    source,
+                    required_steering_contract=(
+                        config.required_steering_contract
+                    ),
+                )
+            )
         if not sessions:
             roots = ", ".join(str(source.root) for source in config.sources)
             raise PolicyDatasetError(
@@ -345,7 +353,11 @@ def discover_policy_sessions(config: DataConfig) -> tuple[PolicySession, ...]:
     return tuple(sessions)
 
 
-def _discover_source_sessions(source: DataSourceConfig) -> list[PolicySession]:
+def _discover_source_sessions(
+    source: DataSourceConfig,
+    *,
+    required_steering_contract: str | None,
+) -> list[PolicySession]:
     if not source.root.is_dir():
         raise PolicyDatasetError(
             f"dataset source root does not exist: {source.source_id}={source.root}"
@@ -355,7 +367,11 @@ def _discover_source_sessions(source: DataSourceConfig) -> list[PolicySession]:
         if not path.is_dir() or not SESSION_NAME_RE.fullmatch(path.name):
             continue
         metadata = _load_metadata(path / "metadata.yaml")
-        if not _matches_source_filter(metadata, source):
+        if not _matches_source_filter(
+            metadata,
+            source,
+            required_steering_contract=required_steering_contract,
+        ):
             continue
         sessions.append(
             _load_policy_session(
@@ -431,6 +447,7 @@ def build_policy_data_splits(
         val_sessions=split_sessions["val"],
         test_sessions=split_sessions["test"],
     )
+    _validate_minimum_dataset_size(result, config)
     if config.ema_sampling:
         future_generations = sorted(
             {
@@ -447,6 +464,47 @@ def build_policy_data_splits(
                 f"{future_generations}"
             )
     return result
+
+
+def _validate_minimum_dataset_size(
+    splits: PolicyDataSplits,
+    config: DataConfig,
+) -> None:
+    groups = splits._session_groups()
+    all_sessions = tuple(
+        session for sessions in groups.values() for session in sessions
+    )
+    requirements = {
+        "total samples": (
+            sum(len(session.samples) for session in all_sessions),
+            config.minimum_total_samples,
+        ),
+        "total sessions": (
+            len(all_sessions),
+            config.minimum_total_sessions,
+        ),
+        "train sessions": (
+            len(groups["train"]),
+            config.minimum_train_sessions,
+        ),
+        "val sessions": (
+            len(groups["val"]),
+            config.minimum_val_sessions,
+        ),
+        "test sessions": (
+            len(groups["test"]),
+            config.minimum_test_sessions,
+        ),
+    }
+    failures = [
+        f"{label} {actual} < {minimum}"
+        for label, (actual, minimum) in requirements.items()
+        if actual < minimum
+    ]
+    if failures:
+        raise PolicyDatasetError(
+            "dataset is below configured minimum: " + "; ".join(failures)
+        )
 
 
 def policy_dataset_stats(
@@ -843,6 +901,10 @@ def _matches_filter(metadata: Mapping[str, object], config: DataConfig) -> bool:
         return False
     if metadata.get("dataset_kind") != "camera_first_teleop_behavior_cloning":
         return False
+    if not metadata_has_required_steering_contract(
+        metadata, config.required_steering_contract
+    ):
+        return False
     accepted_modes = config.control_modes or (config.control_mode,)
     if metadata.get("control_mode") not in accepted_modes:
         return False
@@ -866,11 +928,18 @@ def _matches_filter(metadata: Mapping[str, object], config: DataConfig) -> bool:
 
 
 def _matches_source_filter(
-    metadata: Mapping[str, object], source: DataSourceConfig
+    metadata: Mapping[str, object],
+    source: DataSourceConfig,
+    *,
+    required_steering_contract: str | None,
 ) -> bool:
     if metadata.get("format_version") != 1 or metadata.get("complete") is not True:
         return False
     if metadata.get("dataset_kind") != "camera_first_teleop_behavior_cloning":
+        return False
+    if not metadata_has_required_steering_contract(
+        metadata, required_steering_contract
+    ):
         return False
     return metadata.get("control_mode") in source.control_modes
 

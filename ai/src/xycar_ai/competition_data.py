@@ -49,6 +49,7 @@ class MissionSession:
     samples: tuple[MissionSample, ...]
     annotation: Mapping[str, Any] | None
     annotation_sha256: str | None
+    steering_contract: Mapping[str, object] | None = None
 
     @property
     def session_id(self) -> str:
@@ -86,6 +87,12 @@ def load_mission_session(
             f"{metadata.get('dataset_kind')!r}"
         )
     mission = _required_mapping(metadata, "mission", "metadata")
+    raw_steering_contract = metadata.get("steering_contract")
+    steering_contract = (
+        dict(raw_steering_contract)
+        if isinstance(raw_steering_contract, Mapping)
+        else None
+    )
     capture_kind = _required_string(mission, "capture_kind", "mission")
     if capture_kind not in CAPTURE_KINDS:
         raise CompetitionDataError(
@@ -116,6 +123,7 @@ def load_mission_session(
         samples=samples,
         annotation=annotation,
         annotation_sha256=annotation_sha256,
+        steering_contract=steering_contract,
     )
 
 

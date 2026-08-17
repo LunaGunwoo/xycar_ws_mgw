@@ -20,6 +20,7 @@ from xycar_data.gamepad_teleop import (
     RecordingState,
     _PendingRecordingFinish,
     _is_paired_unnamed_relay,
+    _validate_collection_profile,
     _validate_recording_parameters,
     _validate_runtime_parameters,
     is_input_fresh,
@@ -183,6 +184,12 @@ def test_non_finite_output_config_is_rejected(field, value):
     config = GamepadConfig(**{field: value})
     with pytest.raises(ValueError, match='finite and positive'):
         map_joy_axes([0.0, 0.0, 0.0, 0.0, 1.0, 1.0], config)
+
+
+def test_angle_above_normalized_range_is_rejected():
+    config = GamepadConfig(max_angle=100.1)
+    with pytest.raises(ValueError, match='max_angle must be in'):
+        map_joy_axes([0.0] * 6, config)
 
 
 def test_unknown_trigger_axis_mode_is_rejected():
@@ -399,11 +406,13 @@ def test_recording_buttons_must_be_distinct():
         )
 
 
-def test_stateless_manual_template_keeps_initial_speed_and_separate_root():
+def test_normalized_collection_templates_are_versioned_and_strict(tmp_path):
     package_root = Path(__file__).parents[1]
     config = yaml.safe_load(
         (
-            package_root / 'config' / 'gamepad_stateless_manual.yaml'
+            package_root
+            / 'config'
+            / 'gamepad_stateless_manual_normalized_v1.yaml'
         ).read_text(encoding='utf-8')
     )['gamepad_teleop']['ros__parameters']
     launch_text = (
@@ -414,4 +423,23 @@ def test_stateless_manual_template_keeps_initial_speed_and_separate_root():
     assert config['recording_root_dir'].endswith('/stateless_manual')
     assert config['recording_image_format'] == 'jpeg'
     assert config['recording_jpeg_quality'] == 95
+    assert config['steering_contract'] == 'normalized_percent_v1'
     assert "'collection_profile_path': ParameterValue(" in launch_text
+    _validate_collection_profile(
+        str(
+            package_root
+            / 'config'
+            / 'gamepad_stateless_manual_normalized_v1.yaml'
+        )
+    )
+    legacy = package_root / 'config' / 'gamepad_stateless_manual.yaml'
+    with pytest.raises(ValueError, match='steering_contract'):
+        _validate_collection_profile(str(legacy))
+    invalid = tmp_path / 'invalid.yaml'
+    invalid.write_text(
+        'gamepad_teleop:\n  ros__parameters:\n'
+        '    steering_contract: legacy\n',
+        encoding='utf-8',
+    )
+    with pytest.raises(ValueError, match='steering_contract'):
+        _validate_collection_profile(str(invalid))

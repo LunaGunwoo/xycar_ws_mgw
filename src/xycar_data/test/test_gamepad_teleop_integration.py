@@ -96,6 +96,7 @@ def ros_harness(monkeypatch, tmp_path):
         Parameter('joy_topic', value=JOY_TOPIC),
         Parameter('motor_topic', value=MOTOR_TOPIC),
         Parameter('camera_topic', value=CAMERA_TOPIC),
+        Parameter('steering_contract', value='normalized_percent_v1'),
         Parameter('publish_rate_hz', value=20.0),
         Parameter('joy_timeout_sec', value=0.25),
         Parameter('graph_check_period_sec', value=0.05),
@@ -109,8 +110,13 @@ def ros_harness(monkeypatch, tmp_path):
         Parameter('recording_queue_size', value=64),
         Parameter('recording_min_free_space_mb', value=0),
     ]
-    profile = tmp_path / 'gamepad_stateless_manual.yaml'
-    profile.write_text('manual: stateless\n', encoding='utf-8')
+    profile = tmp_path / 'gamepad_stateless_manual_normalized_v1.yaml'
+    profile.write_text(
+        'gamepad_teleop:\n'
+        '  ros__parameters:\n'
+        '    steering_contract: normalized_percent_v1\n',
+        encoding='utf-8',
+    )
     overrides.append(
         Parameter('collection_profile_path', value=str(profile))
     )
@@ -332,7 +338,7 @@ def test_a_waits_for_forward_and_b_saves_all_frames_without_stopping(
     assert metadata['stop_reason'] == 'b_button'
     assert metadata['emergency_discard_count'] == 0
     assert metadata['collection_profile']['path'].endswith(
-        'gamepad_stateless_manual.yaml'
+        'gamepad_stateless_manual_normalized_v1.yaml'
     )
     assert len(metadata['collection_profile']['sha256']) == 64
     assert metadata['recording']['root_dir'] == str(
@@ -340,6 +346,17 @@ def test_a_waits_for_forward_and_b_saves_all_frames_without_stopping(
     )
     assert metadata['recording']['image_format'] == 'jpeg'
     assert metadata['recording']['jpeg_quality'] == 95
+    assert metadata['steering_contract'] == {
+        'schema_version': 1,
+        'name': 'normalized_percent_v1',
+        'command_min': -100.0,
+        'command_max': 100.0,
+        'driver_min': -40.0,
+        'driver_max': 40.0,
+        'mapping': 'linear_scale_0.4',
+        'motor_topic': MOTOR_TOPIC,
+        'driver_topic': '/xycar_motor_safe',
+    }
 
 
 def test_nonpositive_speed_discards_fifteen_and_keeps_driving(

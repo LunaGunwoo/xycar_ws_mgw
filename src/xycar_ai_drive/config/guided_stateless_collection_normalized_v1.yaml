@@ -1,0 +1,51 @@
+game_controller_node:
+  ros__parameters:
+    device_id: 0
+    deadzone: 0.05
+    autorepeat_rate: 20.0
+    sticky_buttons: false
+    coalesce_interval_ms: 1
+
+guided_policy_collector:
+  ros__parameters:
+    camera_topic: /image_raw
+    joy_topic: /joy
+    motor_topic: /xycar_motor
+    steering_contract: normalized_percent_v1
+    allowed_motor_relay_nodes: ['/ros_bridge']
+    prediction_topic: /guided_policy/prediction
+    enabled_topic: /guided_policy/enabled
+    steering_axis: 0
+    lt_axis: 4
+    rt_axis: 5
+    trigger_axis_mode: negative
+    invert_steering: true
+    max_steering_angle: 100.0
+    rt_speed_increment: 2.0
+    lt_speed_decrement: 5.0
+    speed_cap: 30.0
+    correction_deadzone: 0.05
+    record_start_button: 0
+    record_stop_button: 1
+    record_discard_button: 2
+    drive_toggle_button: 3
+    allow_motion: false
+    publish_rate_hz: 20.0
+    joy_timeout_sec: 0.25
+    inference_timeout_sec: 0.25
+    graph_check_period_sec: 0.5
+    stop_publish_count: 5
+    inference_backend: unix
+    inference_device: cuda
+    inference_socket_path: /run/user/1000/xycar-ai/policy.sock
+    inference_rpc_timeout_sec: 0.20
+    torch_num_threads: 8
+    warmup_count: 3
+    recording_root_dir: /home/xytron/xycar_data/stateless_guided
+    tail_discard_frames: 10
+    recording_image_format: jpeg
+    recording_jpeg_quality: 95
+    recording_png_compression: 3
+    recording_queue_size: 128
+    recording_min_free_space_mb: 1024
+    curriculum_generation: 1

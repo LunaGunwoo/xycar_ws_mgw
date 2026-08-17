@@ -30,6 +30,9 @@ from xycar_ai_drive.control import (
 )
 from xycar_ai_drive.policy_ipc import UnixSocketPolicyClient
 from xycar_ai_drive.policy_runtime import TorchScriptPolicy
+from xycar_ai_drive.steering_contract import (
+    NORMALIZED_STEERING_CONTRACT,
+)
 
 PolicyFactory = Callable[..., object]
 
@@ -137,6 +140,11 @@ class FrontCamPolicyNode(Node):
             self._policy,
             'artifact',
             getattr(self._policy, '_artifact', None),
+        )
+        self._artifact_motion_contract_valid = (
+            self.artifact is not None
+            and self.artifact.steering_contract
+            == NORMALIZED_STEERING_CONTRACT
         )
         self._history = self._initial_external_history()
         self._worker = threading.Thread(
@@ -509,6 +517,11 @@ class FrontCamPolicyNode(Node):
         self._publish_stop()
 
     def _unsafe_reason_locked(self, now: float) -> str | None:
+        if not self._artifact_motion_contract_valid:
+            return (
+                'artifact steering contract is not '
+                'normalized_percent_v1'
+            )
         if self._competitors:
             return 'competing motor publisher(s): ' + ', '.join(
                 self._competitors

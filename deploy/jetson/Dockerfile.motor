@@ -16,6 +16,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY ros1_safety /opt/xycar_safety_ws/src/xycar_motor_safety
 RUN rm /opt/xycar_safety_ws/src/xycar_motor_safety/COLCON_IGNORE \
+    && PYTHONPATH=/opt/xycar_safety_ws/src/xycar_motor_safety/src \
+       python3 -m unittest discover \
+       -s /opt/xycar_safety_ws/src/xycar_motor_safety/test \
+       -p 'test_*.py' \
     && source /opt/ros/noetic/setup.bash \
     && cd /opt/xycar_safety_ws \
     && catkin_make -DCMAKE_BUILD_TYPE=Release

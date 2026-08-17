@@ -31,9 +31,6 @@ def generate_launch_description():
         [
             DeclareLaunchArgument(
                 'artifact_id',
-                default_value=(
-                    'front-cam-policy-tiny-hflip-p05-patience5-e5-20260811'
-                ),
                 description='Versioned Jetson CUDA policy artifact id.',
             ),
             DeclareLaunchArgument(

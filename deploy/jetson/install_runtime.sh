@@ -47,22 +47,22 @@ install -m 0755 "${SCRIPT_DIR}/run_gpu_competition.sh" \
 ln -sfn "${gpu_runtime_dir}/run_gpu_competition.sh" \
     "${HOME}/.local/bin/xycar-ai-competition"
 install -m 0755 "${SCRIPT_DIR}/x27-jetson.sh" "${x27_path}"
-if [ ! -e "${profile_dir}/gamepad_stateless_manual.yaml" ] \
-    && [ ! -L "${profile_dir}/gamepad_stateless_manual.yaml" ]; then
+if [ ! -e "${profile_dir}/gamepad_stateless_manual_normalized_v1.yaml" ] \
+    && [ ! -L "${profile_dir}/gamepad_stateless_manual_normalized_v1.yaml" ]; then
     install -m 0644 \
-        "${repo_root}/src/xycar_data/config/gamepad_stateless_manual.yaml" \
-        "${profile_dir}/gamepad_stateless_manual.yaml"
+        "${repo_root}/src/xycar_data/config/gamepad_stateless_manual_normalized_v1.yaml" \
+        "${profile_dir}/gamepad_stateless_manual_normalized_v1.yaml"
 fi
-if [ ! -e "${profile_dir}/guided_stateless_collection.yaml" ] \
-    && [ ! -L "${profile_dir}/guided_stateless_collection.yaml" ]; then
+if [ ! -e "${profile_dir}/guided_stateless_collection_normalized_v1.yaml" ] \
+    && [ ! -L "${profile_dir}/guided_stateless_collection_normalized_v1.yaml" ]; then
     install -m 0644 \
-        "${repo_root}/src/xycar_ai_drive/config/guided_stateless_collection.yaml" \
-        "${profile_dir}/guided_stateless_collection.yaml"
+        "${repo_root}/src/xycar_ai_drive/config/guided_stateless_collection_normalized_v1.yaml" \
+        "${profile_dir}/guided_stateless_collection_normalized_v1.yaml"
 fi
-if [ ! -e "${profile_dir}/competition_mission_collection.yaml" ] \
-    && [ ! -L "${profile_dir}/competition_mission_collection.yaml" ]; then
+if [ ! -e "${profile_dir}/competition_mission_collection_normalized_v1.yaml" ] \
+    && [ ! -L "${profile_dir}/competition_mission_collection_normalized_v1.yaml" ]; then
     install -m 0644 \
-        "${repo_root}/src/xycar_data/config/competition_mission_collection.yaml" \
-        "${profile_dir}/competition_mission_collection.yaml"
+        "${repo_root}/src/xycar_data/config/competition_mission_collection_normalized_v1.yaml" \
+        "${profile_dir}/competition_mission_collection_normalized_v1.yaml"
 fi
 echo "Runtime wrapper와 x27 launcher 설치 완료; backup=${backup_root}"

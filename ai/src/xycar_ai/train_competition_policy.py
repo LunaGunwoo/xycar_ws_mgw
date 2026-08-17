@@ -14,6 +14,12 @@ from typing import Any, Iterable, Mapping
 import numpy as np
 import torch
 import yaml
+
+from xycar_ai.steering_contract import (
+    STEERING_CONTRACT_NAME,
+    is_exact_steering_contract,
+    steering_contract_mapping,
+)
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, WeightedRandomSampler
@@ -69,6 +75,21 @@ def _main(kind: str, argv: Iterable[str] | None) -> None:
         )
         for split in ("train", "validation", "test")
     }
+    if kind == "shortcut":
+        for split, selected in sessions.items():
+            legacy = [
+                session.session_id
+                for session in selected
+                if not is_exact_steering_contract(
+                    session.steering_contract,
+                    include_topics=True,
+                )
+            ]
+            if legacy:
+                raise CompetitionTrainingError(
+                    f"{split} shortcut sessions lack normalized steering: "
+                    f"{legacy}"
+                )
     _validate_coverage(kind, sessions, config["data"])
     datasets = {
         split: _build_dataset(kind, selected, config, augment=split == "train")
@@ -153,6 +174,8 @@ def _train(
         ]
         for split, selected in sessions.items()
     }
+    if kind == "shortcut":
+        provenance["steering_contract"] = steering_contract_mapping()
     (run_dir / "config.yaml").write_text(
         yaml.safe_dump(dict(config), sort_keys=False),
         encoding="utf-8",
@@ -551,6 +574,12 @@ def _load_config(path: Path, *, expected_kind: str) -> Mapping[str, Any]:
     for section in ("model", "data", "training", "output"):
         if not isinstance(payload.get(section), Mapping):
             raise CompetitionTrainingError(f"config.{section} must be a mapping")
+    if expected_kind == "shortcut" and payload["data"].get(
+        "required_steering_contract"
+    ) != STEERING_CONTRACT_NAME:
+        raise CompetitionTrainingError(
+            "shortcut data must require normalized_percent_v1 steering"
+        )
     return payload
 
 

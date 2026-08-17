@@ -21,7 +21,7 @@ def generate_launch_description():
     default_params = os.path.join(
         get_package_share_directory('xycar_data'),
         'config',
-        'competition_mission_collection.yaml',
+        'competition_mission_collection_normalized_v1.yaml',
     )
     params_file = LaunchConfiguration('params_file')
     capture_kind = LaunchConfiguration('capture_kind')

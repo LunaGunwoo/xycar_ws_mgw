@@ -6,13 +6,16 @@
 
 ### `xycar_data`
 
-- Gamepad Teleop node: `ros2 run xycar_data gamepad_teleop`
+- Gamepad Teleop node: `ros2 run xycar_data gamepad_teleop --ros-args --params-file <normalized-v1-profile> -p collection_profile_path:=<normalized-v1-profile>`
 - Gamepad·camera 통합 launch: `ros2 launch xycar_data gamepad_teleop.launch.py`
 - 센서 전용 launch: `ros2 launch xycar_data teleop_sensors.launch.py`
-- 설정: `xycar_data/config/gamepad_teleop.yaml`,
-  `xycar_data/config/gamepad_stateless_manual.yaml`
+- 새 설정: `xycar_data/config/gamepad_teleop_normalized_v1.yaml`,
+  `xycar_data/config/gamepad_stateless_manual_normalized_v1.yaml`
 
 왼쪽 stick과 LT/RT를 `Float32MultiArray([angle, speed])` motor command로 변환한다.
+angle은 normalized percent `-100..100`이고 safety adapter가 driver command
+`-40..40`으로 변환한다. versioned profile은
+`steering_contract: normalized_percent_v1`을 필수로 한다.
 A로 양수 속도 session 녹화를 시작하고 B 또는 speed 0 이하에서 실제 발행값과
 camera frame을 저장한다. Joy stale, 경쟁 motor publisher, motor subscriber 부재와
 writer 오류에서는 stop-first로 동작한다. Gamepad launch와 sensor launch는 실제

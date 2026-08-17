@@ -185,6 +185,49 @@ def test_stateless_ema_config_uses_two_qualified_sources_and_raw_angle(
     assert torch.equal(target.weight, source.weight)
 
 
+def test_normalized_stateless_config_requires_raw_normalized_sessions():
+    project_root = Path(__file__).parents[1]
+    config = load_train_config(
+        project_root
+        / "config"
+        / "front_cam_policy_train_stateless_normalized_v1.yaml"
+    )
+
+    assert (
+        config.data.required_steering_contract
+        == "normalized_percent_v1"
+    )
+    assert config.data.train_angle_mean_window == 1
+    assert config.data.current_generation == 0
+    assert config.data.root == project_root / "datasets/stateless_manual"
+    assert not config.data.sources
+    assert config.data.minimum_total_samples == 10000
+    assert config.data.minimum_total_sessions == 11
+    assert config.data.minimum_train_sessions == 7
+    assert config.data.minimum_val_sessions == 2
+    assert config.data.minimum_test_sessions == 2
+    assert config.output.run_name == (
+        "vit_small_stateless_normalized_steering_v1_generation0"
+    )
+
+    guided_config = load_train_config(
+        project_root
+        / "config"
+        / "front_cam_policy_train_stateless_normalized_v1_g1.yaml"
+    )
+    assert guided_config.data.required_steering_contract == (
+        "normalized_percent_v1"
+    )
+    assert guided_config.data.current_generation == 1
+    assert guided_config.data.generation_decay == 0.5
+    assert guided_config.data.train_angle_mean_window == 1
+    assert {source.source_id for source in guided_config.data.sources} == {
+        "manual",
+        "guided",
+    }
+    assert guided_config.output.run_name.endswith("generation1")
+
+
 def test_stateless_two_root_config_validate_only_with_synthetic_sessions(
     tmp_path: Path,
 ):

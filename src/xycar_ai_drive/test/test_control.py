@@ -39,6 +39,11 @@ from xycar_ai_drive.policy_runtime import (
     TorchScriptPolicy,
     preprocess_rgb_frame,
 )
+from xycar_ai_drive.steering_contract import (
+    NORMALIZED_STEERING_CONTRACT,
+    parse_steering_contract,
+    steering_contract_mapping,
+)
 
 
 def test_motor_relay_default_is_explicit_in_vehicle_config():
@@ -133,6 +138,18 @@ def test_guided_command_hands_active_steering_to_controller():
     assert neutral.steering_residual == 0.0
     assert not neutral.human_correction
 
+    model_out_of_range = fuse_guided_command(
+        DriveCommand(angle=120.0, speed=6.0),
+        GuideInput(),
+        max_steering_angle=100.0,
+        invert_steering=True,
+        rt_speed_increment=2.0,
+        lt_speed_decrement=5.0,
+        speed_cap=30.0,
+        correction_deadzone=0.05,
+    )
+    assert model_out_of_range.executed.angle == 100.0
+
     tiny_override = fuse_guided_command(
         DriveCommand(angle=80.0, speed=6.0),
         GuideInput(steering_axis=0.001),
@@ -155,7 +172,8 @@ def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
     profile.write_text(
         'guided_policy_collector:\n'
         '  ros__parameters:\n'
-        '    max_steering_angle: 100.0\n',
+        '    max_steering_angle: 100.0\n'
+        '    steering_contract: normalized_percent_v1\n',
         encoding='utf-8',
     )
     _validate_collection_profile(str(profile))
@@ -182,7 +200,8 @@ def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
     missing_angle_profile.write_text(
         'guided_policy_collector:\n'
         '  ros__parameters:\n'
-        '    speed_cap: 30.0\n',
+        '    speed_cap: 30.0\n'
+        '    steering_contract: normalized_percent_v1\n',
         encoding='utf-8',
     )
     with pytest.raises(ValueError, match='explicitly set max_steering_angle'):
@@ -267,8 +286,12 @@ def test_x_discards_guided_session_before_forcing_drive_off():
 def test_stateless_external_collection_templates_and_launch_contract():
     package_root = Path(__file__).parents[1]
     profile_paths = (
-        package_root / 'config' / 'guided_stateless_collection.yaml',
-        package_root / 'config' / 'guided_policy_collection.yaml',
+        package_root
+        / 'config'
+        / 'guided_stateless_collection_normalized_v1.yaml',
+        package_root
+        / 'config'
+        / 'guided_policy_collection_normalized_v1.yaml',
     )
     for path in profile_paths:
         _validate_collection_profile(str(path))
@@ -282,6 +305,9 @@ def test_stateless_external_collection_templates_and_launch_contract():
     launch_text = (
         package_root / 'launch' / 'jetson_guided_collection.launch.py'
     ).read_text(encoding='utf-8')
+    generic_launch_text = (
+        package_root / 'launch' / 'guided_policy_collection.launch.py'
+    ).read_text(encoding='utf-8')
     collector_text = (
         package_root
         / 'xycar_ai_drive'
@@ -290,8 +316,15 @@ def test_stateless_external_collection_templates_and_launch_contract():
 
     assert profile['recording_root_dir'].endswith('/stateless_guided')
     assert profile['speed_cap'] == 30.0
+    assert "DeclareLaunchArgument('speed_cap', default_value='30.0')" in (
+        generic_launch_text
+    )
     for configured_profile in profiles:
         assert configured_profile['max_steering_angle'] == 100.0
+        assert (
+            configured_profile['steering_contract']
+            == 'normalized_percent_v1'
+        )
         assert 'residual_gain' not in configured_profile
     assert profile['rt_speed_increment'] == 2.0
     assert profile['lt_speed_decrement'] == 5.0
@@ -302,6 +335,7 @@ def test_stateless_external_collection_templates_and_launch_contract():
     assert "['params_file:=', params_file]" in launch_text
     assert 'OpaqueFunction(function=_require_params_file)' in launch_text
     for metadata_group in (
+        "'steering_contract':",
         "'steering_mode':",
         "'collection_profile':",
         "'runtime_safety':",
@@ -391,6 +425,14 @@ def test_artifact_contract_and_checksum_tampering(tmp_path):
     assert contract.image_size == 224
     assert contract.model_path == artifact / 'model.ts'
     assert contract.history is None
+    assert contract.steering_contract is None
+    assert (
+        parse_steering_contract(
+            steering_contract_mapping(),
+            context='fixture.steering_contract',
+        )
+        == NORMALIZED_STEERING_CONTRACT
+    )
 
     alias = tmp_path / 'fixture-policy-alias'
     alias.symlink_to(artifact, target_is_directory=True)

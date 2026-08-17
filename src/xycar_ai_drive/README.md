@@ -6,6 +6,12 @@ ROS 2 패키지다.
 모터 메시지는 `std_msgs/Float32MultiArray([angle, speed])`이며 ON/OFF와 관계없이
 20 Hz로 발행한다.
 
+새 moving runtime의 angle은 normalized percent `-100..100`이다. ROS 1 safety
+adapter가 `×0.4`로 변환한 driver command `-40..40`만
+`/xycar_motor_safe`에 발행한다. artifact manifest에 정확한
+`normalized_percent_v1` 계약이 없으면 일반 AI node는 시작 후에도 DRIVE ON을
+거부하고 Guided collector는 parent artifact로 받아들이지 않는다.
+
 ## 동작 계약
 
 - 시작 상태는 항상 OFF다. 시작 후 A를 한 번 놓은 다음 누르면 ON, 다시 누르면
@@ -53,7 +59,7 @@ ROS 2 패키지다.
 ```
 
 node는 시작 전에 checksum, input, angle/speed `[1,201]` tuple output,
-normalization과 label decode 계약을 검증한다. schema v1 stateless artifact는 고정
+normalization, label decode와 steering 계약을 검증한다. schema v1 stateless artifact는 고정
 RGB `[1,3,224,224]` 하나를 받고 계속 지원한다. schema v2 AR artifact는 RGB image와
 int64 history `[1,4,2]` tuple을 받으며 history pair 순서는
 `[angle_class_id, speed_class_id]`, 시간 순서는 오래된 값부터 최신 값까지다. 이후
@@ -113,7 +119,8 @@ angle/speed는 공통 ViT backbone과 별도 출력 head를 공유하므로 한 
 `curriculum_generation`은 session을 어느 학습 세대로 취급할지 나타내며,
 `speed_cap`은 해당 라운드에서
 사람과 모델이 합성한 전진 명령의 상한이다. 두 값은 launch 인자로 지정한다.
-외부 profile `/home/xytron/.config/xycar/guided_stateless_collection.yaml`에는
+외부 profile
+`/home/xytron/.config/xycar/guided_stateless_collection_normalized_v1.yaml`에는
 `max_steering_angle`, trigger 증감, deadzone, 버튼, timeout과
 `/home/xytron/xycar_data/stateless_guided` 저장 root를 둔다. session metadata는
 profile 경로·SHA-256과 최종 적용된 보정, inference, recording, 안전 parameter를
@@ -121,9 +128,9 @@ profile 경로·SHA-256과 최종 적용된 보정, inference, recording, 안전
 JPEG 품질 95로 저장하며 `recording_image_format`과
 `recording_jpeg_quality`를 외부 profile에서 조정할 수 있다.
 
-기존 `residual_gain` profile은 호환 실행하지 않는다. 배포 전에 해당 key를 제거하고
-같은 위치에 `max_steering_angle: 100.0`을 명시해야 하며, legacy key가 남거나 새
-key가 빠지면 collector가 DRIVE OFF 상태에서 시작을 거부한다.
+기존 `residual_gain` 또는 steering 계약이 없는 profile은 호환 실행하지 않는다.
+새 versioned profile에는 `max_steering_angle: 100.0`과
+`steering_contract: normalized_percent_v1`이 모두 있어야 한다.
 
 아래 명령은 camera, gamepad와 motor publisher를 시작하므로 매 실행 직전 사용자
 승인이 필요하다. 바퀴 지지 또는 안전 주행 공간, motor 전원 차단 수단, Y와
@@ -137,7 +144,7 @@ source install/setup.bash
 export ROS_DOMAIN_ID=7
 export ROS_NAMESPACE=xycar
 ros2 launch xycar_ai_drive jetson_guided_collection.launch.py \
-  params_file:=/home/xytron/.config/xycar/guided_stateless_collection.yaml \
+  params_file:=/home/xytron/.config/xycar/guided_stateless_collection_normalized_v1.yaml \
   artifact_id:=<schema-v1-stateless-artifact-id> \
   curriculum_generation:=1 speed_cap:=30.0 \
   use_camera:=true use_gamepad:=true allow_motion:=true
@@ -152,7 +159,7 @@ CUDA container 없이 host CPU inference를 점검할 때의 일반 launch는 �
 
 ```bash
 ros2 launch xycar_ai_drive guided_policy_collection.launch.py \
-  params_file:=/home/xytron/.config/xycar/guided_stateless_collection.yaml \
+  params_file:=/home/xytron/.config/xycar/guided_stateless_collection_normalized_v1.yaml \
   artifact_id:=<schema-v1-stateless-artifact-id> \
   curriculum_generation:=1 speed_cap:=30.0 allow_motion:=false \
   inference_backend:=local inference_device:=cpu
@@ -163,8 +170,8 @@ parameter file과 versioned artifact를 모두 명시한다.
 
 ```bash
 ros2 run xycar_ai_drive guided_policy_collector --ros-args \
-  --params-file /home/xytron/.config/xycar/guided_stateless_collection.yaml \
-  -p collection_profile_path:=/home/xytron/.config/xycar/guided_stateless_collection.yaml \
+  --params-file /home/xytron/.config/xycar/guided_stateless_collection_normalized_v1.yaml \
+  -p collection_profile_path:=/home/xytron/.config/xycar/guided_stateless_collection_normalized_v1.yaml \
   -p artifact_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/<schema-v1-artifact-id> \
   -p curriculum_generation:=1 -p speed_cap:=30.0 -p allow_motion:=false
 ```
@@ -184,8 +191,8 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
   --require-schema-version 1
 
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw
-./scripts/ai/deploy_model.sh front-cam-policy-baseline-e6-20260810 --dry-run
-./scripts/ai/deploy_model.sh front-cam-policy-baseline-e6-20260810
+./scripts/ai/deploy_model.sh <normalized-steering-artifact-id> --dry-run
+./scripts/ai/deploy_model.sh <normalized-steering-artifact-id>
 ```
 
 `deploy_model.sh`는 versioned artifact만 배포하며 ROS node를 실행하지 않는다.
@@ -223,7 +230,8 @@ source /opt/ros/humble/setup.bash
 source /home/xytron/xycar_ws_mgw/install/setup.bash
 export ROS_DOMAIN_ID=7
 export ROS_NAMESPACE=xycar
-ros2 launch xycar_ai_drive front_cam_policy.launch.py
+ros2 launch xycar_ai_drive front_cam_policy.launch.py \
+  artifact_id:=<normalized-steering-artifact-id>
 ```
 
 이미 `/image_raw` camera 또는 `/joy` publisher가 있으면 해당 장치를 중복으로
@@ -231,6 +239,7 @@ ros2 launch xycar_ai_drive front_cam_policy.launch.py
 
 ```bash
 ros2 launch xycar_ai_drive front_cam_policy.launch.py \
+  artifact_id:=<normalized-steering-artifact-id> \
   use_camera:=false use_gamepad:=false
 ```
 
@@ -239,11 +248,12 @@ ros2 launch xycar_ai_drive front_cam_policy.launch.py \
 ```bash
 ros2 run xycar_ai_drive front_cam_policy --ros-args \
   --params-file /home/xytron/xycar_ws_mgw/install/xycar_ai_drive/share/xycar_ai_drive/config/front_cam_policy.yaml \
-  -p artifact_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/front-cam-policy-baseline-e6-20260810
+  -p artifact_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/<normalized-steering-artifact-id>
 ```
 
-다른 versioned artifact를 선택할 때만 `artifact_id:=<id>`를 지정한다. 종료는
-`Ctrl+C`이며 node는 종료 경로에서 정지 command를 반복 발행한다.
+artifact ID는 항상 명시한다. 새 Base가 준비되기 전까지 기존 artifact는 offline
+분석 전용이고 실제 motion에는 사용하지 않는다. 종료는 `Ctrl+C`이며 node는 종료
+경로에서 정지 command를 반복 발행한다.
 
 ## Jetson CUDA inference
 

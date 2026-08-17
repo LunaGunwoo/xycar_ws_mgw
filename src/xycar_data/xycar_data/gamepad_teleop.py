@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from enum import Enum
 import hashlib
@@ -16,6 +17,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 import rclpy
+import yaml
 from cv_bridge import CvBridge, CvBridgeError
 from rclpy.node import Node
 from rclpy.parameter import Parameter
@@ -25,6 +27,11 @@ from sensor_msgs.msg import Image, Joy
 from std_msgs.msg import Float32MultiArray
 
 from xycar_data.session_writer import AsyncSessionWriter, CameraSample
+from xycar_data.steering_contract import (
+    STEERING_CONTRACT_NAME,
+    require_steering_contract_name,
+    session_steering_contract,
+)
 
 
 _DDS_GUID_PREFIX_SIZE = 12
@@ -374,6 +381,8 @@ def _validate_config(config: GamepadConfig) -> None:
             "trigger_axis_mode must be 'signed', 'positive', or 'negative'"
         )
     _validate_finite_positive('max_angle', config.max_angle)
+    if config.max_angle > 100.0:
+        raise ValueError('max_angle must be in (0,100]')
     _validate_finite_positive(
         'max_reverse_speed',
         config.max_reverse_speed,
@@ -461,6 +470,7 @@ class GamepadTeleopNode(Node):
         self.declare_parameter('motor_topic', '/xycar_motor')
         self.declare_parameter('camera_topic', '/image_raw')
         self.declare_parameter('collection_profile_path', '')
+        self.declare_parameter('steering_contract', '')
         self.declare_parameter('steering_axis', 0)
         self.declare_parameter('lt_axis', 4)
         self.declare_parameter('rt_axis', 5)
@@ -499,6 +509,9 @@ class GamepadTeleopNode(Node):
         self.collection_profile_path = str(
             self.get_parameter('collection_profile_path').value
         )
+        self.steering_contract = str(
+            self.get_parameter('steering_contract').value
+        ).strip()
         self.config = GamepadConfig(
             steering_axis=int(self.get_parameter('steering_axis').value),
             lt_axis=int(self.get_parameter('lt_axis').value),
@@ -677,7 +690,15 @@ class GamepadTeleopNode(Node):
             raise ValueError('joy_topic must not be empty')
         if not self.motor_topic:
             raise ValueError('motor_topic must not be empty')
-        _validate_collection_profile(self.collection_profile_path)
+        require_steering_contract_name(self.steering_contract)
+        _validate_collection_profile(
+            self.collection_profile_path,
+            node_name=(
+                'mission_sequence_collector'
+                if self.recording_mode == 'mission_sequence'
+                else 'gamepad_teleop'
+            ),
+        )
         _validate_config(self.config)
         _validate_runtime_parameters(
             self.publish_rate_hz,
@@ -842,6 +863,9 @@ class GamepadTeleopNode(Node):
             'lidar_is_optional': False,
             'control_mode': (
                 'gamepad_mission_sequence' if mission_sequence else 'gamepad'
+            ),
+            'steering_contract': session_steering_contract(
+                motor_topic=self.motor_topic
             ),
             'topics': {
                 'camera_topic': self.camera_topic,
@@ -1166,14 +1190,33 @@ def _node_label(namespace: str, name: str) -> str:
     return label if label.startswith('/') else f'/{label}'
 
 
-def _validate_collection_profile(configured_path: str) -> None:
+def _validate_collection_profile(
+    configured_path: str,
+    *,
+    node_name: str = 'gamepad_teleop',
+) -> None:
     if not configured_path:
-        return
+        raise ValueError('collection_profile_path must not be empty')
     path = Path(configured_path)
     if not path.is_absolute() or not path.is_file():
         raise ValueError(
             'collection_profile_path must be an existing absolute file'
         )
+    try:
+        payload = yaml.safe_load(path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise ValueError(
+            f'collection profile must be valid UTF-8 YAML: {path}'
+        ) from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError('collection profile root must be a mapping')
+    node_config = payload.get(node_name)
+    if not isinstance(node_config, Mapping):
+        raise ValueError(f'collection profile must configure {node_name}')
+    parameters = node_config.get('ros__parameters')
+    if not isinstance(parameters, Mapping):
+        raise ValueError(f'{node_name}.ros__parameters must be a mapping')
+    require_steering_contract_name(parameters.get('steering_contract'))
 
 
 def _collection_profile_metadata(configured_path: str) -> dict[str, object]:

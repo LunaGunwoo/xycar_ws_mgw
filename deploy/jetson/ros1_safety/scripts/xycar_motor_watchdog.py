@@ -19,7 +19,21 @@ class MotorWatchdogNode:
             raise ValueError('publish_rate_hz must be positive')
         if self._stop_publish_count < 1:
             raise ValueError('stop_publish_count must be positive')
-        self._watchdog = MotorCommandWatchdog(timeout_sec)
+        self._watchdog = MotorCommandWatchdog(
+            timeout_sec,
+            input_angle_min=float(
+                rospy.get_param('~input_angle_min', -100.0)
+            ),
+            input_angle_max=float(
+                rospy.get_param('~input_angle_max', 100.0)
+            ),
+            driver_angle_min=float(
+                rospy.get_param('~driver_angle_min', -40.0)
+            ),
+            driver_angle_max=float(
+                rospy.get_param('~driver_angle_max', 40.0)
+            ),
+        )
         self._publisher = rospy.Publisher(
             '/xycar_motor_safe',
             Float32MultiArray,
@@ -41,7 +55,8 @@ class MotorWatchdogNode:
         if not self._watchdog.observe(message.data, time.monotonic()):
             rospy.logwarn_throttle(
                 1.0,
-                'Rejected malformed /xycar_motor command; publishing stop.',
+                'Rejected invalid normalized /xycar_motor command; '
+                'publishing stop.',
             )
 
     def _on_timer(self, _event) -> None:

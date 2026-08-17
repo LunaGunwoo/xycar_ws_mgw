@@ -7,6 +7,8 @@ from pathlib import Path
 import yaml
 from PIL import Image
 
+from xycar_ai.steering_contract import session_steering_contract_mapping
+
 CSV_HEADER = [
     "sample_index",
     "image",
@@ -37,6 +39,7 @@ def write_session(
     complete: bool = True,
     generation: int | None = None,
     initial_history_class_ids: list[list[int]] | None = None,
+    normalized_steering: bool = False,
 ) -> Path:
     session = root / name
     images = session / "Images"
@@ -77,6 +80,8 @@ def write_session(
         "sample_count": len(label_list),
         "gamepad": {"max_forward_speed": max_forward_speed},
     }
+    if normalized_steering:
+        metadata["steering_contract"] = session_steering_contract_mapping()
     if generation is not None:
         metadata["curriculum"] = {
             "generation": generation,

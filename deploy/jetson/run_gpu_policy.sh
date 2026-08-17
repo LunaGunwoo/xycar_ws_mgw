@@ -5,9 +5,13 @@ SCRIPT_PATH=$(readlink -f -- "${BASH_SOURCE[0]}")
 SCRIPT_DIR=$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd)
 source "${SCRIPT_DIR}/images.lock.env"
 
-ARTIFACT_ID=${ARTIFACT_ID:-front-cam-policy-tiny-hflip-p05-patience5-e5-20260811}
+ARTIFACT_ID=${ARTIFACT_ID:-}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-/home/xytron/xycar_ws_mgw/artifacts/models}
 HOST_POLICY_LAUNCH=${HOST_POLICY_LAUNCH:-front_cam_policy.launch.py}
+if [ -z "${ARTIFACT_ID}" ]; then
+    echo "[ERROR] normalized steering ARTIFACT_ID를 명시하세요." >&2
+    exit 1
+fi
 case "${HOST_POLICY_LAUNCH}" in
     front_cam_policy.launch.py|guided_policy_collection.launch.py) ;;
     *)

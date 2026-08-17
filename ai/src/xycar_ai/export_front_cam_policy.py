@@ -19,6 +19,11 @@ from xycar_ai.front_cam_policy_model import (
     AutoregressiveControlTokenViTPolicy,
     TaskTokenViTPolicy,
 )
+from xycar_ai.steering_contract import (
+    STEERING_CONTRACT_NAME,
+    is_exact_steering_contract,
+    steering_contract_mapping,
+)
 
 LEGACY_ARTIFACT_SCHEMA_VERSION = 1
 AR_ARTIFACT_SCHEMA_VERSION = 3
@@ -107,8 +112,15 @@ def export_checkpoint(
 
     payload = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     checkpoint = _checkpoint_mapping(payload)
-    model_config = _mapping(checkpoint, "config", "checkpoint")
-    model_config = _mapping(model_config, "model", "checkpoint.config")
+    checkpoint_config = _mapping(checkpoint, "config", "checkpoint")
+    data_config = _mapping(checkpoint_config, "data", "checkpoint.config")
+    if data_config.get("required_steering_contract") != STEERING_CONTRACT_NAME:
+        raise PolicyExportError(
+            "checkpoint data must require normalized_percent_v1 steering"
+        )
+    model_config = _mapping(
+        checkpoint_config, "model", "checkpoint.config"
+    )
     model_name = _string(model_config, "name", "checkpoint.config.model")
     architecture = str(model_config.get("architecture", "task_tokens"))
     schema_version = (
@@ -256,18 +268,6 @@ def verify_artifact(
         raise PolicyExportError("artifact manifest is missing or unsafe")
     if not checksum_path.is_file() or checksum_path.is_symlink():
         raise PolicyExportError("artifact checksum file is missing or unsafe")
-    if require_schema_version is not None:
-        try:
-            manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-        except yaml.YAMLError as exc:
-            raise PolicyExportError("artifact manifest is invalid YAML") from exc
-        if not isinstance(manifest, Mapping):
-            raise PolicyExportError("artifact manifest must be a mapping")
-        if manifest.get("schema_version") != require_schema_version:
-            raise PolicyExportError(
-                "artifact schema_version differs from required "
-                f"{require_schema_version}"
-            )
     expected: dict[str, str] = {}
     for line in checksum_path.read_text(encoding="utf-8").splitlines():
         parts = line.split(maxsplit=1)
@@ -295,6 +295,25 @@ def verify_artifact(
             raise PolicyExportError(f"artifact file is missing or unsafe: {relative}")
         if sha256_file(path) != digest:
             raise PolicyExportError(f"artifact checksum mismatch: {relative}")
+    try:
+        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise PolicyExportError("artifact manifest is invalid YAML") from exc
+    if not isinstance(manifest, Mapping):
+        raise PolicyExportError("artifact manifest must be a mapping")
+    steering_contract = manifest.get("steering_contract")
+    if steering_contract is not None and not is_exact_steering_contract(
+        steering_contract
+    ):
+        raise PolicyExportError("artifact steering contract is incompatible")
+    if (
+        require_schema_version is not None
+        and manifest.get("schema_version") != require_schema_version
+    ):
+        raise PolicyExportError(
+            "artifact schema_version differs from required "
+            f"{require_schema_version}"
+        )
 
 
 def sha256_file(path: Path) -> str:
@@ -387,6 +406,7 @@ def _build_manifest(
         },
         "preprocessing": dict(preprocessing),
         "label_contract": dict(label_contract),
+        "steering_contract": steering_contract_mapping(),
         "runtime": {"torch_num_threads": 8, "warmup_count": 3},
     }
     if history_contract is not None:

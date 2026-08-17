@@ -16,6 +16,7 @@ from xycar_ai_drive.front_cam_policy_node import (
     FrontCamPolicyNode,
     _is_paired_unnamed_relay,
 )
+from xycar_ai_drive.steering_contract import NORMALIZED_STEERING_CONTRACT
 
 JOY_TOPIC = '/xycar_ai_drive_test/joy'
 CAMERA_TOPIC = '/xycar_ai_drive_test/camera'
@@ -27,6 +28,10 @@ ENABLED_TOPIC = '/xycar_ai_drive_test/enabled'
 class _FakePolicy:
     def __init__(self, **_kwargs):
         self.reset_count = 0
+        self.artifact = SimpleNamespace(
+            history=None,
+            steering_contract=NORMALIZED_STEERING_CONTRACT,
+        )
 
     def reset_history(self):
         self.reset_count += 1
@@ -96,6 +101,13 @@ def test_only_paired_unnamed_bridge_endpoint_is_recognized():
         [0, 0, 0x12, 0x03],
     )
     assert not _is_paired_unnamed_relay(named_publisher, [subscriber])
+
+
+def test_legacy_artifact_contract_blocks_motion_enable():
+    node = SimpleNamespace(_artifact_motion_contract_valid=False)
+    assert FrontCamPolicyNode._unsafe_reason_locked(node, 1.0) == (
+        'artifact steering contract is not normalized_percent_v1'
+    )
 
 
 def _spin_for(harness, duration_sec, *, a=None, publish_camera=True):

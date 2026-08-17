@@ -39,6 +39,11 @@ from xycar_ai_drive.front_cam_policy_node import (
 )
 from xycar_ai_drive.policy_ipc import UnixSocketPolicyClient
 from xycar_ai_drive.policy_runtime import TorchScriptPolicy
+from xycar_ai_drive.steering_contract import (
+    require_normalized_steering_contract,
+    require_steering_contract_name,
+    session_steering_contract,
+)
 
 PolicyFactory = Callable[..., object]
 
@@ -111,11 +116,12 @@ def fuse_guided_command(
             guide.steering_axis * max_steering_angle * steering_sign,
         ),
     )
-    angle = (
+    selected_angle = (
         model.angle
         if guide.steering_axis == 0.0
         else controller_angle
     )
+    angle = max(-100.0, min(100.0, selected_angle))
     residual = angle - model.angle
     speed_delta = (
         guide.rt_depth * rt_speed_increment
@@ -170,6 +176,10 @@ class GuidedPolicyCollectorNode(Node):
 
         self.artifact: PolicyArtifact = load_policy_artifact(
             self.artifact_dir
+        )
+        require_normalized_steering_contract(
+            self.artifact.steering_contract,
+            context='guided parent artifact steering contract',
         )
         self.bridge = CvBridge()
         self._lock = threading.RLock()
@@ -260,6 +270,7 @@ class GuidedPolicyCollectorNode(Node):
     def _declare_parameters(self) -> None:
         self.declare_parameter('artifact_dir', '')
         self.declare_parameter('collection_profile_path', '')
+        self.declare_parameter('steering_contract', '')
         self.declare_parameter('camera_topic', '/image_raw')
         self.declare_parameter('joy_topic', '/joy')
         self.declare_parameter('motor_topic', '/xycar_motor')
@@ -280,7 +291,7 @@ class GuidedPolicyCollectorNode(Node):
         self.declare_parameter('max_steering_angle', 100.0)
         self.declare_parameter('rt_speed_increment', 2.0)
         self.declare_parameter('lt_speed_decrement', 5.0)
-        self.declare_parameter('speed_cap', 27.0)
+        self.declare_parameter('speed_cap', 30.0)
         self.declare_parameter('correction_deadzone', 0.05)
         self.declare_parameter('record_start_button', 0)
         self.declare_parameter('record_stop_button', 1)
@@ -320,6 +331,7 @@ class GuidedPolicyCollectorNode(Node):
         for name in (
             'artifact_dir',
             'collection_profile_path',
+            'steering_contract',
             'camera_topic',
             'joy_topic',
             'motor_topic',
@@ -386,6 +398,7 @@ class GuidedPolicyCollectorNode(Node):
             if not getattr(self, name):
                 raise ValueError(f'{name} must not be empty')
         _validate_collection_profile(self.collection_profile_path)
+        require_steering_contract_name(self.steering_contract)
         indices = (
             self.steering_axis,
             self.lt_axis,
@@ -431,8 +444,8 @@ class GuidedPolicyCollectorNode(Node):
             or not 0 < self.max_steering_angle <= 100
         ):
             raise ValueError('max_steering_angle must be in (0,100]')
-        if not 0 <= self.speed_cap <= 100:
-            raise ValueError('speed_cap must be in [0,100]')
+        if self.speed_cap != 30.0:
+            raise ValueError('speed_cap must be exactly 30')
         if self.tail_discard_frames < 0 or self.curriculum_generation < 0:
             raise ValueError(
                 'tail discard and generation must be non-negative'
@@ -825,6 +838,9 @@ class GuidedPolicyCollectorNode(Node):
             'camera_is_primary': True,
             'lidar_is_optional': False,
             'control_mode': 'guided_policy',
+            'steering_contract': session_steering_contract(
+                motor_topic=self.motor_topic
+            ),
             'curriculum': curriculum,
             'topics': {
                 'camera_topic': self.camera_topic,
@@ -1116,7 +1132,7 @@ class GuidedPolicyCollectorNode(Node):
 
 def _validate_collection_profile(configured_path: str) -> None:
     if not configured_path:
-        return
+        raise ValueError('collection_profile_path must not be empty')
     path = Path(configured_path)
     if not path.is_absolute() or not path.is_file():
         raise ValueError(
@@ -1149,6 +1165,7 @@ def _validate_collection_profile(configured_path: str) -> None:
         raise ValueError(
             'collection profile must explicitly set max_steering_angle'
         )
+    require_steering_contract_name(parameters.get('steering_contract'))
 
 
 def _collection_profile_metadata(configured_path: str) -> dict[str, object]:

@@ -21,7 +21,7 @@ def generate_launch_description():
     default_params = os.path.join(
         get_package_share_directory('xycar_data'),
         'config',
-        'gamepad_teleop.yaml',
+        'gamepad_teleop_normalized_v1.yaml',
     )
     params_file = LaunchConfiguration('params_file')
     device_id = LaunchConfiguration('device_id')

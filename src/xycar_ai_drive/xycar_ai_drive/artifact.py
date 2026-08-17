@@ -12,6 +12,11 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
+from xycar_ai_drive.steering_contract import (
+    SteeringContract,
+    parse_steering_contract,
+)
+
 SUPPORTED_ARTIFACT_SCHEMA_VERSIONS = {1, 2, 3}
 CHECKSUM_FILENAME = 'SHA256SUMS'
 MANIFEST_FILENAME = 'manifest.yaml'
@@ -52,6 +57,7 @@ class PolicyArtifact:
     std: tuple[float, float, float]
     road_warp: RoadWarpParameters | None
     history: PolicyHistoryContract | None
+    steering_contract: SteeringContract | None
 
 
 def load_policy_artifact(root: str | Path) -> PolicyArtifact:
@@ -160,6 +166,14 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
     if label_contract.get('decode_mapping') != 'class_id - 100':
         raise ArtifactContractError('unsupported label decode mapping')
 
+    try:
+        steering_contract = parse_steering_contract(
+            manifest.get('steering_contract'),
+            context='manifest.steering_contract',
+        )
+    except ValueError as exc:
+        raise ArtifactContractError(str(exc)) from exc
+
     return PolicyArtifact(
         root=root,
         artifact_id=artifact_id,
@@ -169,6 +183,7 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
         std=std,
         road_warp=road_warp,
         history=history,
+        steering_contract=steering_contract,
     )
 
 

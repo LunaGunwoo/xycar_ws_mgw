@@ -951,6 +951,15 @@ def initialize_model_weights(
             if isinstance(checkpoint_data, dict)
             else None
         )
+        source_steering_contract = (
+            checkpoint_data.get("required_steering_contract")
+            if isinstance(checkpoint_data, dict)
+            else None
+        )
+        if source_steering_contract != config.data.required_steering_contract:
+            raise ValueError(
+                "initialization checkpoint steering contract differs from config"
+            )
         expected_generation = config.data.current_generation - 1
         if source_generation != expected_generation:
             raise ValueError(

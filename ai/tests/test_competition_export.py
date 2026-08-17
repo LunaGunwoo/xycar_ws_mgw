@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import torch
+import pytest
 import yaml
 from torch import nn
 
@@ -19,6 +20,7 @@ from xycar_ai.export_competition_policy import (
     export_temporal_policy,
     verify_bundle,
 )
+from xycar_ai.steering_contract import steering_contract_mapping
 
 
 class _BaseTuplePolicy(nn.Module):
@@ -45,6 +47,7 @@ def _write_base_artifact(root: Path) -> Path:
             "mean": [0.5, 0.5, 0.5],
             "std": [0.5, 0.5, 0.5],
         },
+        "steering_contract": steering_contract_mapping(),
     }
     (artifact / "manifest.yaml").write_text(
         yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
@@ -93,7 +96,14 @@ def _write_checkpoint(
             "epoch": 1,
             "model_config": vars(model.config),
             "model_state": model.state_dict(),
-            "data_provenance": {"fixture": True},
+            "data_provenance": {
+                "fixture": True,
+                **(
+                    {"steering_contract": steering_contract_mapping()}
+                    if kind == "shortcut"
+                    else {}
+                ),
+            },
         },
         checkpoint,
     )
@@ -136,3 +146,26 @@ def test_temporal_exports_build_one_verified_bundle(tmp_path: Path):
         "LEFT",
         "STRAIGHT",
     ]
+    assert manifest["steering_contract"] == steering_contract_mapping()
+
+    base_manifest_path = base / "manifest.yaml"
+    base_manifest = yaml.safe_load(base_manifest_path.read_text())
+    del base_manifest["steering_contract"]
+    base_manifest_path.write_text(
+        yaml.safe_dump(base_manifest, sort_keys=False), encoding="utf-8"
+    )
+    lines = []
+    for name in ("manifest.yaml", "model.ts"):
+        digest = hashlib.sha256((base / name).read_bytes()).hexdigest()
+        lines.append(f"{digest}  {name}\n")
+    (base / "SHA256SUMS").write_text("".join(lines), encoding="utf-8")
+    with pytest.raises(
+        ValueError, match="base artifact lacks normalized steering"
+    ):
+        build_bundle(
+            base_artifact=base,
+            signal_artifact=signal,
+            shortcut_artifact=shortcut,
+            artifact_id="legacy-base-rejected",
+            output_root=model_root,
+        )

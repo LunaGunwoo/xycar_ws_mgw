@@ -43,7 +43,7 @@ def generate_launch_description():
                 default_value=os.path.join(
                     package_share,
                     'config',
-                    'guided_policy_collection.yaml',
+                    'guided_policy_collection_normalized_v1.yaml',
                 ),
             ),
             DeclareLaunchArgument(
@@ -52,17 +52,14 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 'artifact_id',
-                default_value=(
-                    'front-cam-policy-warp-angle-mean5-ar4-shared-'
-                    'e14-20260811'
-                ),
+                description='Normalized steering policy artifact ID.',
             ),
             DeclareLaunchArgument('use_camera', default_value='true'),
             DeclareLaunchArgument('use_gamepad', default_value='true'),
             DeclareLaunchArgument('allow_motion', default_value='true'),
             DeclareLaunchArgument('device_id', default_value='0'),
             DeclareLaunchArgument('curriculum_generation', default_value='1'),
-            DeclareLaunchArgument('speed_cap', default_value='27.0'),
+            DeclareLaunchArgument('speed_cap', default_value='30.0'),
             DeclareLaunchArgument('inference_backend', default_value='local'),
             DeclareLaunchArgument('inference_device', default_value='cpu'),
             DeclareLaunchArgument(

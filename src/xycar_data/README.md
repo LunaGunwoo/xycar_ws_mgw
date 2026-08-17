@@ -5,6 +5,12 @@
 `angle`, `speed`를 label로 저장한다. 게임패드 주행은 카메라가 없어도 유지되며
 녹화 중 누락된 camera frame만 건너뛴다.
 
+새 수집의 `/xycar_motor` angle은 물리 driver 단위가 아니라 normalized percent
+`-100..100`이다. ROS 1 safety adapter가 이를 `×0.4`로 변환해
+`/xycar_motor_safe`에 driver command `-40..40`을 발행한다. CSV `angle`은 변환 전
+실제 normalized publish 값이며 session metadata의
+`steering_contract.name=normalized_percent_v1`에 이 의미를 기록한다.
+
 새 수집 명령은 활성 Jetson 차량
 `xytron@xycar-gpu:/home/xytron/xycar_ws_mgw` 기준이다. 기존 `xytron@xycar`는
 CPU inference rollback 재현에만 사용한다.
@@ -42,11 +48,11 @@ Gamepad camera frame은 Jetson에서 30 Hz를 지속 저장할 수 있도록 기
 
 ```bash
 ros2 launch xycar_data gamepad_teleop.launch.py \
-  params_file:=/home/xytron/.config/xycar/gamepad_stateless_manual.yaml
+  params_file:=/home/xytron/.config/xycar/gamepad_stateless_manual_normalized_v1.yaml
 ```
 
-아래 인자 없는 명령은 기존 `/home/xytron/xycar_data/teleop` 호환 profile을 쓰는
-rollback용이다.
+아래 인자 없는 명령도 normalized v1 generic profile과 기존
+`/home/xytron/xycar_data/teleop` 저장 root를 사용한다.
 
 ```bash
 ros2 launch xycar_data gamepad_teleop.launch.py
@@ -111,7 +117,9 @@ ros2 launch xycar_data gamepad_teleop.launch.py use_camera:=false
 필요하다.
 
 ```bash
-ros2 run xycar_data gamepad_teleop
+ros2 run xycar_data gamepad_teleop --ros-args \
+  --params-file /home/xytron/.config/xycar/gamepad_stateless_manual_normalized_v1.yaml \
+  -p collection_profile_path:=/home/xytron/.config/xycar/gamepad_stateless_manual_normalized_v1.yaml
 ```
 
 기본값은 `config/gamepad_teleop.yaml`에서 바꿀 수 있다. 다른 SDL 장치를 쓸 때는
@@ -188,9 +196,11 @@ publisher로 중단되면
 
 ## 튜닝
 
-새 수집은 외부 `~/.config/xycar/gamepad_stateless_manual.yaml`을 조정한다.
-tracked seed는 `config/gamepad_stateless_manual.yaml`이다. 기존 rollback profile은
-`config/gamepad_teleop.yaml`에 둔다.
+새 수집은 외부
+`~/.config/xycar/gamepad_stateless_manual_normalized_v1.yaml`을 조정한다.
+tracked seed는 `config/gamepad_stateless_manual_normalized_v1.yaml`이다. 계약이
+없는 기존 profile과 raw session은 legacy/reference로 보존하며 새 학습에 넣지
+않는다.
 
 - camera, Joy와 motor topic
 - gamepad axis·button mapping, trigger 부호 profile, 중립 재활성 임계값과
@@ -201,7 +211,8 @@ tracked seed는 `config/gamepad_stateless_manual.yaml`이다. 기존 rollback pr
 
 YAML의 빈 topic, 잘못된 speed/steering 부호·범위, `NaN`·`Inf` 수치, 음수
 timeout, queue 크기, 이미지 형식, JPEG 품질과 PNG compression 범위 오류는 node
-시작 시 거부된다.
+시작 시 거부된다. profile이 없거나 `steering_contract`가
+`normalized_percent_v1`이 아니어도 시작을 거부한다.
 실제 차에서는 raised-car 상태에서 왼쪽 stick 조향 부호와 후진 부호를 먼저
 확인한 뒤 값을 조정한다.
 
@@ -226,7 +237,7 @@ export ROS_DOMAIN_ID=7
 export ROS_NAMESPACE=xycar
 
 ros2 launch xycar_data mission_sequence_collection.launch.py \
-  params_file:=/home/xytron/.config/xycar/competition_mission_collection.yaml \
+  params_file:=/home/xytron/.config/xycar/competition_mission_collection_normalized_v1.yaml \
   capture_kind:=signal
 ```
 
@@ -234,7 +245,7 @@ ros2 launch xycar_data mission_sequence_collection.launch.py \
 
 ```bash
 ros2 launch xycar_data mission_sequence_collection.launch.py \
-  params_file:=/home/xytron/.config/xycar/competition_mission_collection.yaml \
+  params_file:=/home/xytron/.config/xycar/competition_mission_collection_normalized_v1.yaml \
   capture_kind:=shortcut
 ```
 
@@ -243,9 +254,9 @@ camera와 Joy가 이미 승인된 별도 node에서 발행 중일 때 collector�
 
 ```bash
 ros2 run xycar_data mission_sequence_collector --ros-args \
-  --params-file /home/xytron/.config/xycar/competition_mission_collection.yaml \
+  --params-file /home/xytron/.config/xycar/competition_mission_collection_normalized_v1.yaml \
   -p capture_kind:=signal \
-  -p collection_profile_path:=/home/xytron/.config/xycar/competition_mission_collection.yaml
+  -p collection_profile_path:=/home/xytron/.config/xycar/competition_mission_collection_normalized_v1.yaml
 ```
 
 - A를 놓았다가 한 번 누르면 현재 speed와 관계없이 녹화가 시작된다.
@@ -258,8 +269,8 @@ ros2 run xycar_data mission_sequence_collector --ros-args \
 `dataset_kind=competition_mission_sequence`,
 `control_mode=gamepad_mission_sequence`, `mission.capture_kind`와
 `mission.records_stationary_frames=true`를 기록한다. 수집 profile seed는
-`config/competition_mission_collection.yaml`이고 Jetson runtime 설치 시
-`~/.config/xycar/competition_mission_collection.yaml`이 없을 때만 복사한다.
+`config/competition_mission_collection_normalized_v1.yaml`이고 Jetson runtime
+설치 시 같은 이름의 외부 file이 없을 때만 복사한다.
 
 정확히 모아야 할 상태별 session 수, 각 sequence 시작/종료 지점과 라벨 검수
 항목은 상위 하네스의 `docs/competition_ai_data_checklist.md`를 따른다. active

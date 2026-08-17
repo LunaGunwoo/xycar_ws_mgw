@@ -437,34 +437,51 @@ resume한 뒤에만 best checkpoint를 prediction rollout 방식으로 test 평�
 ### Stateless ViT-Small 증분 학습과 EMA sampling
 
 새 기본 workflow는 기존 `datasets/teleop`과 checkpoint를 사용하지 않는다.
-수동·사람 보정 session은 각각 다음 root에 물리적으로 분리하고, 한 학습 run에서만
-두 source를 함께 읽는다.
+수동·사람 보정 session은 각각 다음 root에 물리적으로 분리한다. Base G0는 Manual
+root만 읽고, G1부터 두 source를 함께 읽는다.
 
 ```text
 datasets/stateless_manual  # control_mode=gamepad, 항상 generation 0
 datasets/stateless_guided  # control_mode=guided_policy, curriculum.generation 필수
 ```
 
-`config/front_cam_policy_train_stateless_ema.yaml`은 pretrained
+새 steering cutover는
+`config/front_cam_policy_train_stateless_normalized_v1.yaml`을 사용한다. 이
+설정은 `required_steering_contract: normalized_percent_v1`로 metadata의 전체
+`-100..100 -> -40..40` 계약과 topic을 검사하므로 계약이 없는 기존 session을
+자동 제외한다. 원본 instantaneous angle을 그대로 쓰며
+`train_angle_mean_window: 1`이라 시간축 조향 평균은 적용하지 않는다.
+
+기존 `config/front_cam_policy_train_stateless_ema.yaml`은 pretrained
 `vit_small_patch16_224`, `task_tokens`, history 0, 224x224 road warp와 raw instantaneous
-angle(`train_angle_mean_window: 1`)을 강제하는 schema 3 설정이다. AR 학습 설정과
-schema v2/v3 runtime은 rollback용으로 남아 있지만 새 데이터에는 사용하지 않는다.
+angle을 사용하는 legacy/reference 설정이다. AR 학습 설정과 schema v2/v3 runtime도
+rollback용으로 남아 있지만 새 Base에는 사용하지 않는다.
 validation selection score가 5 epochs 연속 개선되지 않으면 조기 종료하며, 다음
 generation에서도 이 patience를 유지한다.
 
-split은 `config/front_cam_policy_split_stateless_ema.yaml`을 사람이 검토해 갱신한다.
-ID는 반드시 `manual/<session-id>` 또는 `guided/<session-id>`로 적는다. 서로 다른
-root에 같은 session directory 이름이 있어도 source-qualified ID가 다르므로
-충돌하지 않는다. guided session에 generation이 없거나 train split에
-`current_generation` sample이 없거나 더 미래 generation이 있으면 검증을 거부한다.
+새 split은 `config/front_cam_policy_split_stateless_normalized_v1.yaml`을 사람이
+검토해 갱신한다. 처음에는 빈 fail-closed template이며 normalized Manual complete
+session이 최소 11개/10,000 frames가 된 뒤 train 7 / validation 2 / test 2 이상으로
+채운다. G0 split ID는 plain `<session-id>`이며 config의 minimum frame/session gate가
+기준 미달 학습을 거부한다.
 
-현재 활성 Base snapshot은 2026-08-14와 2026-08-17에 수집한 manual generation 0의
+새 Base 검증 뒤 Guided G1에는
+`front_cam_policy_train_stateless_normalized_v1_g1.yaml`과 별도의 빈
+`front_cam_policy_split_stateless_normalized_v1_g1.yaml`을 사용한다. G1 split ID는
+반드시 `manual/<session-id>` 또는 `guided/<session-id>`로 적는다. 서로 다른 root에
+같은 directory 이름이 있어도 source-qualified ID가 다르므로 충돌하지 않는다.
+guided session에 generation이 없거나 train split에 generation 1 sample이 없거나
+더 미래 generation이 있으면 검증을 거부한다.
+
+기존 Base snapshot은 2026-08-14와 2026-08-17에 수집한 manual generation 0의
 32 sessions/30,889 samples를 사용한다. guided sample은 split에 포함하지 않는다.
 시간상 인접한 frame이 split 사이에 직접 섞이지 않도록 session timestamp 순서로
 train 25개/22,958, validation 3개/3,886, test 4개/4,045 samples로 배치했다. speed
 label은 30,859개가 15이고 나머지 30개만 trigger 전환 구간의 6.703~14.628이므로 이
-Base의 speed head는 사실상 15 유지 모델이다. generation 0은 EMA mass 1.0으로만
-sampling하며 ImageNet pretrained weight에서 새로 시작한다.
+Base의 speed head는 사실상 15 유지 모델이다. 이 32개 session은 legacy steering
+label이므로 새 normalized split에는 하나도 포함하지 않는다. 새 generation 0은
+normalized Manual만 EMA mass 1.0으로 sampling하며 ImageNet pretrained weight에서
+새로 시작한다.
 
 train epoch의 세대별 총 sampling mass는 다음과 같고 같은 세대 안에서는 frame을
 균등하게 뽑는다. raw session은 삭제하지 않으며 과거 영향은 sampling mass로만
@@ -483,9 +500,8 @@ checkpoint 선택식 `angle_mae + 0.25 * speed_mae` 역시 세대별 metric을 �
 epoch sample 수를 기록한다. config의 `current_generation`보다 새 generation이
 있거나 train split에 current generation sample이 없으면 학습을 거부한다.
 
-generation 0은 ImageNet pretrained weight에서 시작한다. generation 1부터는 config의
-`current_generation`과 `output.run_name`을 같은 generation 번호로 바꾸고 직전
-stateless run의 `best.pt`를 `--initialize-from`으로 반드시 지정한다. 이 옵션은
+generation 0은 ImageNet pretrained weight에서 시작한다. generation 1은 전용 G1
+config와 직전 stateless Base의 `best.pt`를 `--initialize-from`으로 반드시 지정한다. 이 옵션은
 model state만 strict load하고 optimizer, scheduler, AMP scaler, epoch와
 early-stopping state는 새로 시작한다. 같은 generation run의 중단 재개만
 `--resume`을 사용한다.
@@ -493,21 +509,22 @@ early-stopping state는 새로 시작한다. 같은 generation run의 중단 재
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 /home/xytron/.local/bin/uv run --locked xycar-train \
-  --config config/front_cam_policy_train_stateless_ema.yaml \
+  --config config/front_cam_policy_train_stateless_normalized_v1.yaml \
   --validate-only
 
 # generation 0
 /home/xytron/.local/bin/uv run --locked xycar-train \
-  --config config/front_cam_policy_train_stateless_ema.yaml
+  --config config/front_cam_policy_train_stateless_normalized_v1.yaml
 
-# generation 1 이상: YAML의 current_generation과 run_name을 먼저 갱신
+# generation 1: normalized Manual + Guided G1 split
 /home/xytron/.local/bin/uv run --locked xycar-train \
-  --config config/front_cam_policy_train_stateless_ema.yaml \
+  --config config/front_cam_policy_train_stateless_normalized_v1_g1.yaml \
   --initialize-from artifacts/runs/front_cam_policy/<previous-run>/best.pt
 ```
 
-export는 schema v1을 명시적으로 요구한다. stateless가 아닌 checkpoint면 artifact를
-만들기 전에 거부하며, 성공한 artifact는 checksum까지 다시 검증한다.
+export는 schema v1과 checkpoint의 normalized steering data contract를 모두
+요구한다. contract가 없는 기존 checkpoint나 stateless가 아닌 checkpoint는
+artifact를 만들기 전에 거부하며, 성공한 artifact는 checksum까지 다시 검증한다.
 
 ```bash
 /home/xytron/.local/bin/uv run --locked xycar-export-policy \
@@ -674,7 +691,7 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 exporter는 checkpoint model state를 strict load하고 eager/trace/reload 결과와 두
 `[1,201]` 출력을 확인한 뒤 `model.ts`, `manifest.yaml`, `SHA256SUMS`를 atomic하게
 생성한다. manifest에는 checkpoint/source/dataset, RGB input, timm preprocessing,
-label decode, CPU thread와 warm-up 계약이 포함된다. 차량 배포와 실행 방법은
+label decode, `normalized_percent_v1`, CPU thread와 warm-up 계약이 포함된다. 차량 배포와 실행 방법은
 `src/xycar_ai_drive/README.md`를 따른다.
 
 ## 대회 신호등·지름길 temporal pipeline
@@ -750,6 +767,10 @@ epoch마다 같은 총 sampling mass를 갖도록 inverse-frequency sampler를 �
 validation과 test는 실제 분포를 유지한다. split별로 모든 lamp와 negative가 한
 session 이상 없으면 학습을 거부하므로, 그 경우 새 seed로 split을 생성한다.
 horizontal flip은 신호 의미와 지름길 geometry를 바꾸므로 사용하지 않는다.
+shortcut 학습은 normalized v1 mission session만 허용하고 checkpoint provenance에
+steering contract를 남긴다. bundle builder는 조향을 출력하는 Base와 shortcut의
+계약이 정확히 일치하지 않으면 bundle을 만들지 않는다. signal model은 조향을
+출력하지 않으므로 이 비교 대상이 아니다.
 
 run은 `config.yaml`, session/annotation checksum provenance, `metrics.csv`,
 `best.pt`, `last.pt`, `test_metrics.json`을 남긴다. 같은 run directory는

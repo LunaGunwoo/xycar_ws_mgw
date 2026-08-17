@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from xycar_ai.steering_contract import validate_required_contract_name
+
 CONFIG_SCHEMA_VERSIONS = {1, 2, 3}
 CLASS_WEIGHTING_MODES = {"none", "sqrt_inverse_frequency"}
 MODEL_ARCHITECTURES = {"task_tokens", "ar_control_tokens"}
@@ -53,6 +55,12 @@ class DataConfig:
     legacy_generation: int = 0
     ema_sampling: bool = False
     sources: tuple[DataSourceConfig, ...] = ()
+    required_steering_contract: str | None = None
+    minimum_total_samples: int = 0
+    minimum_total_sessions: int = 0
+    minimum_train_sessions: int = 0
+    minimum_val_sessions: int = 0
+    minimum_test_sessions: int = 0
 
 
 @dataclass(frozen=True)
@@ -335,6 +343,36 @@ def load_train_config(path: str | Path) -> TrainConfig:
                 if schema_version == 3
                 else ()
             ),
+            required_steering_contract=(
+                _string(data_payload, "required_steering_contract")
+                if "required_steering_contract" in data_payload
+                else None
+            ),
+            minimum_total_samples=(
+                _integer(data_payload, "minimum_total_samples")
+                if "minimum_total_samples" in data_payload
+                else 0
+            ),
+            minimum_total_sessions=(
+                _integer(data_payload, "minimum_total_sessions")
+                if "minimum_total_sessions" in data_payload
+                else 0
+            ),
+            minimum_train_sessions=(
+                _integer(data_payload, "minimum_train_sessions")
+                if "minimum_train_sessions" in data_payload
+                else 0
+            ),
+            minimum_val_sessions=(
+                _integer(data_payload, "minimum_val_sessions")
+                if "minimum_val_sessions" in data_payload
+                else 0
+            ),
+            minimum_test_sessions=(
+                _integer(data_payload, "minimum_test_sessions")
+                if "minimum_test_sessions" in data_payload
+                else 0
+            ),
         ),
         preprocessing=PreprocessingConfig(
             road_warp_config=(
@@ -398,6 +436,16 @@ def load_train_config(path: str | Path) -> TrainConfig:
 
 
 def _validate(config: TrainConfig) -> None:
+    validate_required_contract_name(config.data.required_steering_contract)
+    minimum_fields = (
+        config.data.minimum_total_samples,
+        config.data.minimum_total_sessions,
+        config.data.minimum_train_sessions,
+        config.data.minimum_val_sessions,
+        config.data.minimum_test_sessions,
+    )
+    if any(value < 0 for value in minimum_fields):
+        raise ValueError("data minimum dataset sizes must be >= 0")
     if config.model.image_size <= 0:
         raise ValueError("model.image_size must be > 0")
     if config.model.pretrained and config.model.image_size != 224:
@@ -614,7 +662,15 @@ def _expect_data_keys(payload: Mapping[str, object], *, schema_version: int) -> 
                 "generation_decay",
             },
             "data",
-            optional={"train_angle_mean_window"},
+            optional={
+                "train_angle_mean_window",
+                "required_steering_contract",
+                "minimum_total_samples",
+                "minimum_total_sessions",
+                "minimum_train_sessions",
+                "minimum_val_sessions",
+                "minimum_test_sessions",
+            },
         )
         return
 
@@ -630,7 +686,15 @@ def _expect_data_keys(payload: Mapping[str, object], *, schema_version: int) -> 
         }
         mode_fields = {"control_mode", "control_modes"}
         filters = {"max_forward_speed", "min_forward_speed"}
-        optional = {"train_angle_mean_window"}
+        optional = {
+            "train_angle_mean_window",
+            "required_steering_contract",
+            "minimum_total_samples",
+            "minimum_total_sessions",
+            "minimum_train_sessions",
+            "minimum_val_sessions",
+            "minimum_test_sessions",
+        }
         actual = set(payload)
         missing = required - actual
         extra = actual - required - mode_fields - filters - optional
@@ -655,7 +719,15 @@ def _expect_data_keys(payload: Mapping[str, object], *, schema_version: int) -> 
         "num_workers",
     }
     filters = {"max_forward_speed", "min_forward_speed"}
-    optional = {"train_angle_mean_window"}
+    optional = {
+        "train_angle_mean_window",
+        "required_steering_contract",
+        "minimum_total_samples",
+        "minimum_total_sessions",
+        "minimum_train_sessions",
+        "minimum_val_sessions",
+        "minimum_test_sessions",
+    }
     actual = set(payload)
     missing = required - actual
     extra = actual - required - filters - optional

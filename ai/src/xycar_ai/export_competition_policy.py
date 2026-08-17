@@ -26,6 +26,10 @@ from xycar_ai.competition_models import (
     SignalTemporalPolicy,
 )
 from xycar_ai.export_front_cam_policy import sha256_file, verify_artifact
+from xycar_ai.steering_contract import (
+    is_exact_steering_contract,
+    steering_contract_mapping,
+)
 
 
 ARTIFACT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -119,6 +123,15 @@ def export_temporal_policy(
     model_state = checkpoint.get("model_state")
     if not isinstance(model_state, Mapping):
         raise CompetitionExportError("checkpoint.model_state must be a mapping")
+    data_provenance = checkpoint.get("data_provenance", {})
+    if not isinstance(data_provenance, Mapping):
+        raise CompetitionExportError("checkpoint.data_provenance must be a mapping")
+    if kind == "shortcut" and not is_exact_steering_contract(
+        data_provenance.get("steering_contract")
+    ):
+        raise CompetitionExportError(
+            "shortcut checkpoint lacks normalized steering provenance"
+        )
     if kind == "signal":
         config = SignalModelConfig(
             backbone=_required_string(model_config, "backbone", "model_config"),
@@ -241,6 +254,8 @@ def export_temporal_policy(
             "preprocessing": preprocessing,
             "labels": dict(labels),
         }
+        if kind == "shortcut":
+            manifest["steering_contract"] = steering_contract_mapping()
         (temporary / MANIFEST_FILENAME).write_text(
             yaml.safe_dump(manifest, sort_keys=False),
             encoding="utf-8",
@@ -283,6 +298,19 @@ def build_bundle(
         require_race_qualified=True,
     )
     base_manifest = _load_yaml_mapping(base_artifact / MANIFEST_FILENAME)
+    expected_steering = steering_contract_mapping()
+    if not is_exact_steering_contract(
+        base_manifest.get("steering_contract")
+    ):
+        raise CompetitionExportError(
+            "base artifact lacks normalized steering contract"
+        )
+    if not is_exact_steering_contract(
+        shortcut_manifest.get("steering_contract")
+    ):
+        raise CompetitionExportError(
+            "shortcut artifact lacks normalized steering contract"
+        )
     output_root = output_root.expanduser().resolve()
     final = output_root / artifact_id
     if final.exists():
@@ -312,6 +340,7 @@ def build_bundle(
             "artifact_kind": "competition_bundle",
             "artifact_id": artifact_id,
             "created_at": datetime.now(UTC).isoformat(),
+            "steering_contract": expected_steering,
             "models": {
                 "base": {
                     "file": "base_model.ts",
@@ -388,6 +417,12 @@ def verify_temporal_artifact(
         raise CompetitionExportError("temporal artifact id mismatch")
     if require_race_qualified and manifest.get("race_qualified") is not True:
         raise CompetitionExportError("temporal artifact is not race-qualified")
+    if expected_kind == "shortcut" and not is_exact_steering_contract(
+        manifest.get("steering_contract")
+    ):
+        raise CompetitionExportError(
+            "shortcut artifact steering contract is incompatible"
+        )
     model = _required_mapping(manifest, "model", "manifest")
     if model.get("format") != "torchscript" or model.get("file") != MODEL_FILENAME:
         raise CompetitionExportError("unsupported temporal model contract")
@@ -406,6 +441,10 @@ def verify_bundle(
         raise CompetitionExportError("bundle schema_version must be 1")
     if manifest.get("artifact_kind") != "competition_bundle":
         raise CompetitionExportError("artifact is not a competition bundle")
+    if not is_exact_steering_contract(manifest.get("steering_contract")):
+        raise CompetitionExportError(
+            "bundle steering contract is incompatible"
+        )
     required_id = expected_artifact_id or root.name
     if manifest.get("artifact_id") != required_id:
         raise CompetitionExportError("bundle artifact id mismatch")

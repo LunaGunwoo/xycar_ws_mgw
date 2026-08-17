@@ -270,6 +270,15 @@ def _competition_artifact(tmp_path):
         'schema_version': 1,
         'artifact_kind': 'competition_bundle',
         'artifact_id': root.name,
+        'steering_contract': {
+            'schema_version': 1,
+            'name': 'normalized_percent_v1',
+            'command_min': -100.0,
+            'command_max': 100.0,
+            'driver_min': -40.0,
+            'driver_max': 40.0,
+            'mapping': 'linear_scale_0.4',
+        },
         'models': {
             'base': {
                 'file': 'base_model.ts',

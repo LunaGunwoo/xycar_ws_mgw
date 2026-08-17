@@ -114,6 +114,88 @@ def test_minimum_forward_speed_filter_includes_boundary(tmp_path: Path):
     ] == expected
 
 
+def test_required_steering_contract_excludes_legacy_sessions(tmp_path: Path):
+    data_root = tmp_path / "datasets" / "stateless_manual"
+    legacy = "20260817_120000_000_session"
+    normalized = "20260817_120100_000_session"
+    malformed = "20260817_120200_000_session"
+    write_session(data_root, legacy, labels=[(0.0, 7.0)])
+    write_session(
+        data_root,
+        normalized,
+        labels=[(10.0, 7.0)],
+        normalized_steering=True,
+    )
+    malformed_session = write_session(
+        data_root,
+        malformed,
+        labels=[(20.0, 7.0)],
+        normalized_steering=True,
+    )
+    malformed_metadata_path = malformed_session / "metadata.yaml"
+    malformed_metadata = yaml.safe_load(malformed_metadata_path.read_text())
+    malformed_metadata["steering_contract"]["schema_version"] = True
+    malformed_metadata_path.write_text(
+        yaml.safe_dump(malformed_metadata, sort_keys=False),
+        encoding="utf-8",
+    )
+    config = DataConfig(
+        root=data_root,
+        split_manifest=tmp_path / "missing-split.yaml",
+        require_all_matching_sessions=False,
+        control_mode="gamepad",
+        max_forward_speed=None,
+        min_forward_speed=None,
+        num_workers=0,
+        required_steering_contract="normalized_percent_v1",
+    )
+
+    sessions = discover_policy_sessions(config)
+
+    assert [session.session_id for session in sessions] == [normalized]
+
+
+def test_split_manifest_enforces_configured_dataset_minimums(tmp_path: Path):
+    data_root = tmp_path / "datasets" / "stateless_manual"
+    names = [
+        "20260817_120000_000_session",
+        "20260817_120100_000_session",
+        "20260817_120200_000_session",
+    ]
+    for name in names:
+        write_session(data_root, name, labels=[(0.0, 7.0)])
+    manifest = write_split_manifest(
+        tmp_path / "config" / "split.yaml",
+        train=[names[0]],
+        val=[names[1]],
+        test=[names[2]],
+    )
+    config = DataConfig(
+        root=data_root,
+        split_manifest=manifest,
+        require_all_matching_sessions=True,
+        control_mode="gamepad",
+        max_forward_speed=None,
+        min_forward_speed=None,
+        num_workers=0,
+        minimum_total_samples=4,
+        minimum_total_sessions=4,
+        minimum_train_sessions=2,
+        minimum_val_sessions=2,
+        minimum_test_sessions=2,
+    )
+
+    with pytest.raises(PolicyDatasetError, match="below configured minimum") as exc:
+        build_policy_data_splits(config)
+
+    message = str(exc.value)
+    assert "total samples 3 < 4" in message
+    assert "total sessions 3 < 4" in message
+    assert "train sessions 1 < 2" in message
+    assert "val sessions 1 < 2" in message
+    assert "test sessions 1 < 2" in message
+
+
 def test_split_manifest_rejects_overlap_and_unlisted_session(tmp_path: Path):
     data_root = tmp_path / "datasets" / "teleop"
     names = [

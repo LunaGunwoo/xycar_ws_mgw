@@ -54,7 +54,6 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 'artifact_id',
-                default_value='front-cam-policy-baseline-e6-20260810',
                 description='Versioned front-camera policy artifact id.',
             ),
             DeclareLaunchArgument(
