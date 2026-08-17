@@ -247,6 +247,23 @@ def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
     assert rows[0]['human_correction'] == 'true'
 
 
+def test_x_discards_guided_session_before_forcing_drive_off():
+    events = []
+    fake = SimpleNamespace(
+        _discard_active_session=lambda **kwargs: events.append(
+            ('discard', kwargs)
+        ),
+        _force_off=lambda reason: events.append(('force_off', reason)),
+    )
+
+    GuidedPolicyCollectorNode._discard_session_and_stop(fake)
+
+    assert events == [
+        ('discard', {'reason': 'x_button'}),
+        ('force_off', 'X button emergency stop'),
+    ]
+
+
 def test_stateless_external_collection_templates_and_launch_contract():
     package_root = Path(__file__).parents[1]
     profile_paths = (

@@ -101,8 +101,8 @@ angle/speed는 공통 ViT backbone과 별도 출력 head를 공유하므로 한 
   전환한다.
 - A: 양수 speed 주행 중 새 session 녹화 시작.
 - B: 주행을 유지하면서 현재 session 정상 저장.
-- X: 주행을 유지하면서 현재 session 전체 삭제. metadata나 incomplete
-  directory를 남기지 않으며 복구할 수 없다.
+- X: 즉시 zero command와 DRIVE OFF로 전환하면서 현재 session 전체 삭제.
+  metadata나 incomplete directory를 남기지 않으며 복구할 수 없다.
 - 녹화 중 Y 긴급 정지: 최근 10 frame을 버리고 나머지를
   `stop_reason=y_emergency_stop`으로 정상 저장.
 - stale Joy/camera, inference·writer 오류, motor subscriber 소실 또는 경쟁 motor

@@ -253,7 +253,8 @@ class GuidedPolicyCollectorNode(Node):
         self._refresh_graph(time.monotonic())
         self.get_logger().warning(
             'Guided collector started DRIVE OFF. Release and press Y to '
-            'toggle motion; A starts, B saves, and X deletes the session.'
+            'toggle motion; A starts, B saves, and X stops motion and '
+            'deletes the session.'
         )
 
     def _declare_parameters(self) -> None:
@@ -532,13 +533,17 @@ class GuidedPolicyCollectorNode(Node):
             self._guide = guide
             self._joy_valid = True
             self._last_joy_monotonic = now
-            action = self._drive_gate.observe(
-                pressed=buttons[self.drive_toggle_button],
-                can_enable=self._can_enable_locked(now),
-            )
             start_pressed = rising(self.record_start_button)
             stop_pressed = rising(self.record_stop_button)
             discard_pressed = rising(self.record_discard_button)
+            action = (
+                ToggleAction.NONE
+                if discard_pressed
+                else self._drive_gate.observe(
+                    pressed=buttons[self.drive_toggle_button],
+                    can_enable=self._can_enable_locked(now),
+                )
+            )
             if action == ToggleAction.ENABLED:
                 self._policy.reset_history()
                 self._history = self._initial_history()
@@ -546,6 +551,9 @@ class GuidedPolicyCollectorNode(Node):
                 self._awaiting_post_reset_prediction = True
                 self._history_reset_monotonic = now
                 self._stop_reason = None
+        if discard_pressed:
+            self._discard_session_and_stop()
+            return
         if action == ToggleAction.ENABLED:
             self._publish_enabled(True)
             self.get_logger().warning('Guided motion toggled ON by Y.')
@@ -573,9 +581,6 @@ class GuidedPolicyCollectorNode(Node):
                 discard_tail=False,
                 complete=True,
             )
-        if discard_pressed:
-            self._discard_active_session(reason='x_button')
-
     def _on_camera(self, message: Image) -> None:
         try:
             rgb = self.bridge.imgmsg_to_cv2(message, desired_encoding='rgb8')
@@ -977,6 +982,10 @@ class GuidedPolicyCollectorNode(Node):
         )
         self._retry_pending_finish()
 
+    def _discard_session_and_stop(self) -> None:
+        self._discard_active_session(reason='x_button')
+        self._force_off('X button emergency stop')
+
     def _retry_pending_finish(self) -> None:
         pending = self._pending_finish
         if pending is None or self.writer.failure is not None:
@@ -1004,7 +1013,7 @@ class GuidedPolicyCollectorNode(Node):
             self._finishing_token = None
             if result.discarded:
                 self.get_logger().warning(
-                    'Guided session deleted by X; '
+                    'Guided motion stopped and session deleted by X; '
                     f'written_samples={result.sample_count}'
                 )
             elif result.completed:
