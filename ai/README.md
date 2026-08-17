@@ -8,6 +8,7 @@
 - Python: 3.12
 - uv: 0.11.24
 - 새 dataset: `datasets/stateless_manual/`, `datasets/stateless_guided/`
+  (`stateless_guided/generation_<N>/<collection-id>/`별 raw cohort)
 - rollback dataset: `datasets/teleop/`
 - training output: `artifacts/`
 - 배포 후보: `artifacts/models/<artifact-id>/`
@@ -443,7 +444,15 @@ root만 읽고, G1부터 두 source를 함께 읽는다.
 ```text
 datasets/stateless_manual  # control_mode=gamepad, 항상 generation 0
 datasets/stateless_guided  # control_mode=guided_policy, curriculum.generation 필수
+├── <legacy-direct-session>                         # 기존 G1 호환
+└── generation_<N>/<collection-id>/<session-id>    # 새 분리 저장 구조
 ```
+
+Guided loader는 기존 root 직속 session과 새
+`generation_<N>/<collection-id>/<session-id>`를 함께 읽는다. 새 nested session의
+source-qualified ID는
+`guided/generation_<N>/<collection-id>/<session-id>`이며 directory generation과
+`metadata.yaml`의 `curriculum.generation`이 다르면 학습을 거부한다.
 
 새 steering cutover는
 `config/front_cam_policy_train_stateless_normalized_v1.yaml`을 사용한다. 이
@@ -467,9 +476,11 @@ session이 최소 11개/10,000 frames가 된 뒤 train 7 / validation 2 / test 2
 
 새 Base 검증 뒤 Guided G1에는
 `front_cam_policy_train_stateless_normalized_v1_g1.yaml`과 별도의 빈
-`front_cam_policy_split_stateless_normalized_v1_g1.yaml`을 사용한다. G1 split ID는
-반드시 `manual/<session-id>` 또는 `guided/<session-id>`로 적는다. 서로 다른 root에
-같은 directory 이름이 있어도 source-qualified ID가 다르므로 충돌하지 않는다.
+`front_cam_policy_split_stateless_normalized_v1_g1.yaml`을 사용한다. 기존 G1 split
+ID는 `manual/<session-id>` 또는 `guided/<session-id>`이고, 분리 저장한 Guided
+cohort는 `guided/generation_<N>/<collection-id>/<session-id>`로 적는다. 서로 다른
+root에 같은 directory 이름이 있어도 source-qualified ID가 다르므로 충돌하지
+않는다.
 guided session에 generation이 없거나 train split에 generation 1 sample이 없거나
 더 미래 generation이 있으면 검증을 거부한다.
 각 Guided 세대는 완료 session 약 5개를 수집해 train/validation/test `3/1/1`로
@@ -572,18 +583,21 @@ Guided 세대 parent로 사용하지 않는다. G2 이상은 G1 config와 split�
 복사하고 `current_generation`, `split_manifest`, `output.run_name`을 함께 올린다.
 
 차량 두 root를 Laptop으로 가져올 때는 하나의 directory로 합치지 않는다. manual은
-직결 LAN exact mirror를 쓰고, guided는 기존 Tailscale no-delete script를 먼저
-dry-run한 뒤 `--apply`한다.
+직결 LAN exact mirror를 쓴다. Guided는 generation과 collection ID의 정확한 cohort
+root를 같은 상대 구조의 Laptop root로 지정하고, Tailscale no-delete script를 먼저
+dry-run한 뒤 `--apply`한다. 상위 `stateless_guided` 전체를 source로 지정하지 않는다.
 
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw
 ./scripts/ai/sync_stateless_manual_lan.sh
 
-XYCAR_AI_VEHICLE_DATASET_ROOT=/home/xytron/xycar_data/stateless_guided \
-XYCAR_AI_LOCAL_DATASET_ROOT="$PWD/ai/datasets/stateless_guided" \
+GENERATION=2
+COLLECTION_ID=g2-20260817-a
+XYCAR_AI_VEHICLE_DATASET_ROOT=/home/xytron/xycar_data/stateless_guided/generation_${GENERATION}/${COLLECTION_ID} \
+XYCAR_AI_LOCAL_DATASET_ROOT="$PWD/ai/datasets/stateless_guided/generation_${GENERATION}/${COLLECTION_ID}" \
   ./scripts/ai/sync_dataset.sh
-XYCAR_AI_VEHICLE_DATASET_ROOT=/home/xytron/xycar_data/stateless_guided \
-XYCAR_AI_LOCAL_DATASET_ROOT="$PWD/ai/datasets/stateless_guided" \
+XYCAR_AI_VEHICLE_DATASET_ROOT=/home/xytron/xycar_data/stateless_guided/generation_${GENERATION}/${COLLECTION_ID} \
+XYCAR_AI_LOCAL_DATASET_ROOT="$PWD/ai/datasets/stateless_guided/generation_${GENERATION}/${COLLECTION_ID}" \
   ./scripts/ai/sync_dataset.sh --apply
 ```
 

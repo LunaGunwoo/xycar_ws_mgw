@@ -330,6 +330,95 @@ def test_multi_source_guided_requires_generation_and_source_manifest_schema(
     with pytest.raises(PolicyDatasetError, match="schema_version must be 2"):
         build_policy_data_splits(config)
 
+
+def test_guided_source_supports_generation_and_collection_directories(
+    tmp_path: Path,
+):
+    manual_root = tmp_path / "datasets" / "stateless_manual"
+    guided_root = tmp_path / "datasets" / "stateless_guided"
+    manual_names = [
+        "20260817_120000_000_session",
+        "20260817_120100_000_session",
+        "20260817_120200_000_session",
+    ]
+    legacy_guided = "20260817_130000_000_session"
+    nested_guided = "20260817_140000_000_session"
+    for name in manual_names:
+        write_session(manual_root, name, labels=[(0.0, 7.0)])
+    write_session(
+        guided_root,
+        legacy_guided,
+        labels=[(1.0, 9.0)],
+        control_mode="guided_policy",
+        generation=1,
+    )
+    write_session(
+        guided_root / "generation_2" / "g2-20260817-a",
+        nested_guided,
+        labels=[(2.0, 10.0)],
+        control_mode="guided_policy",
+        generation=2,
+    )
+    nested_id = (
+        "guided/generation_2/g2-20260817-a/" + nested_guided
+    )
+    manifest = write_split_manifest(
+        tmp_path / "config" / "split.yaml",
+        train=[
+            f"manual/{manual_names[0]}",
+            f"guided/{legacy_guided}",
+            nested_id,
+        ],
+        val=[f"manual/{manual_names[1]}"],
+        test=[f"manual/{manual_names[2]}"],
+        schema_version=2,
+    )
+    config = replace(
+        _multi_source_data_config(manual_root, guided_root, manifest),
+        current_generation=2,
+    )
+
+    sessions = discover_policy_sessions(config)
+    splits = build_policy_data_splits(config)
+
+    assert [session.session_id for session in sessions] == [
+        f"manual/{name}" for name in manual_names
+    ] + [f"guided/{legacy_guided}", nested_id]
+    nested_sample = next(
+        sample for sample in splits.train_samples if sample.session_id == nested_id
+    )
+    assert nested_sample.generation == 2
+    assert nested_sample.relative_image.startswith(
+        "guided/generation_2/g2-20260817-a/"
+    )
+
+
+def test_guided_collection_directory_generation_must_match_metadata(
+    tmp_path: Path,
+):
+    manual_root = tmp_path / "datasets" / "stateless_manual"
+    guided_root = tmp_path / "datasets" / "stateless_guided"
+    manual_root.mkdir(parents=True)
+    write_session(
+        guided_root / "generation_2" / "g2-20260817-a",
+        "20260817_140000_000_session",
+        labels=[(2.0, 10.0)],
+        control_mode="guided_policy",
+        generation=1,
+    )
+    config = _multi_source_data_config(
+        manual_root,
+        guided_root,
+        tmp_path / "config" / "split.yaml",
+    )
+
+    with pytest.raises(
+        PolicyDatasetError,
+        match="directory generation does not match metadata",
+    ):
+        discover_policy_sessions(config)
+
+
 @pytest.mark.parametrize("invalid_value", ["nan", "inf", "-inf", "101"])
 def test_dataset_rejects_invalid_label(tmp_path: Path, invalid_value: str):
     data_root = tmp_path / "datasets" / "teleop"

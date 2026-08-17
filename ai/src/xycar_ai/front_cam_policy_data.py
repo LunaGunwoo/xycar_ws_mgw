@@ -26,6 +26,8 @@ COMMAND_OFFSET = 100
 NUM_COMMAND_CLASSES = 201
 SPLIT_NAMES = ("train", "val", "test")
 SESSION_NAME_RE = re.compile(r"^\d{8}_\d{6}_\d{3}_session(?:_\d+)?$")
+GUIDED_GENERATION_DIR_RE = re.compile(r"^generation_(0|[1-9]\d*)$")
+GUIDED_COLLECTION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 REQUIRED_CSV_FIELDS = {
     "sample_index",
     "image",
@@ -363,9 +365,7 @@ def _discover_source_sessions(
             f"dataset source root does not exist: {source.source_id}={source.root}"
         )
     sessions: list[PolicySession] = []
-    for path in sorted(source.root.iterdir()):
-        if not path.is_dir() or not SESSION_NAME_RE.fullmatch(path.name):
-            continue
+    for path, directory_generation in _source_session_paths(source):
         metadata = _load_metadata(path / "metadata.yaml")
         if not _matches_source_filter(
             metadata,
@@ -373,19 +373,67 @@ def _discover_source_sessions(
             required_steering_contract=required_steering_contract,
         ):
             continue
-        sessions.append(
-            _load_policy_session(
-                path,
-                source.root,
-                metadata,
-                source_id=source.source_id,
-                fixed_generation=source.fixed_generation,
-                require_curriculum_generation=(
-                    source.require_curriculum_generation
-                ),
-            )
+        session = _load_policy_session(
+            path,
+            source.root,
+            metadata,
+            source_id=source.source_id,
+            fixed_generation=source.fixed_generation,
+            require_curriculum_generation=(
+                source.require_curriculum_generation
+            ),
         )
+        if (
+            directory_generation is not None
+            and session.generation != directory_generation
+        ):
+            raise PolicyDatasetError(
+                "Guided directory generation does not match metadata: "
+                f"{path} has generation_{directory_generation}, "
+                f"metadata has {session.generation}"
+            )
+        sessions.append(session)
     return sessions
+
+
+def _source_session_paths(
+    source: DataSourceConfig,
+) -> tuple[tuple[Path, int | None], ...]:
+    direct = [
+        (path, None)
+        for path in sorted(source.root.iterdir())
+        if path.is_dir() and SESSION_NAME_RE.fullmatch(path.name)
+    ]
+    if source.source_id != "guided":
+        return tuple(direct)
+
+    nested: list[tuple[Path, int]] = []
+    for generation_root in sorted(source.root.iterdir()):
+        generation_match = GUIDED_GENERATION_DIR_RE.fullmatch(
+            generation_root.name
+        )
+        if (
+            generation_match is None
+            or generation_root.is_symlink()
+            or not generation_root.is_dir()
+        ):
+            continue
+        directory_generation = int(generation_match.group(1))
+        for collection_root in sorted(generation_root.iterdir()):
+            if (
+                collection_root.is_symlink()
+                or not collection_root.is_dir()
+                or not GUIDED_COLLECTION_ID_RE.fullmatch(collection_root.name)
+            ):
+                continue
+            nested.extend(
+                (path, directory_generation)
+                for path in sorted(collection_root.iterdir())
+                if path.is_dir()
+                and not path.is_symlink()
+                and SESSION_NAME_RE.fullmatch(path.name)
+            )
+    return tuple(direct + nested)
 
 
 def build_policy_data_splits(
@@ -980,8 +1028,11 @@ def _load_policy_session(
         fixed_generation=fixed_generation,
         require_curriculum_generation=require_curriculum_generation,
     )
+    relative_session_id = path.relative_to(root).as_posix()
     qualified_session_id = (
-        f"{source_id}/{path.name}" if source_id is not None else path.name
+        f"{source_id}/{relative_session_id}"
+        if source_id is not None
+        else relative_session_id
     )
     samples_path = path / "samples.csv"
     images_path = path / "Images"

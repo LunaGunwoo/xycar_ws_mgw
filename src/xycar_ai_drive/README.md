@@ -119,10 +119,14 @@ angle/speed는 공통 ViT backbone과 별도 출력 head를 공유하므로 한 
 `curriculum_generation`은 session을 어느 학습 세대로 취급할지 나타내며,
 `speed_cap`은 해당 라운드에서
 사람과 모델이 합성한 전진 명령의 상한이다. 두 값은 launch 인자로 지정한다.
-외부 profile
+외부 base profile
 `/home/xytron/.config/xycar/guided_stateless_collection_normalized_v1.yaml`에는
 `max_steering_angle`, trigger 증감, deadzone, 버튼, timeout과
-`/home/xytron/xycar_data/stateless_guided` 저장 root를 둔다. session metadata는
+기본 저장 root를 둔다. 실제 수집은 이 파일을 collection ID별 외부 profile로
+복사하면서 `recording_root_dir`만
+`/home/xytron/xycar_data/stateless_guided/generation_<N>/<collection-id>`로 바꿔
+사용한다. 같은 generation이라도 새 수집 묶음이면 새 collection ID를 쓴다.
+session metadata는
 profile 경로·SHA-256과 최종 적용된 보정, inference, recording, 안전 parameter를
 기록한다. 수집 이미지는 30 Hz camera보다 충분한 writer 처리량을 확보하도록 기본
 JPEG 품질 95로 저장하며 `recording_image_format`과
@@ -143,12 +147,19 @@ source /opt/ros/humble/setup.bash
 source install/setup.bash
 export ROS_DOMAIN_ID=7
 export ROS_NAMESPACE=xycar
+GENERATION=<next-generation>
+COLLECTION_ID=<generation-and-collection-id>
+PROFILE=/home/xytron/.config/xycar/guided_collections/generation_${GENERATION}/${COLLECTION_ID}.yaml
+test -f "${PROFILE}"
 ros2 launch xycar_ai_drive jetson_guided_collection.launch.py \
-  params_file:=/home/xytron/.config/xycar/guided_stateless_collection_normalized_v1.yaml \
+  params_file:="${PROFILE}" \
   artifact_id:=<schema-v1-stateless-artifact-id> \
-  curriculum_generation:=1 speed_cap:=30.0 \
+  curriculum_generation:="${GENERATION}" speed_cap:=30.0 \
   use_camera:=true use_gamepad:=true allow_motion:=true
 ```
+
+collection별 profile 생성과 `recording_root_dir` 검증 명령은 workspace root
+`COMMANDS.md`의 Guided 절차를 그대로 사용한다.
 
 이미 준비된 `/image_raw` 또는 `/joy`를 재사용할 때만 각각
 `use_camera:=false`, `use_gamepad:=false`를 지정한다. motor bridge는 이 launch가
@@ -159,9 +170,9 @@ CUDA container 없이 host CPU inference를 점검할 때의 일반 launch는 �
 
 ```bash
 ros2 launch xycar_ai_drive guided_policy_collection.launch.py \
-  params_file:=/home/xytron/.config/xycar/guided_stateless_collection_normalized_v1.yaml \
+  params_file:="${PROFILE}" \
   artifact_id:=<schema-v1-stateless-artifact-id> \
-  curriculum_generation:=1 speed_cap:=30.0 allow_motion:=false \
+  curriculum_generation:="${GENERATION}" speed_cap:=30.0 allow_motion:=false \
   inference_backend:=local inference_device:=cpu
 ```
 
@@ -170,10 +181,10 @@ parameter file과 versioned artifact를 모두 명시한다.
 
 ```bash
 ros2 run xycar_ai_drive guided_policy_collector --ros-args \
-  --params-file /home/xytron/.config/xycar/guided_stateless_collection_normalized_v1.yaml \
-  -p collection_profile_path:=/home/xytron/.config/xycar/guided_stateless_collection_normalized_v1.yaml \
+  --params-file "${PROFILE}" \
+  -p collection_profile_path:="${PROFILE}" \
   -p artifact_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/<schema-v1-artifact-id> \
-  -p curriculum_generation:=1 -p speed_cap:=30.0 -p allow_motion:=false
+  -p curriculum_generation:="${GENERATION}" -p speed_cap:=30.0 -p allow_motion:=false
 ```
 
 기존 artifact의 `full_frame_bicubic_resize`와 새
