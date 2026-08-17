@@ -506,11 +506,14 @@ cohort는 `guided/generation_<N>/<collection-id>/<session-id>`로 적는다. 서
 root에 같은 directory 이름이 있어도 source-qualified ID가 다르므로 충돌하지
 않는다.
 guided session에 generation이 없거나 train split에 generation 1 sample이 없거나
-더 미래 generation이 있으면 검증을 거부한다.
-각 Guided 세대는 완료 session 약 5개를 수집해 train/validation/test `3/1/1`로
-배치한다. 다음 세대 split은 이전 세대까지 누적하되 한번 정한 session 소속은
-바꾸지 않는다. Manual G0 split도 새로 수집하거나 이동하지 않고 replay anchor로
-고정한다.
+더 미래 generation이 있으면 검증을 거부한다. 각 Guided 세대에서 학습 대상으로
+확정한 complete session은 누락 없이 session-disjoint train/validation/test split에
+배치한다. `current_generation_session_counts`에는 해당 세대의 실제 split별 session
+수를 적고 loader가 manifest와 정확히 일치하는지 fail-closed로 검사한다. G1의
+기존 5-session split은 `3/1/1`을 유지하고, G2 `g2-20260817-a`의 16-session
+cohort는 `12/2/2`를 사용한다. 다음 세대 split은 이전 세대까지 누적하되 한번
+정한 session 소속은 바꾸지 않는다. Manual G0 split도 새로 수집하거나 이동하지
+않고 replay anchor로 고정한다.
 
 기존 Base snapshot은 2026-08-14와 2026-08-17에 수집한 manual generation 0의
 32 sessions/30,889 samples를 사용한다. guided sample은 split에 포함하지 않는다.
@@ -549,8 +552,10 @@ class frequency weight와 validation checkpoint 선택식
 `angle_mae + 0.25 * speed_mae`에도 같은 source/generation mass를 적용한다. stats와
 checkpoint에는 source/generation별 sample 수와 mass를 기록한다.
 `manual_anchor_split_manifest`는 G0 split의 Manual session 소속을 split별로 정확히
-고정하고 `current_generation_session_counts: {train: 3, val: 1, test: 1}`은 매
-Guided generation의 5-session 배치를 fail-closed로 검사한다.
+고정한다. `current_generation_session_counts`는 train/validation/test의 양의 정수를
+모두 요구하고, 현재 Guided generation의 실제 session 수가 설정과 다르면
+fail-closed로 중단한다. 따라서 G1의 `3/1/1`과 G2의 `12/2/2`를 각 run에서 그대로
+재현하면서도 수집된 complete session을 임의로 버리지 않는다.
 
 generation 0은 ImageNet pretrained weight에서 시작한다. generation 1은 전용 G1
 config와 직전 stateless Base의 `best.pt`를 `--initialize-from`으로 반드시 지정한다. 이 옵션은

@@ -568,14 +568,10 @@ def _validate(config: TrainConfig) -> None:
                 raise ValueError(
                     "data.manual_anchor_split_manifest is required with source masses"
                 )
-            if config.data.current_generation_session_counts != {
-                "train": 3,
-                "val": 1,
-                "test": 1,
-            }:
+            if not config.data.current_generation_session_counts:
                 raise ValueError(
-                    "data.current_generation_session_counts must be train 3 / "
-                    "val 1 / test 1"
+                    "data.current_generation_session_counts is required with "
+                    "source masses"
                 )
         elif (
             config.data.manual_anchor_split_manifest is not None

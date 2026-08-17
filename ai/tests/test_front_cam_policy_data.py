@@ -871,7 +871,7 @@ def test_source_anchored_weights_require_exact_configured_sources():
         )
 
 
-def test_source_anchor_preserves_manual_split_and_guided_three_one_one(
+def test_source_anchor_preserves_manual_split_and_configured_guided_counts(
     tmp_path: Path,
 ):
     manual_root = tmp_path / "datasets" / "manual"
@@ -887,6 +887,8 @@ def test_source_anchor_preserves_manual_split_and_guided_three_one_one(
         "20260817_020103_001_session",
         "20260817_020104_001_session",
         "20260817_020105_001_session",
+        "20260817_020106_001_session",
+        "20260817_020107_001_session",
     ]
     for name in manual_names:
         write_session(manual_root, name, labels=[(0.0, 7.0)])
@@ -907,27 +909,29 @@ def test_source_anchor_preserves_manual_split_and_guided_three_one_one(
     combined_manifest = write_split_manifest(
         tmp_path / "config" / "combined.yaml",
         train=[f"manual/{manual_names[0]}"]
-        + [f"guided/{name}" for name in guided_names[:3]],
-        val=[f"manual/{manual_names[1]}", f"guided/{guided_names[3]}"],
-        test=[f"manual/{manual_names[2]}", f"guided/{guided_names[4]}"],
+        + [f"guided/{name}" for name in guided_names[:4]],
+        val=[f"manual/{manual_names[1]}"]
+        + [f"guided/{name}" for name in guided_names[4:6]],
+        test=[f"manual/{manual_names[2]}", f"guided/{guided_names[6]}"],
         schema_version=2,
     )
     config = replace(
         _multi_source_data_config(manual_root, guided_root, combined_manifest),
         source_sampling_masses={"manual": 0.5, "guided": 0.5},
         manual_anchor_split_manifest=anchor_manifest,
-        current_generation_session_counts={"train": 3, "val": 1, "test": 1},
+        current_generation_session_counts={"train": 4, "val": 2, "test": 1},
     )
 
     splits = build_policy_data_splits(config)
-    assert len(splits.train_sessions) == 4
+    assert len(splits.train_sessions) == 5
 
     write_split_manifest(
         combined_manifest,
         train=[f"manual/{manual_names[1]}"]
-        + [f"guided/{name}" for name in guided_names[:3]],
-        val=[f"manual/{manual_names[0]}", f"guided/{guided_names[3]}"],
-        test=[f"manual/{manual_names[2]}", f"guided/{guided_names[4]}"],
+        + [f"guided/{name}" for name in guided_names[:4]],
+        val=[f"manual/{manual_names[0]}"]
+        + [f"guided/{name}" for name in guided_names[4:6]],
+        test=[f"manual/{manual_names[2]}", f"guided/{guided_names[6]}"],
         schema_version=2,
     )
     with pytest.raises(PolicyDatasetError, match="Manual anchor train"):
@@ -936,10 +940,10 @@ def test_source_anchor_preserves_manual_split_and_guided_three_one_one(
     write_split_manifest(
         combined_manifest,
         train=[f"manual/{manual_names[0]}"]
-        + [f"guided/{name}" for name in guided_names[:2]],
+        + [f"guided/{name}" for name in guided_names[:3]],
         val=[f"manual/{manual_names[1]}"]
-        + [f"guided/{name}" for name in guided_names[2:4]],
-        test=[f"manual/{manual_names[2]}", f"guided/{guided_names[4]}"],
+        + [f"guided/{name}" for name in guided_names[3:6]],
+        test=[f"manual/{manual_names[2]}", f"guided/{guided_names[6]}"],
         schema_version=2,
     )
     with pytest.raises(PolicyDatasetError, match="session counts differ"):

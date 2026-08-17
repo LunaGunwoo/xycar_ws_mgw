@@ -190,7 +190,9 @@ def test_stateless_ema_config_uses_two_qualified_sources_and_raw_angle(
     assert torch.equal(target.weight, source.weight)
 
 
-def test_normalized_stateless_config_requires_raw_normalized_sessions():
+def test_normalized_stateless_config_requires_raw_normalized_sessions(
+    tmp_path: Path,
+):
     project_root = Path(__file__).parents[1]
     config = load_train_config(
         project_root
@@ -250,6 +252,29 @@ def test_normalized_stateless_config_requires_raw_normalized_sessions():
     assert guided_config.loss.angle_label_smoothing == 0.02
     assert guided_config.loss.speed_label_smoothing == 0.02
     assert guided_config.output.run_name.endswith("generation1")
+
+    expanded_payload = yaml.safe_load(
+        (
+            project_root
+            / "config"
+            / "front_cam_policy_train_stateless_normalized_v1_g1.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    expanded_payload["data"]["current_generation_session_counts"] = {
+        "train": 12,
+        "val": 2,
+        "test": 2,
+    }
+    expanded_config_path = tmp_path / "expanded-guided.yaml"
+    expanded_config_path.write_text(
+        yaml.safe_dump(expanded_payload, sort_keys=False), encoding="utf-8"
+    )
+    expanded_config = load_train_config(expanded_config_path)
+    assert expanded_config.data.current_generation_session_counts == {
+        "train": 12,
+        "val": 2,
+        "test": 2,
+    }
 
 
 @pytest.mark.parametrize(
