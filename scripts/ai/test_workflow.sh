@@ -692,6 +692,71 @@ env \
 [[ -f \
   "${XYCAR_LAN_EXISTING_EMPTY_DESTINATION}/${XYCAR_AI_LOCAL_DATASET_MARKER_NAME}" ]]
 
+XYCAR_GUIDED_LAN_SOURCE_BASE="${XYCAR_TEST_ROOT}/guided-lan-source"
+XYCAR_GUIDED_LAN_DESTINATION_BASE="${XYCAR_TEST_ROOT}/guided-lan-destination"
+XYCAR_GUIDED_LAN_SOURCE="${XYCAR_GUIDED_LAN_SOURCE_BASE}/generation_2/g2-fixture"
+XYCAR_GUIDED_LAN_DESTINATION="${XYCAR_GUIDED_LAN_DESTINATION_BASE}/generation_2/g2-fixture"
+mkdir -p \
+  "${XYCAR_GUIDED_LAN_SOURCE}/20260817_010101_001_session/Images" \
+  "${XYCAR_GUIDED_LAN_SOURCE}/_recording_20260817_010102_001/Images" \
+  "${XYCAR_GUIDED_LAN_DESTINATION}"
+printf 'guided-one\n' \
+  >"${XYCAR_GUIDED_LAN_SOURCE}/20260817_010101_001_session/Images/1.jpg"
+printf 'sample_index,image,angle,speed\n1,Images/1.jpg,0,10\n' \
+  >"${XYCAR_GUIDED_LAN_SOURCE}/20260817_010101_001_session/samples.csv"
+printf 'active-guided\n' \
+  >"${XYCAR_GUIDED_LAN_SOURCE}/_recording_20260817_010102_001/Images/1.jpg"
+printf 'preserve-guided-local\n' \
+  >"${XYCAR_GUIDED_LAN_DESTINATION}/destination-only"
+XYCAR_GUIDED_LAN_ENV=(
+  env
+  PATH="${XYCAR_LAN_FAKE_BIN}:${PATH}"
+  XYCAR_AI_ALLOW_ANY_CHECKOUT=1
+  XYCAR_AI_LAN_ALLOW_NON_EXT4_DESTINATION=1
+  XYCAR_AI_LAN_EXPECTED_HOSTNAME="$(hostname -s)"
+  XYCAR_AI_LAN_GUIDED_VEHICLE_ROOT="${XYCAR_GUIDED_LAN_SOURCE_BASE}"
+  XYCAR_AI_LAN_GUIDED_LOCAL_ROOT="${XYCAR_GUIDED_LAN_DESTINATION_BASE}"
+)
+"${XYCAR_AI_SCRIPT_DIR}/sync_stateless_guided_lan.sh" --help |
+  grep -q '^usage:'
+if "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_guided_lan.sh" --unknown \
+  >/dev/null 2>&1; then
+  xycar_ai_die "Guided LAN sync accepted an unknown argument"
+fi
+if "${XYCAR_GUIDED_LAN_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_guided_lan.sh" \
+  --generation 2 --collection-id '../unsafe' >/dev/null 2>&1; then
+  xycar_ai_die "Guided LAN sync accepted an unsafe collection ID"
+fi
+"${XYCAR_GUIDED_LAN_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_guided_lan.sh" \
+  --generation 2 --collection-id g2-fixture >/dev/null
+[[ -f \
+  "${XYCAR_GUIDED_LAN_DESTINATION}/20260817_010101_001_session/Images/1.jpg" ]]
+[[ ! -e \
+  "${XYCAR_GUIDED_LAN_DESTINATION}/_recording_20260817_010102_001" ]]
+[[ -f "${XYCAR_GUIDED_LAN_DESTINATION}/destination-only" ]]
+
+printf 'guided-dry-run\n' \
+  >"${XYCAR_GUIDED_LAN_SOURCE}/20260817_010101_001_session/Images/dry-run.jpg"
+"${XYCAR_GUIDED_LAN_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_guided_lan.sh" \
+  --generation 2 --collection-id g2-fixture --dry-run >/dev/null
+[[ ! -e \
+  "${XYCAR_GUIDED_LAN_DESTINATION}/20260817_010101_001_session/Images/dry-run.jpg" ]]
+find \
+  "${XYCAR_GUIDED_LAN_SOURCE}/20260817_010101_001_session/Images/dry-run.jpg" \
+  -maxdepth 0 -type f -delete
+
+printf 'guided-one-changed\n' \
+  >"${XYCAR_GUIDED_LAN_SOURCE}/20260817_010101_001_session/Images/1.jpg"
+"${XYCAR_GUIDED_LAN_ENV[@]}" \
+  "${XYCAR_AI_SCRIPT_DIR}/sync_stateless_guided_lan.sh" \
+  --generation 2 --collection-id g2-fixture --checksum >/dev/null
+[[ "$(<"${XYCAR_GUIDED_LAN_DESTINATION}/20260817_010101_001_session/Images/1.jpg")" == \
+  "guided-one-changed" ]]
+[[ -f "${XYCAR_GUIDED_LAN_DESTINATION}/destination-only" ]]
+
 mkdir -p "${XYCAR_TEST_ROOT}/artifact"
 printf 'schema_version: 1\nartifact_id: fixture\n' \
   >"${XYCAR_TEST_ROOT}/artifact/manifest.yaml"

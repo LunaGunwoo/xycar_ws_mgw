@@ -116,6 +116,29 @@ link speed를 출력한다. 현재 협상 속도 `100 Mbps full-duplex`에서는
 복사가 대략 2분 안팎이다. split manifest는 자동 수정하지 않으므로 복사 후 완료
 session을 검토하고 `manual/<session-id>` train/validation 배치를 수동 승인한다.
 
+### Stateless Guided cohort 직결 LAN 증분 복사
+
+Guided도 같은 고정 Ethernet에서 가져올 수 있지만 Manual과 삭제 계약이 다르다.
+`sync_stateless_guided_lan.sh`는 generation과 collection ID를 필수로 받아 정확히 한
+`stateless_guided/generation_<N>/<collection-id>`만 대응하는 Laptop 경로로
+증분 복사하며 `--delete`를 절대 사용하지 않는다. 따라서 중단된 복사는 이어받고,
+Laptop에만 있는 파일과 과거 cohort는 보존한다.
+
+```bash
+cd /home/xytron/xycar_ws/apps/xycar_ws_mgw
+./scripts/ai/sync_stateless_guided_lan.sh \
+  --generation 2 --collection-id g2-20260817-a --dry-run
+./scripts/ai/sync_stateless_guided_lan.sh \
+  --generation 2 --collection-id g2-20260817-a
+```
+
+내용 checksum까지 재검증해야 할 때만 `--checksum`을 추가한다. 실행마다 Manual
+script와 동일하게 Windows `Ethernet` link와 고정 route, `192.168.50.2:22`,
+`HostKeyAlias=xycar-gpu`, 원격 hostname, source의 exact non-symlink 경로와 Laptop
+ext4를 검사한다. 활성 `_recording_*`과 rsync partial 파일은 제외하고 source가
+비었으면 거부한다. 상위 `stateless_guided` 전체를 source로 받는 옵션은 제공하지
+않는다.
+
 ### 기존 Windows C: snapshot 미러 (선택 사항)
 
 아래 T7·Windows 절은 기존 `datasets/teleop` rollback dataset을 유지할 때만
@@ -224,8 +247,8 @@ dataset marker와 root의 비관리 파일은 삭제하지 않는다.
 기본 동작은 dry-run이고, `--apply`만 파일을 복사한다. 크기·mtime 대신 내용을
 정밀 비교해야 할 때만 비용이 큰 `--checksum`을 함께 쓴다.
 
-개발 Laptop과 차량은 Tailscale이 설치된 같은 tailnet에 있어야 하며 차량의
-MagicDNS 이름은 `xycar-gpu`다. sync와 model deploy script의 기본 SSH 대상은
+평상시 동기화에는 개발 Laptop과 차량이 Tailscale이 설치된 같은 tailnet에 있어야
+하며 차량의 MagicDNS 이름은 `xycar-gpu`다. sync와 model deploy script의 기본 SSH 대상은
 `xytron@xycar-gpu`이고 직접 IP로 자동 fallback하지 않는다. 먼저
 `getent hosts xycar-gpu`와 `ssh xytron@xycar-gpu`로 연결을 확인한다. WSL은 Windows
 Tailscale을 통해 MagicDNS를 사용할 수 있어 Linux CLI가 없어도 된다.
@@ -255,12 +278,13 @@ export XYCAR_AI_SHARED_DATASET_ROOT=/mnt/e/xycar-ai-dataset
 ./scripts/ai/pull_dataset_ssd.sh --apply
 ```
 
-일반 Tailscale 차량 sync와 marker 기반 SSD publish/pull은 `_recording_*`, rsync partial과 partial 파일을
-제외하고 새 파일과 변경 파일만 복사한다. 이 두 경로는 destination-only 파일을
+일반 Tailscale 차량 sync, Guided 전용 LAN sync와 marker 기반 SSD publish/pull은
+`_recording_*`, rsync partial과 partial 파일을
+제외하고 새 파일과 변경 파일만 복사한다. 이 경로들은 destination-only 파일을
 보존하며 `--delete`를 사용하지 않는다. SSD marker가 없거나 경로가 mount된 별도
-filesystem이 아니면 작업을 거부한다. Windows→WSL 명령만 앞 절의 완전 미러
-계약을 사용한다. `D:\teleop` direct 모드는 marker 기반 공유 동작을 변경하지
-않으며 삭제는 `--direct --mirror --apply`에서만 수행한다. 별도
+filesystem이 아니면 작업을 거부한다. Windows snapshot과 Manual 전용 LAN만 앞
+절의 완전 미러 계약을 사용한다. `D:\teleop` direct 모드는 marker 기반 공유
+동작을 변경하지 않으며 삭제는 `--direct --mirror --apply`에서만 수행한다. 별도
 `sync_stateless_manual_lan.sh`만 차량 manual source의 exact mirror이므로 기본
 실행에서 WSL destination-only 데이터를 삭제하며 이 일반 no-delete 계약을 바꾸지
 않는다.
@@ -582,10 +606,10 @@ offline gate를 통과한 artifact도 별도 실행 승인을 받은 제한 실�
 Guided 세대 parent로 사용하지 않는다. G2 이상은 G1 config와 split을 새 이름으로
 복사하고 `current_generation`, `split_manifest`, `output.run_name`을 함께 올린다.
 
-차량 두 root를 Laptop으로 가져올 때는 하나의 directory로 합치지 않는다. manual은
-직결 LAN exact mirror를 쓴다. Guided는 generation과 collection ID의 정확한 cohort
-root를 같은 상대 구조의 Laptop root로 지정하고, Tailscale no-delete script를 먼저
-dry-run한 뒤 `--apply`한다. 상위 `stateless_guided` 전체를 source로 지정하지 않는다.
+차량 두 root를 Laptop으로 가져올 때는 하나의 directory로 합치지 않는다. Manual은
+직결 LAN exact mirror를 쓴다. Guided는 generation과 collection ID의 정확한 cohort만
+직결 LAN no-delete script로 먼저 dry-run한 뒤 적용한다. 상위
+`stateless_guided` 전체를 source로 지정하지 않는다.
 
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw
@@ -593,12 +617,10 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw
 
 GENERATION=2
 COLLECTION_ID=g2-20260817-a
-XYCAR_AI_VEHICLE_DATASET_ROOT=/home/xytron/xycar_data/stateless_guided/generation_${GENERATION}/${COLLECTION_ID} \
-XYCAR_AI_LOCAL_DATASET_ROOT="$PWD/ai/datasets/stateless_guided/generation_${GENERATION}/${COLLECTION_ID}" \
-  ./scripts/ai/sync_dataset.sh
-XYCAR_AI_VEHICLE_DATASET_ROOT=/home/xytron/xycar_data/stateless_guided/generation_${GENERATION}/${COLLECTION_ID} \
-XYCAR_AI_LOCAL_DATASET_ROOT="$PWD/ai/datasets/stateless_guided/generation_${GENERATION}/${COLLECTION_ID}" \
-  ./scripts/ai/sync_dataset.sh --apply
+./scripts/ai/sync_stateless_guided_lan.sh \
+  --generation "${GENERATION}" --collection-id "${COLLECTION_ID}" --dry-run
+./scripts/ai/sync_stateless_guided_lan.sh \
+  --generation "${GENERATION}" --collection-id "${COLLECTION_ID}"
 ```
 
 ### 기존 stateless/AR 감속 비교 재현 (rollback 전용)
