@@ -3,6 +3,8 @@ dataset_snapshot: stateless_normalized_steering_v1_g1_pending
 splits:
   # Populate with source-qualified manual/<id> and guided/<id> sessions only
   # after the normalized Base is validated and Guided generation 1 is collected.
+  # Keep the accepted Manual G0 split fixed and place about five new Guided
+  # sessions as train 3 / val 1 / test 1; never move them in later generations.
   train: []
   val: []
   test: []

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,7 @@ from xycar_ai.front_cam_policy_data import (
     compute_sqrt_inverse_frequency_weights,
     discover_policy_sessions,
     generation_epoch_sample_count,
+    generation_sampling_summary,
     generation_sampling_weights,
     policy_dataset_stats,
     quantize_command,
@@ -720,6 +722,141 @@ def test_generation_weights_require_current_training_samples():
         )
 
 
+def test_source_anchored_weights_keep_manual_half_and_decay_guided_only():
+    samples = [
+        _policy_sample(generation=0, angle_class_id=100, source_id="manual"),
+        _policy_sample(generation=0, angle_class_id=101, source_id="manual"),
+        _policy_sample(generation=1, angle_class_id=102, source_id="guided"),
+        _policy_sample(generation=1, angle_class_id=103, source_id="guided"),
+        *[
+            _policy_sample(
+                generation=2,
+                angle_class_id=104 + index,
+                source_id="guided",
+            )
+            for index in range(5)
+        ],
+    ]
+    source_masses = {"manual": 0.5, "guided": 0.5}
+
+    weights = generation_sampling_weights(
+        samples,
+        current_generation=2,
+        generation_decay=0.8,
+        source_sampling_masses=source_masses,
+    )
+
+    assert sum(weights[:2]) == pytest.approx(0.5)
+    assert sum(weights[2:4]) == pytest.approx(0.5 * 0.8 / 1.8)
+    assert sum(weights[4:]) == pytest.approx(0.5 / 1.8)
+    assert generation_epoch_sample_count(
+        samples,
+        current_generation=2,
+        generation_decay=0.8,
+        source_sampling_masses=source_masses,
+    ) == 18
+    summary = generation_sampling_summary(
+        samples,
+        current_generation=2,
+        generation_decay=0.8,
+        source_sampling_masses=source_masses,
+    )
+    assert summary["mode"] == "source_anchored_generation_decay"
+    assert summary["sources"]["manual"]["total_sampling_mass"] == 0.5
+    assert summary["sources"]["guided"]["generations"]["2"][
+        "total_sampling_mass"
+    ] == pytest.approx(0.5 / 1.8)
+
+
+def test_source_anchored_weights_require_exact_configured_sources():
+    samples = [
+        _policy_sample(generation=1, angle_class_id=100, source_id="guided")
+    ]
+
+    with pytest.raises(PolicyDatasetError, match="exactly match"):
+        generation_sampling_weights(
+            samples,
+            current_generation=1,
+            generation_decay=0.8,
+            source_sampling_masses={"manual": 0.5, "guided": 0.5},
+        )
+
+
+def test_source_anchor_preserves_manual_split_and_guided_three_one_one(
+    tmp_path: Path,
+):
+    manual_root = tmp_path / "datasets" / "manual"
+    guided_root = tmp_path / "datasets" / "guided"
+    manual_names = [
+        "20260817_010101_001_session",
+        "20260817_010102_001_session",
+        "20260817_010103_001_session",
+    ]
+    guided_names = [
+        "20260817_020101_001_session",
+        "20260817_020102_001_session",
+        "20260817_020103_001_session",
+        "20260817_020104_001_session",
+        "20260817_020105_001_session",
+    ]
+    for name in manual_names:
+        write_session(manual_root, name, labels=[(0.0, 7.0)])
+    for name in guided_names:
+        write_session(
+            guided_root,
+            name,
+            labels=[(0.0, 7.0)],
+            control_mode="guided_policy",
+            generation=1,
+        )
+    anchor_manifest = write_split_manifest(
+        tmp_path / "config" / "manual.yaml",
+        train=[manual_names[0]],
+        val=[manual_names[1]],
+        test=[manual_names[2]],
+    )
+    combined_manifest = write_split_manifest(
+        tmp_path / "config" / "combined.yaml",
+        train=[f"manual/{manual_names[0]}"]
+        + [f"guided/{name}" for name in guided_names[:3]],
+        val=[f"manual/{manual_names[1]}", f"guided/{guided_names[3]}"],
+        test=[f"manual/{manual_names[2]}", f"guided/{guided_names[4]}"],
+        schema_version=2,
+    )
+    config = replace(
+        _multi_source_data_config(manual_root, guided_root, combined_manifest),
+        source_sampling_masses={"manual": 0.5, "guided": 0.5},
+        manual_anchor_split_manifest=anchor_manifest,
+        current_generation_session_counts={"train": 3, "val": 1, "test": 1},
+    )
+
+    splits = build_policy_data_splits(config)
+    assert len(splits.train_sessions) == 4
+
+    write_split_manifest(
+        combined_manifest,
+        train=[f"manual/{manual_names[1]}"]
+        + [f"guided/{name}" for name in guided_names[:3]],
+        val=[f"manual/{manual_names[0]}", f"guided/{guided_names[3]}"],
+        test=[f"manual/{manual_names[2]}", f"guided/{guided_names[4]}"],
+        schema_version=2,
+    )
+    with pytest.raises(PolicyDatasetError, match="Manual anchor train"):
+        build_policy_data_splits(config)
+
+    write_split_manifest(
+        combined_manifest,
+        train=[f"manual/{manual_names[0]}"]
+        + [f"guided/{name}" for name in guided_names[:2]],
+        val=[f"manual/{manual_names[1]}"]
+        + [f"guided/{name}" for name in guided_names[2:4]],
+        test=[f"manual/{manual_names[2]}", f"guided/{guided_names[4]}"],
+        schema_version=2,
+    )
+    with pytest.raises(PolicyDatasetError, match="session counts differ"):
+        build_policy_data_splits(config)
+
+
 def test_initial_class_validation_rejects_a_session_mismatch(tmp_path: Path):
     data_root = tmp_path / "datasets" / "teleop"
     names = [
@@ -835,7 +972,9 @@ def _multi_source_data_config(
     )
 
 
-def _policy_sample(*, generation: int, angle_class_id: int) -> PolicySample:
+def _policy_sample(
+    *, generation: int, angle_class_id: int, source_id: str | None = None
+) -> PolicySample:
     angle = angle_class_id - 100
     return PolicySample(
         session_id=f"generation-{generation}",
@@ -848,4 +987,5 @@ def _policy_sample(*, generation: int, angle_class_id: int) -> PolicySample:
         angle_class_id=angle_class_id,
         speed_class_id=107,
         generation=generation,
+        source_id=source_id,
     )

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+import math
 from pathlib import Path
 import re
 from typing import Any
@@ -55,6 +56,9 @@ class DataConfig:
     legacy_generation: int = 0
     ema_sampling: bool = False
     sources: tuple[DataSourceConfig, ...] = ()
+    source_sampling_masses: dict[str, float] = field(default_factory=dict)
+    manual_anchor_split_manifest: Path | None = None
+    current_generation_session_counts: dict[str, int] = field(default_factory=dict)
     required_steering_contract: str | None = None
     minimum_total_samples: int = 0
     minimum_total_sessions: int = 0
@@ -343,6 +347,24 @@ def load_train_config(path: str | Path) -> TrainConfig:
                 if schema_version == 3
                 else ()
             ),
+            source_sampling_masses=(
+                _parse_source_sampling_masses(data_payload)
+                if "source_sampling_masses" in data_payload
+                else {}
+            ),
+            manual_anchor_split_manifest=(
+                _resolve_project_path(
+                    project_root,
+                    _string(data_payload, "manual_anchor_split_manifest"),
+                )
+                if "manual_anchor_split_manifest" in data_payload
+                else None
+            ),
+            current_generation_session_counts=(
+                _parse_split_session_counts(data_payload)
+                if "current_generation_session_counts" in data_payload
+                else {}
+            ),
             required_steering_contract=(
                 _string(data_payload, "required_steering_contract")
                 if "required_steering_contract" in data_payload
@@ -525,6 +547,43 @@ def _validate(config: TrainConfig) -> None:
             raise ValueError(
                 "guided source must accept only guided_policy sessions and require generation"
             )
+        if config.data.source_sampling_masses:
+            masses = config.data.source_sampling_masses
+            if set(masses) != set(source_ids):
+                raise ValueError(
+                    "data.source_sampling_masses keys must exactly match data.sources"
+                )
+            if any(not math.isfinite(value) or value <= 0 for value in masses.values()):
+                raise ValueError(
+                    "data.source_sampling_masses values must be finite and positive"
+                )
+            if not math.isclose(
+                sum(masses.values()),
+                1.0,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            ):
+                raise ValueError("data.source_sampling_masses must sum to 1")
+            if config.data.manual_anchor_split_manifest is None:
+                raise ValueError(
+                    "data.manual_anchor_split_manifest is required with source masses"
+                )
+            if config.data.current_generation_session_counts != {
+                "train": 3,
+                "val": 1,
+                "test": 1,
+            }:
+                raise ValueError(
+                    "data.current_generation_session_counts must be train 3 / "
+                    "val 1 / test 1"
+                )
+        elif (
+            config.data.manual_anchor_split_manifest is not None
+            or config.data.current_generation_session_counts
+        ):
+            raise ValueError(
+                "manual anchor fields require data.source_sampling_masses"
+            )
         if (
             config.model.name != STATELESS_EMA_MODEL
             or config.model.architecture != "task_tokens"
@@ -545,6 +604,14 @@ def _validate(config: TrainConfig) -> None:
                 "multi-source output.run_name must end with current generation"
             )
     else:
+        if (
+            config.data.source_sampling_masses
+            or config.data.manual_anchor_split_manifest is not None
+            or config.data.current_generation_session_counts
+        ):
+            raise ValueError(
+                "source anchor fields require multi-source data.sources"
+            )
         if config.data.root is None:
             raise ValueError("single-source data.root is required")
         if bool(config.data.control_mode) == bool(config.data.control_modes):
@@ -670,6 +737,9 @@ def _expect_data_keys(payload: Mapping[str, object], *, schema_version: int) -> 
                 "minimum_train_sessions",
                 "minimum_val_sessions",
                 "minimum_test_sessions",
+                "source_sampling_masses",
+                "manual_anchor_split_manifest",
+                "current_generation_session_counts",
             },
         )
         return
@@ -792,6 +862,44 @@ def _parse_data_sources(
             )
         )
     return tuple(sources)
+
+
+def _parse_source_sampling_masses(
+    data_payload: Mapping[str, object],
+) -> dict[str, float]:
+    raw_masses = data_payload.get("source_sampling_masses")
+    if not isinstance(raw_masses, dict) or not raw_masses:
+        raise ValueError("data.source_sampling_masses must be a non-empty mapping")
+    masses: dict[str, float] = {}
+    for source_id, value in raw_masses.items():
+        if not isinstance(source_id, str) or not source_id:
+            raise ValueError(
+                "data.source_sampling_masses keys must be non-empty strings"
+            )
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(
+                f"data.source_sampling_masses.{source_id} must be numeric"
+            )
+        masses[source_id] = float(value)
+    return masses
+
+
+def _parse_split_session_counts(
+    data_payload: Mapping[str, object],
+) -> dict[str, int]:
+    raw_counts = data_payload.get("current_generation_session_counts")
+    if not isinstance(raw_counts, dict) or set(raw_counts) != {"train", "val", "test"}:
+        raise ValueError(
+            "data.current_generation_session_counts must define train, val, and test"
+        )
+    counts: dict[str, int] = {}
+    for split_name, value in raw_counts.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(
+                "data.current_generation_session_counts values must be positive integers"
+            )
+        counts[split_name] = value
+    return counts
 
 
 def _string_tuple(payload: Mapping[str, object], key: str) -> tuple[str, ...]:

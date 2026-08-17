@@ -447,6 +447,8 @@ def build_policy_data_splits(
         val_sessions=split_sessions["val"],
         test_sessions=split_sessions["test"],
     )
+    _validate_manual_anchor_split(result, config)
+    _validate_current_generation_session_counts(result, config)
     _validate_minimum_dataset_size(result, config)
     if config.ema_sampling:
         future_generations = sorted(
@@ -464,6 +466,67 @@ def build_policy_data_splits(
                 f"{future_generations}"
             )
     return result
+
+
+def _validate_manual_anchor_split(
+    splits: PolicyDataSplits,
+    config: DataConfig,
+) -> None:
+    path = config.manual_anchor_split_manifest
+    if path is None:
+        return
+    payload = _load_yaml_mapping(path)
+    if set(payload) != {"schema_version", "dataset_snapshot", "splits"}:
+        raise PolicyDatasetError(f"unexpected Manual anchor manifest keys: {path}")
+    if _manifest_integer(payload, "schema_version") != 1:
+        raise PolicyDatasetError("Manual anchor split manifest must use schema_version 1")
+    split_payload = payload.get("splits")
+    if not isinstance(split_payload, dict) or set(split_payload) != set(SPLIT_NAMES):
+        raise PolicyDatasetError("Manual anchor split must define train, val, and test")
+    for split_name, sessions in splits._session_groups().items():
+        raw_expected = split_payload.get(split_name)
+        if not isinstance(raw_expected, list) or not all(
+            isinstance(session_id, str) and session_id and "/" not in session_id
+            for session_id in raw_expected
+        ):
+            raise PolicyDatasetError(
+                f"Manual anchor {split_name} must contain plain session ids"
+            )
+        expected = {f"manual/{session_id}" for session_id in raw_expected}
+        observed = {
+            session.session_id
+            for session in sessions
+            if session.source_id == "manual"
+        }
+        if observed != expected:
+            raise PolicyDatasetError(
+                f"Manual anchor {split_name} sessions differ from {path}; "
+                f"missing={sorted(expected - observed)}, "
+                f"unexpected={sorted(observed - expected)}"
+            )
+
+
+def _validate_current_generation_session_counts(
+    splits: PolicyDataSplits,
+    config: DataConfig,
+) -> None:
+    if not config.current_generation_session_counts:
+        return
+    failures = []
+    for split_name, sessions in splits._session_groups().items():
+        actual = sum(
+            session.source_id == "guided"
+            and session.generation == config.current_generation
+            for session in sessions
+        )
+        expected = config.current_generation_session_counts[split_name]
+        if actual != expected:
+            failures.append(f"{split_name} {actual} != {expected}")
+    if failures:
+        raise PolicyDatasetError(
+            "current Guided generation session counts differ from config: "
+            + "; ".join(failures)
+        )
 
 
 def _validate_minimum_dataset_size(
@@ -609,6 +672,8 @@ class FrontCamPolicyDataset(Dataset):
             "relative_image": sample.relative_image,
             "generation": sample.generation,
         }
+        if sample.source_id is not None:
+            item["source_id"] = sample.source_id
         if sample.history_class_ids is not None:
             history_class_ids = torch.tensor(
                 sample.history_class_ids,
@@ -670,12 +735,26 @@ def generation_sampling_weights(
     *,
     current_generation: int,
     generation_decay: float,
+    source_sampling_masses: Mapping[str, float] | None = None,
 ) -> tuple[float, ...]:
-    """Give each generation an EMA-like total mass, uniform within generation."""
+    """Assign generation mass, optionally anchored to fixed source totals."""
     if not samples:
         raise PolicyDatasetError("cannot build generation weights for no samples")
     if not 0 < generation_decay <= 1:
         raise ValueError("generation_decay must be in (0, 1]")
+    if source_sampling_masses:
+        pair_masses = source_generation_sampling_masses(
+            samples,
+            current_generation=current_generation,
+            generation_decay=generation_decay,
+            source_sampling_masses=source_sampling_masses,
+        )
+        counts = Counter((sample.source_id, sample.generation) for sample in samples)
+        return tuple(
+            pair_masses[(str(sample.source_id), sample.generation)]
+            / counts[(sample.source_id, sample.generation)]
+            for sample in samples
+        )
     counts = Counter(sample.generation for sample in samples)
     future = sorted(
         generation for generation in counts if generation > current_generation
@@ -702,7 +781,29 @@ def generation_epoch_sample_count(
     *,
     current_generation: int,
     generation_decay: float,
+    source_sampling_masses: Mapping[str, float] | None = None,
 ) -> int:
+    if source_sampling_masses:
+        pair_masses = source_generation_sampling_masses(
+            samples,
+            current_generation=current_generation,
+            generation_decay=generation_decay,
+            source_sampling_masses=source_sampling_masses,
+        )
+        current_count = sum(
+            sample.generation == current_generation for sample in samples
+        )
+        current_mass = sum(
+            mass
+            for (_, generation), mass in pair_masses.items()
+            if generation == current_generation
+        )
+        if current_count == 0 or current_mass <= 0:
+            raise PolicyDatasetError(
+                "training split has no samples for "
+                f"current_generation={current_generation}"
+            )
+        return max(1, math.ceil(current_count / current_mass))
     counts = Counter(sample.generation for sample in samples)
     if counts.get(current_generation, 0) == 0:
         raise PolicyDatasetError(
@@ -721,7 +822,65 @@ def generation_sampling_summary(
     *,
     current_generation: int,
     generation_decay: float,
+    source_sampling_masses: Mapping[str, float] | None = None,
 ) -> dict[str, object]:
+    if source_sampling_masses:
+        pair_masses = source_generation_sampling_masses(
+            samples,
+            current_generation=current_generation,
+            generation_decay=generation_decay,
+            source_sampling_masses=source_sampling_masses,
+        )
+        pair_counts = Counter(
+            (str(sample.source_id), sample.generation) for sample in samples
+        )
+        generations = sorted({sample.generation for sample in samples})
+        return {
+            "mode": "source_anchored_generation_decay",
+            "current_generation": current_generation,
+            "generation_decay": generation_decay,
+            "source_sampling_masses": dict(source_sampling_masses),
+            "epoch_sample_count": generation_epoch_sample_count(
+                samples,
+                current_generation=current_generation,
+                generation_decay=generation_decay,
+                source_sampling_masses=source_sampling_masses,
+            ),
+            "generations": {
+                str(generation): {
+                    "sample_count": sum(
+                        count
+                        for (source_id, observed_generation), count in pair_counts.items()
+                        if observed_generation == generation
+                    ),
+                    "total_sampling_mass": sum(
+                        mass
+                        for (source_id, observed_generation), mass in pair_masses.items()
+                        if observed_generation == generation
+                    ),
+                }
+                for generation in generations
+            },
+            "sources": {
+                source_id: {
+                    "sample_count": sum(
+                        count
+                        for (observed_source, generation), count in pair_counts.items()
+                        if observed_source == source_id
+                    ),
+                    "total_sampling_mass": source_sampling_masses[source_id],
+                    "generations": {
+                        str(generation): {
+                            "sample_count": pair_counts[(source_id, generation)],
+                            "total_sampling_mass": pair_masses[(source_id, generation)],
+                        }
+                        for observed_source, generation in sorted(pair_masses)
+                        if observed_source == source_id
+                    },
+                }
+                for source_id in source_sampling_masses
+            },
+        }
     counts = Counter(sample.generation for sample in samples)
     return {
         "current_generation": current_generation,
@@ -740,6 +899,69 @@ def generation_sampling_summary(
             for generation in sorted(counts)
         },
     }
+
+
+def source_generation_sampling_masses(
+    samples: Sequence[PolicySample],
+    *,
+    current_generation: int,
+    generation_decay: float,
+    source_sampling_masses: Mapping[str, float],
+) -> dict[tuple[str, int], float]:
+    """Normalize generation decay within each fixed-mass dataset source."""
+    if not samples:
+        raise PolicyDatasetError("cannot build source generation masses for no samples")
+    if not 0 < generation_decay <= 1:
+        raise ValueError("generation_decay must be in (0, 1]")
+    if not source_sampling_masses:
+        raise ValueError("source_sampling_masses must not be empty")
+    if any(
+        not math.isfinite(mass) or mass <= 0
+        for mass in source_sampling_masses.values()
+    ):
+        raise ValueError("source_sampling_masses must be finite and positive")
+    if not math.isclose(
+        sum(source_sampling_masses.values()),
+        1.0,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    ):
+        raise ValueError("source_sampling_masses must sum to 1")
+    observed_sources = {sample.source_id for sample in samples}
+    if None in observed_sources or observed_sources != set(source_sampling_masses):
+        raise PolicyDatasetError(
+            "sample source ids must exactly match source_sampling_masses; "
+            f"observed={sorted(str(value) for value in observed_sources)}, "
+            f"configured={sorted(source_sampling_masses)}"
+        )
+    future = sorted(
+        {sample.generation for sample in samples if sample.generation > current_generation}
+    )
+    if future:
+        raise PolicyDatasetError(
+            f"dataset contains generation(s) newer than current_generation: {future}"
+        )
+    if not any(sample.generation == current_generation for sample in samples):
+        raise PolicyDatasetError(
+            f"training split has no samples for current_generation={current_generation}"
+        )
+
+    generations_by_source: dict[str, set[int]] = {
+        source_id: set() for source_id in source_sampling_masses
+    }
+    for sample in samples:
+        generations_by_source[str(sample.source_id)].add(sample.generation)
+
+    masses: dict[tuple[str, int], float] = {}
+    for source_id, source_mass in source_sampling_masses.items():
+        raw_masses = {
+            generation: generation_decay ** (current_generation - generation)
+            for generation in generations_by_source[source_id]
+        }
+        normalizer = sum(raw_masses.values())
+        for generation, raw_mass in raw_masses.items():
+            masses[(source_id, generation)] = source_mass * raw_mass / normalizer
+    return masses
 
 
 def _load_policy_session(
@@ -1037,6 +1259,17 @@ def _sample_stats(
         stats["generation_sample_counts"] = _counter_dict(
             Counter(sample.generation for sample in samples)
         )
+        source_generation_counts: dict[str, Counter[int]] = {}
+        for sample in samples:
+            if sample.source_id is not None:
+                source_generation_counts.setdefault(sample.source_id, Counter())[
+                    sample.generation
+                ] += 1
+        if source_generation_counts:
+            stats["source_generation_sample_counts"] = {
+                source_id: _counter_dict(counts)
+                for source_id, counts in sorted(source_generation_counts.items())
+            }
     return stats
 
 

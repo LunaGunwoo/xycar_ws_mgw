@@ -456,8 +456,8 @@ datasets/stateless_guided  # control_mode=guided_policy, curriculum.generation �
 `vit_small_patch16_224`, `task_tokens`, history 0, 224x224 road warp와 raw instantaneous
 angle을 사용하는 legacy/reference 설정이다. AR 학습 설정과 schema v2/v3 runtime도
 rollback용으로 남아 있지만 새 Base에는 사용하지 않는다.
-validation selection score가 5 epochs 연속 개선되지 않으면 조기 종료하며, 다음
-generation에서도 이 patience를 유지한다.
+legacy/reference 설정은 기존 generation-only decay와 patience 5를 유지한다. 새
+normalized Guided G1 이상은 source anchor와 별도 fine-tuning 설정을 사용한다.
 
 새 split은 `config/front_cam_policy_split_stateless_normalized_v1.yaml`을 사람이
 검토해 갱신한다. 처음에는 빈 fail-closed template이며 normalized Manual complete
@@ -472,6 +472,10 @@ session이 최소 11개/10,000 frames가 된 뒤 train 7 / validation 2 / test 2
 같은 directory 이름이 있어도 source-qualified ID가 다르므로 충돌하지 않는다.
 guided session에 generation이 없거나 train split에 generation 1 sample이 없거나
 더 미래 generation이 있으면 검증을 거부한다.
+각 Guided 세대는 완료 session 약 5개를 수집해 train/validation/test `3/1/1`로
+배치한다. 다음 세대 split은 이전 세대까지 누적하되 한번 정한 session 소속은
+바꾸지 않는다. Manual G0 split도 새로 수집하거나 이동하지 않고 replay anchor로
+고정한다.
 
 기존 Base snapshot은 2026-08-14와 2026-08-17에 수집한 manual generation 0의
 32 sessions/30,889 samples를 사용한다. guided sample은 split에 포함하지 않는다.
@@ -483,28 +487,43 @@ label이므로 새 normalized split에는 하나도 포함하지 않는다. 새 
 normalized Manual만 EMA mass 1.0으로 sampling하며 ImageNet pretrained weight에서
 새로 시작한다.
 
-train epoch의 세대별 총 sampling mass는 다음과 같고 같은 세대 안에서는 frame을
-균등하게 뽑는다. raw session은 삭제하지 않으며 과거 영향은 sampling mass로만
-지수 감쇠한다.
+새 G1 이상은 source별 총 sampling mass를 먼저 고정하고 같은 source 안에서만
+세대 decay를 정규화한다. raw session은 삭제하지 않으며 같은 source/generation
+안에서는 frame을 균등하게 뽑는다.
 
 ```text
-mass(g) = generation_decay ** (current_generation - g)
+source mass:
+  Manual = 0.5
+  Guided = 0.5
 
-generation_decay=0.5:
-current=1.0, previous=0.5, two-generations-old=0.25, ...
+within Guided:
+  raw_mass(g) = 0.8 ** (current_generation - g)
+  mass(g) = 0.5 * raw_mass(g) / sum(Guided raw masses)
+
+G2 example:
+  Manual G0 = 0.5000
+  Guided G2 = 0.2778
+  Guided G1 = 0.2222
 ```
 
-class frequency weight도 같은 세대 sampling weight로 계산한다. validation의
-checkpoint 선택식 `angle_mae + 0.25 * speed_mae` 역시 세대별 metric을 위 mass로
-합친다. dataset stats와 checkpoint에는 세대별 session/sample 수, sampling mass와
-epoch sample 수를 기록한다. config의 `current_generation`보다 새 generation이
-있거나 train split에 current generation sample이 없으면 학습을 거부한다.
+`source_sampling_masses` key가 없는 legacy 설정은 기존 generation-only 계산을
+그대로 유지한다. 새 설정은 source key가 정확히 `manual/guided`, 각 값이 finite
+양수이고 합이 1일 때만 시작한다. epoch sample 수는 current generation이 기대값
+기준 한 번 노출되도록 current sample 수를 current sampling mass로 나눈 값이다.
+class frequency weight와 validation checkpoint 선택식
+`angle_mae + 0.25 * speed_mae`에도 같은 source/generation mass를 적용한다. stats와
+checkpoint에는 source/generation별 sample 수와 mass를 기록한다.
+`manual_anchor_split_manifest`는 G0 split의 Manual session 소속을 split별로 정확히
+고정하고 `current_generation_session_counts: {train: 3, val: 1, test: 1}`은 매
+Guided generation의 5-session 배치를 fail-closed로 검사한다.
 
 generation 0은 ImageNet pretrained weight에서 시작한다. generation 1은 전용 G1
 config와 직전 stateless Base의 `best.pt`를 `--initialize-from`으로 반드시 지정한다. 이 옵션은
 model state만 strict load하고 optimizer, scheduler, AMP scaler, epoch와
 early-stopping state는 새로 시작한다. 같은 generation run의 중단 재개만
-`--resume`을 사용한다.
+`--resume`을 사용한다. G1 이상은 전체 model을 learning rate `1e-4`, 최대 10
+epochs, patience 3으로 fine-tune한다. `train_angle_mean_window: 1`과 angle/speed
+label smoothing `0.02`는 유지하며 시간축 조향 평균이나 model-weight EMA는 없다.
 
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
@@ -522,16 +541,35 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
   --initialize-from artifacts/runs/front_cam_policy/<previous-run>/best.pt
 ```
 
-export는 schema v1과 checkpoint의 normalized steering data contract를 모두
-요구한다. contract가 없는 기존 checkpoint나 stateless가 아닌 checkpoint는
-artifact를 만들기 전에 거부하며, 성공한 artifact는 checksum까지 다시 검증한다.
+학습 뒤 parent와 candidate를 동일한 누적 validation split에서 비교한다. 비교
+명령은 50:50 전체 score와 Guided angle MAE 개선, Manual angle MAE 회귀 `+2.0`
+이하, Manual within-10 하락 `3%p` 이하, Manual/Guided speed MAE 회귀 각각 `+1.0`
+이하와 parent checkpoint hash lineage를 모두 검사한다. 실패하면 non-zero로
+종료하고 같은 generation에서 데이터나 학습을 보완한다.
+
+```bash
+/home/xytron/.local/bin/uv run --locked xycar-compare-policy \
+  --config config/front_cam_policy_train_stateless_normalized_v1_g1.yaml \
+  --parent artifacts/runs/front_cam_policy/<previous-run>/best.pt \
+  --candidate artifacts/runs/front_cam_policy/<current-run>/best.pt
+```
+
+성공하면 candidate run에 `promotion_gate.json`을 atomic하게 기록한다. G1 이상
+export는 이 report가 모든 gate를 통과했고 candidate SHA-256과 일치할 때만
+허용한다. manifest에는 report, parent와 candidate hash가 들어간다. G0 export는
+promotion report가 필요 없다.
 
 ```bash
 /home/xytron/.local/bin/uv run --locked xycar-export-policy \
   --checkpoint artifacts/runs/front_cam_policy/<current-run>/best.pt \
+  --promotion-report artifacts/runs/front_cam_policy/<current-run>/promotion_gate.json \
   --artifact-id <schema-v1-stateless-artifact-id> \
   --require-schema-version 1
 ```
+
+offline gate를 통과한 artifact도 별도 실행 승인을 받은 제한 실차 검증 전에는 다음
+Guided 세대 parent로 사용하지 않는다. G2 이상은 G1 config와 split을 새 이름으로
+복사하고 `current_generation`, `split_manifest`, `output.run_name`을 함께 올린다.
 
 차량 두 root를 Laptop으로 가져올 때는 하나의 directory로 합치지 않는다. manual은
 직결 LAN exact mirror를 쓰고, guided는 기존 Tailscale no-delete script를 먼저
@@ -647,6 +685,7 @@ artifacts/runs/front_cam_policy/<run-id>/
   probe_summary.json  # --stop-after-epoch probe에서만 생성
   test_metrics.json
   summary.json
+  promotion_gate.json  # G1+ parent/candidate offline 비교가 통과하면 생성
 ```
 
 best checkpoint 선택식은 `val_angle_mae + 0.25 * val_speed_mae`다. A/B winner도
@@ -679,6 +718,10 @@ artifact ID는 덮어쓰지 않는다. stateless schema v1은 image `[1,3,224,22
 받고 기존 AR schema v2는 image와 predicted history `[1,4,2]`를 함께 받는다.
 현재 AR exporter는 같은 input shape에 실제 실행 history를 요구하는 schema v3를
 생성한다. v1/v2 runtime 호환은 유지한다.
+
+G1 이상 run은 아래 명령에 같은 run의
+`--promotion-report artifacts/runs/front_cam_policy/<stateless-run>/promotion_gate.json`
+을 추가한다.
 
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai

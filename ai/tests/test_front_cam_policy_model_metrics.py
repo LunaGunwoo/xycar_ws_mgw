@@ -154,3 +154,33 @@ def test_angle_bucket_metrics_and_horizontal_flip_rate():
     assert metrics["val_angle_bucket_hard_left_mae"] == pytest.approx(100.0)
     assert metrics["val_angle_bucket_near_zero_mae"] == pytest.approx(0.0)
     assert metrics["val_angle_bucket_hard_right_within_10_acc"] == 0.0
+
+
+def test_source_generation_metrics_include_mae_within_10_and_speed():
+    true_angles = torch.tensor([0, 20, -20, 40])
+    true_speeds = torch.tensor([10, 10, 20, 20])
+    logits = torch.full((4, 201), -1000.0)
+    logits[:, 100] = 1000.0
+    accumulator = ClassificationMetricAccumulator("val")
+    accumulator.update(
+        outputs={"angle_logits": logits, "speed_logits": logits},
+        batch={
+            "angle": true_angles,
+            "speed": true_speeds,
+            "angle_class_id": true_angles + 100,
+            "speed_class_id": true_speeds + 100,
+            "generation": torch.tensor([0, 0, 1, 2]),
+            "source_id": ["manual", "manual", "guided", "guided"],
+        },
+        total_loss=torch.tensor(0.0),
+        angle_loss=torch.tensor(0.0),
+        speed_loss=torch.tensor(0.0),
+        emd_loss=torch.tensor(0.0),
+    )
+    metrics = accumulator.compute()
+
+    assert metrics["val_source_manual_generation_0_angle_mae"] == 10.0
+    assert metrics["val_source_manual_generation_0_angle_within_10_acc"] == 0.5
+    assert metrics["val_source_manual_generation_0_speed_mae"] == 10.0
+    assert metrics["val_source_guided_generation_1_angle_mae"] == 20.0
+    assert metrics["val_source_guided_generation_2_speed_mae"] == 20.0

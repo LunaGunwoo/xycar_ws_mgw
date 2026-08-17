@@ -41,6 +41,16 @@ class ClassificationMetricAccumulator:
     generation_counts: dict[int, int] = field(default_factory=dict)
     generation_angle_abs_error_sums: dict[int, float] = field(default_factory=dict)
     generation_speed_abs_error_sums: dict[int, float] = field(default_factory=dict)
+    source_generation_counts: dict[tuple[str, int], int] = field(default_factory=dict)
+    source_generation_angle_abs_error_sums: dict[tuple[str, int], float] = field(
+        default_factory=dict
+    )
+    source_generation_speed_abs_error_sums: dict[tuple[str, int], float] = field(
+        default_factory=dict
+    )
+    source_generation_angle_within_10_counts: dict[tuple[str, int], int] = field(
+        default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         for bucket in ANGLE_BUCKETS:
@@ -119,6 +129,43 @@ class ClassificationMetricAccumulator:
                 self.generation_speed_abs_error_sums.get(generation_id, 0.0)
                 + float(speed_error[mask].sum().cpu())
             )
+        raw_source_ids = batch.get("source_id")
+        if raw_source_ids is not None:
+            source_ids = (
+                [raw_source_ids]
+                if isinstance(raw_source_ids, str)
+                else list(raw_source_ids)
+            )
+            if len(source_ids) != batch_size or not all(
+                isinstance(source_id, str) and source_id for source_id in source_ids
+            ):
+                raise ValueError("batch source_id values must match the batch size")
+            generation_values = generation.reshape(-1).tolist()
+            angle_error_values = angle_error.reshape(-1).tolist()
+            speed_error_values = speed_error.reshape(-1).tolist()
+            for source_id, generation_id, angle_value, speed_value in zip(
+                source_ids,
+                generation_values,
+                angle_error_values,
+                speed_error_values,
+                strict=True,
+            ):
+                key = (source_id, int(generation_id))
+                self.source_generation_counts[key] = (
+                    self.source_generation_counts.get(key, 0) + 1
+                )
+                self.source_generation_angle_abs_error_sums[key] = (
+                    self.source_generation_angle_abs_error_sums.get(key, 0.0)
+                    + float(angle_value)
+                )
+                self.source_generation_speed_abs_error_sums[key] = (
+                    self.source_generation_speed_abs_error_sums.get(key, 0.0)
+                    + float(speed_value)
+                )
+                self.source_generation_angle_within_10_counts[key] = (
+                    self.source_generation_angle_within_10_counts.get(key, 0)
+                    + int(angle_value <= 10)
+                )
         for bucket, (low, high) in ANGLE_BUCKETS.items():
             mask = (angle_true >= low) & (angle_true <= high)
             bucket_count = int(mask.sum())
@@ -175,6 +222,25 @@ class ClassificationMetricAccumulator:
             )
             metrics[f"{generation_prefix}_speed_mae"] = (
                 self.generation_speed_abs_error_sums[generation] / generation_count
+            )
+        for source_id, generation in sorted(self.source_generation_counts):
+            key = (source_id, generation)
+            source_generation_count = self.source_generation_counts[key]
+            source_prefix = f"{prefix}_source_{source_id}_generation_{generation}"
+            metrics[f"{source_prefix}_sample_count"] = float(
+                source_generation_count
+            )
+            metrics[f"{source_prefix}_angle_mae"] = (
+                self.source_generation_angle_abs_error_sums[key]
+                / source_generation_count
+            )
+            metrics[f"{source_prefix}_angle_within_10_acc"] = (
+                self.source_generation_angle_within_10_counts[key]
+                / source_generation_count
+            )
+            metrics[f"{source_prefix}_speed_mae"] = (
+                self.source_generation_speed_abs_error_sums[key]
+                / source_generation_count
             )
         return metrics
 

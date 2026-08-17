@@ -79,6 +79,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=(LEGACY_ARTIFACT_SCHEMA_VERSION, AR_ARTIFACT_SCHEMA_VERSION),
         help="Reject export unless the artifact has this schema version.",
     )
+    parser.add_argument(
+        "--promotion-report",
+        default="",
+        help="Required passing promotion_gate.json for Guided generation 1+.",
+    )
     return parser
 
 
@@ -89,6 +94,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         artifact_id=args.artifact_id,
         output_root=Path(args.output_root),
         require_schema_version=args.require_schema_version,
+        promotion_report_path=(
+            Path(args.promotion_report) if args.promotion_report else None
+        ),
     )
     print(f"exported policy artifact: {artifact_dir}")
     return 0
@@ -100,6 +108,7 @@ def export_checkpoint(
     artifact_id: str,
     output_root: Path,
     require_schema_version: int | None = None,
+    promotion_report_path: Path | None = None,
 ) -> Path:
     _validate_artifact_id(artifact_id)
     checkpoint_path = checkpoint_path.expanduser().resolve()
@@ -118,6 +127,11 @@ def export_checkpoint(
         raise PolicyExportError(
             "checkpoint data must require normalized_percent_v1 steering"
         )
+    promotion = _validated_promotion_report(
+        checkpoint_path=checkpoint_path,
+        data_config=data_config,
+        report_path=promotion_report_path,
+    )
     model_config = _mapping(
         checkpoint_config, "model", "checkpoint.config"
     )
@@ -228,6 +242,7 @@ def export_checkpoint(
             image_size=image_size,
             architecture=architecture,
             model_config=model_config,
+            promotion=promotion,
         )
         manifest_path = temporary_dir / MANIFEST_FILENAME
         manifest_path.write_text(
@@ -333,6 +348,7 @@ def _build_manifest(
     image_size: int,
     architecture: str,
     model_config: Mapping[str, Any],
+    promotion: Mapping[str, object] | None,
 ) -> dict[str, object]:
     preprocessing = _mapping(checkpoint, "preprocessing", "checkpoint")
     label_contract = _mapping(checkpoint, "label_contract", "checkpoint")
@@ -411,7 +427,60 @@ def _build_manifest(
     }
     if history_contract is not None:
         manifest["history"] = history_contract
+    if promotion is not None:
+        manifest["promotion"] = dict(promotion)
     return manifest
+
+
+def _validated_promotion_report(
+    *,
+    checkpoint_path: Path,
+    data_config: Mapping[str, Any],
+    report_path: Path | None,
+) -> dict[str, object] | None:
+    generation_value = data_config.get("current_generation", 0)
+    if isinstance(generation_value, bool) or not isinstance(generation_value, int):
+        raise PolicyExportError("checkpoint current_generation must be an integer")
+    if generation_value <= 0:
+        return None
+    if report_path is None:
+        raise PolicyExportError(
+            "Guided generation 1+ export requires --promotion-report"
+        )
+    report_path = report_path.expanduser().resolve()
+    if not report_path.is_file() or report_path.is_symlink():
+        raise PolicyExportError("promotion report is missing or unsafe")
+    try:
+        report = yaml.safe_load(report_path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise PolicyExportError("promotion report is invalid") from exc
+    if not isinstance(report, Mapping):
+        raise PolicyExportError("promotion report must be a mapping")
+    candidate = report.get("candidate")
+    checks = report.get("checks")
+    if (
+        report.get("schema_version") != 1
+        or report.get("status") != "passed"
+        or report.get("generation") != generation_value
+        or not isinstance(candidate, Mapping)
+        or not isinstance(checks, Mapping)
+        or not checks
+        or not all(value is True for value in checks.values())
+    ):
+        raise PolicyExportError("promotion report has not passed every gate")
+    checkpoint_sha256 = sha256_file(checkpoint_path)
+    if candidate.get("sha256") != checkpoint_sha256:
+        raise PolicyExportError("promotion report candidate hash differs from checkpoint")
+    parent = report.get("parent")
+    if not isinstance(parent, Mapping) or not isinstance(parent.get("sha256"), str):
+        raise PolicyExportError("promotion report parent hash is missing")
+    return {
+        "offline_gate": "passed",
+        "generation": generation_value,
+        "report_sha256": sha256_file(report_path),
+        "parent_checkpoint_sha256": parent["sha256"],
+        "candidate_checkpoint_sha256": checkpoint_sha256,
+    }
 
 
 def _checkpoint_mapping(payload: object) -> Mapping[str, Any]:

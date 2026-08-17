@@ -9,14 +9,19 @@ import torch
 import yaml
 from conftest import write_session, write_split_manifest
 
+from xycar_ai.compare_front_cam_policy import build_promotion_report
 from xycar_ai.config import load_train_config
+from xycar_ai.front_cam_policy_data import PolicySample, PolicySession
 from xycar_ai.train_front_cam_policy import (
     build_label_contract,
     build_preprocessing_contract,
+    class_weights,
     early_stopping_triggered,
     initialize_model_weights,
     load_configured_road_warp,
     main,
+    source_weighted_metric,
+    validation_selection_score,
     validate_incremental_initialization,
     validate_resume_payload,
 )
@@ -219,13 +224,175 @@ def test_normalized_stateless_config_requires_raw_normalized_sessions():
         "normalized_percent_v1"
     )
     assert guided_config.data.current_generation == 1
-    assert guided_config.data.generation_decay == 0.5
+    assert guided_config.data.generation_decay == 0.8
+    assert guided_config.data.source_sampling_masses == {
+        "manual": 0.5,
+        "guided": 0.5,
+    }
+    assert guided_config.data.manual_anchor_split_manifest == (
+        project_root
+        / "config"
+        / "front_cam_policy_split_stateless_normalized_v1.yaml"
+    )
+    assert guided_config.data.current_generation_session_counts == {
+        "train": 3,
+        "val": 1,
+        "test": 1,
+    }
     assert guided_config.data.train_angle_mean_window == 1
     assert {source.source_id for source in guided_config.data.sources} == {
         "manual",
         "guided",
     }
+    assert guided_config.optimizer.learning_rate == 0.0001
+    assert guided_config.training.epochs == 10
+    assert guided_config.training.early_stopping_patience == 3
+    assert guided_config.loss.angle_label_smoothing == 0.02
+    assert guided_config.loss.speed_label_smoothing == 0.02
     assert guided_config.output.run_name.endswith("generation1")
+
+
+@pytest.mark.parametrize(
+    ("masses", "message"),
+    [
+        ({"manual": 0.5}, "exactly match"),
+        ({"manual": 0.6, "guided": 0.5}, "sum to 1"),
+        ({"manual": 1.0, "guided": 0.0}, "finite and positive"),
+    ],
+)
+def test_source_sampling_masses_fail_closed(
+    tmp_path: Path, masses: dict[str, float], message: str
+):
+    project_root = Path(__file__).parents[1]
+    payload = yaml.safe_load(
+        (
+            project_root
+            / "config"
+            / "front_cam_policy_train_stateless_normalized_v1_g1.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    payload["data"]["source_sampling_masses"] = masses
+    payload["data"]["split_manifest"] = str(tmp_path / "split.yaml")
+    payload["preprocessing"]["road_warp_config"] = str(
+        project_root / "config" / "front_cam_policy_preprocess.yaml"
+    )
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(
+        yaml.safe_dump(payload, sort_keys=False), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match=message):
+        load_train_config(config_path)
+
+
+def test_promotion_report_requires_all_regression_and_lineage_gates():
+    parent = {
+        "weighted_validation_score": 10.0,
+        "guided_angle_mae": 12.0,
+        "manual_angle_mae": 8.0,
+        "manual_angle_within_10_acc": 0.8,
+        "manual_speed_mae": 2.0,
+        "guided_speed_mae": 3.0,
+    }
+    candidate = {
+        "weighted_validation_score": 9.0,
+        "guided_angle_mae": 10.0,
+        "manual_angle_mae": 10.0,
+        "manual_angle_within_10_acc": 0.77,
+        "manual_speed_mae": 3.0,
+        "guided_speed_mae": 4.0,
+    }
+    report = build_promotion_report(
+        generation=1,
+        parent_checkpoint="parent.pt",
+        parent_sha256="parent-hash",
+        candidate_checkpoint="candidate.pt",
+        candidate_sha256="candidate-hash",
+        initialization_sha256="parent-hash",
+        parent_summary=parent,
+        candidate_summary=candidate,
+    )
+
+    assert report["status"] == "passed"
+    assert all(report["checks"].values())
+
+    failed = build_promotion_report(
+        generation=1,
+        parent_checkpoint="parent.pt",
+        parent_sha256="parent-hash",
+        candidate_checkpoint="candidate.pt",
+        candidate_sha256="candidate-hash",
+        initialization_sha256="different-parent",
+        parent_summary=parent,
+        candidate_summary={**candidate, "manual_angle_mae": 10.01},
+    )
+    assert failed["status"] == "failed"
+    assert not failed["checks"]["candidate_initialized_from_parent"]
+    assert not failed["checks"]["manual_angle_mae_regression_within_limit"]
+
+
+def test_source_anchored_validation_score_uses_same_half_and_half_mass():
+    project_root = Path(__file__).parents[1]
+    config = load_train_config(
+        project_root
+        / "config"
+        / "front_cam_policy_train_stateless_normalized_v1_g1.yaml"
+    )
+    sessions = (
+        _metric_session(source_id="manual", generation=0),
+        _metric_session(source_id="guided", generation=1),
+    )
+    metrics = {
+        "val_source_manual_generation_0_angle_mae": 8.0,
+        "val_source_manual_generation_0_angle_within_10_acc": 0.8,
+        "val_source_manual_generation_0_speed_mae": 2.0,
+        "val_source_guided_generation_1_angle_mae": 12.0,
+        "val_source_guided_generation_1_angle_within_10_acc": 0.7,
+        "val_source_guided_generation_1_speed_mae": 4.0,
+    }
+
+    assert validation_selection_score(
+        metrics, sessions=sessions, config=config
+    ) == pytest.approx(10.75)
+    assert source_weighted_metric(
+        metrics,
+        sessions=sessions,
+        config=config,
+        source_id="manual",
+        metric_name="angle_mae",
+    ) == 8.0
+    assert source_weighted_metric(
+        metrics,
+        sessions=sessions,
+        config=config,
+        source_id="guided",
+        metric_name="angle_mae",
+    ) == 12.0
+
+
+def test_class_weights_use_source_anchored_sample_mass():
+    project_root = Path(__file__).parents[1]
+    config = load_train_config(
+        project_root
+        / "config"
+        / "front_cam_policy_train_stateless_normalized_v1_g1.yaml"
+    )
+    samples = (
+        _metric_sample(source_id="manual", generation=0, speed_class_id=110),
+        _metric_sample(source_id="manual", generation=0, speed_class_id=110),
+        _metric_sample(source_id="guided", generation=1, speed_class_id=120),
+    )
+
+    weights = class_weights(
+        samples,
+        field="speed_class_id",
+        mode="sqrt_inverse_frequency",
+        config=config,
+        device=torch.device("cpu"),
+    )
+
+    assert weights is not None
+    assert weights[110] == pytest.approx(weights[120])
 
 
 def test_stateless_two_root_config_validate_only_with_synthetic_sessions(
@@ -711,3 +878,33 @@ def _write_config(
         payload["data"]["train_angle_mean_window"] = 5
     config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     return config_path
+
+
+def _metric_session(*, source_id: str, generation: int) -> PolicySession:
+    sample = _metric_sample(source_id=source_id, generation=generation)
+    return PolicySession(
+        session_id=sample.session_id,
+        path=Path(source_id),
+        metadata={},
+        samples=(sample,),
+        generation=generation,
+        source_id=source_id,
+    )
+
+
+def _metric_sample(
+    *, source_id: str, generation: int, speed_class_id: int = 100
+) -> PolicySample:
+    return PolicySample(
+        session_id=f"{source_id}/session",
+        image_path=Path("unused.png"),
+        relative_image=f"{source_id}/unused.png",
+        angle_raw=0.0,
+        speed_raw=0.0,
+        angle=0,
+        speed=0,
+        angle_class_id=100,
+        speed_class_id=speed_class_id,
+        generation=generation,
+        source_id=source_id,
+    )

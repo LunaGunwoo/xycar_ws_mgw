@@ -178,6 +178,72 @@ def test_export_validation_rejects_unsafe_id_and_tampering(tmp_path: Path):
         verify_artifact(artifact)
 
 
+def test_guided_export_requires_matching_passed_promotion_report(
+    monkeypatch, tmp_path: Path
+):
+    monkeypatch.setattr(export_module, "TaskTokenViTPolicy", _TinyPolicy)
+    checkpoint_path = tmp_path / "guided-best.pt"
+    model = _TinyPolicy(model_name="tiny", pretrained=False, image_size=16)
+    torch.save(
+        {
+            "epoch": 3,
+            "config": {
+                "model": {"name": "tiny", "image_size": 16},
+                "data": {
+                    "required_steering_contract": "normalized_percent_v1",
+                    "current_generation": 1,
+                },
+            },
+            "model_state": model.state_dict(),
+            "preprocessing": {
+                "geometry": "full_frame_bicubic_resize",
+                "image_size": 16,
+                "mean": [0.5, 0.5, 0.5],
+                "std": [0.5, 0.5, 0.5],
+            },
+            "label_contract": {
+                "num_classes": 201,
+                "decode_mapping": "class_id - 100",
+            },
+        },
+        checkpoint_path,
+    )
+
+    with pytest.raises(PolicyExportError, match="requires --promotion-report"):
+        export_checkpoint(
+            checkpoint_path=checkpoint_path,
+            artifact_id="guided-without-gate",
+            output_root=tmp_path / "models",
+        )
+
+    report_path = tmp_path / "promotion_gate.json"
+    report_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "status": "passed",
+                "generation": 1,
+                "parent": {"sha256": "parent-hash"},
+                "candidate": {
+                    "sha256": export_module.sha256_file(checkpoint_path)
+                },
+                "checks": {"all_required_checks": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact = export_checkpoint(
+        checkpoint_path=checkpoint_path,
+        artifact_id="guided-with-gate",
+        output_root=tmp_path / "models",
+        promotion_report_path=report_path,
+    )
+    manifest = yaml.safe_load((artifact / "manifest.yaml").read_text())
+    assert manifest["promotion"]["offline_gate"] == "passed"
+    assert manifest["promotion"]["generation"] == 1
+    assert manifest["promotion"]["parent_checkpoint_sha256"] == "parent-hash"
+
+
 def test_export_ar_checkpoint_writes_v3_external_history_contract(
     monkeypatch, tmp_path: Path
 ):

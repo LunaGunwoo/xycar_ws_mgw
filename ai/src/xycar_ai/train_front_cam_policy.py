@@ -37,6 +37,7 @@ from xycar_ai.front_cam_policy_data import (
     generation_sampling_weights,
     make_policy_transform,
     policy_dataset_stats,
+    source_generation_sampling_masses,
     smooth_training_angle_targets,
     validate_session_initial_classes,
 )
@@ -108,6 +109,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             splits.train_samples,
             current_generation=config.data.current_generation,
             generation_decay=config.data.generation_decay,
+            source_sampling_masses=config.data.source_sampling_masses,
         )
 
     if args.validate_only:
@@ -540,11 +542,13 @@ def make_loaders(
                     samples,
                     current_generation=config.data.current_generation,
                     generation_decay=config.data.generation_decay,
+                    source_sampling_masses=config.data.source_sampling_masses,
                 ),
                 num_samples=generation_epoch_sample_count(
                     samples,
                     current_generation=config.data.current_generation,
                     generation_decay=config.data.generation_decay,
+                    source_sampling_masses=config.data.source_sampling_masses,
                 ),
                 replacement=True,
                 generator=generator,
@@ -800,6 +804,7 @@ def class_weights(
             samples,
             current_generation=config.data.current_generation,
             generation_decay=config.data.generation_decay,
+            source_sampling_masses=config.data.source_sampling_masses,
         )
         if config.data.ema_sampling
         else None
@@ -826,6 +831,29 @@ def validation_selection_score(
 ) -> float:
     if not config.data.ema_sampling:
         return selection_score(metrics)
+    if config.data.source_sampling_masses:
+        samples = tuple(
+            sample for session in sessions for sample in session.samples
+        )
+        pair_masses = source_generation_sampling_masses(
+            samples,
+            current_generation=config.data.current_generation,
+            generation_decay=config.data.generation_decay,
+            source_sampling_masses=config.data.source_sampling_masses,
+        )
+        return sum(
+            mass
+            * (
+                metrics[
+                    f"val_source_{source_id}_generation_{generation}_angle_mae"
+                ]
+                + 0.25
+                * metrics[
+                    f"val_source_{source_id}_generation_{generation}_speed_mae"
+                ]
+            )
+            for (source_id, generation), mass in pair_masses.items()
+        )
     generations = sorted({session.generation for session in sessions})
     if not generations:
         raise ValueError("validation split has no generations")
@@ -848,6 +876,38 @@ def validation_selection_score(
         )
         total_mass += mass
     return weighted_score / total_mass
+
+
+def source_weighted_metric(
+    metrics: Mapping[str, float],
+    *,
+    sessions: Sequence[PolicySession],
+    config: TrainConfig,
+    source_id: str,
+    metric_name: str,
+    split_name: str = "val",
+) -> float:
+    """Combine one source's per-generation metrics using configured decay."""
+    if source_id not in config.data.source_sampling_masses:
+        raise ValueError(f"source is not configured for anchored sampling: {source_id}")
+    samples = tuple(sample for session in sessions for sample in session.samples)
+    pair_masses = source_generation_sampling_masses(
+        samples,
+        current_generation=config.data.current_generation,
+        generation_decay=config.data.generation_decay,
+        source_sampling_masses=config.data.source_sampling_masses,
+    )
+    source_mass = config.data.source_sampling_masses[source_id]
+    return sum(
+        pair_mass
+        / source_mass
+        * metrics[
+            f"{split_name}_source_{observed_source}_generation_"
+            f"{generation}_{metric_name}"
+        ]
+        for (observed_source, generation), pair_mass in pair_masses.items()
+        if observed_source == source_id
+    )
 
 
 def checkpoint_payload(

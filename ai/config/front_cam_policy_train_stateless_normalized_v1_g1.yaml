@@ -23,7 +23,15 @@ data:
   require_all_matching_sessions: false
   required_steering_contract: normalized_percent_v1
   current_generation: 1
-  generation_decay: 0.5
+  generation_decay: 0.8
+  source_sampling_masses:
+    manual: 0.5
+    guided: 0.5
+  manual_anchor_split_manifest: config/front_cam_policy_split_stateless_normalized_v1.yaml
+  current_generation_session_counts:
+    train: 3
+    val: 1
+    test: 1
   num_workers: 8
   train_angle_mean_window: 1
 
@@ -39,7 +47,7 @@ augmentation:
 
 optimizer:
   name: adamw
-  learning_rate: 0.0003
+  learning_rate: 0.0001
   weight_decay: 0.05
 
 scheduler:
@@ -47,8 +55,8 @@ scheduler:
   warmup_epochs: 1
 
 training:
-  epochs: 20
-  early_stopping_patience: 5
+  epochs: 10
+  early_stopping_patience: 3
   batch_size: 128
   grad_clip: 1.0
   seed: 20260817
