@@ -27,6 +27,50 @@ export ROS_NAMESPACE=xycar
 export ROS_LOCALHOST_ONLY=1
 ```
 
+## ROS 2 native history Manual 수집
+
+`gamepad_history_collection.launch.py`는 기존 stateless launch를 바꾸지 않는 별도
+경로다. `/image_raw`의 새 frame마다 현재 gamepad 명령을
+`/xycar_motor_command`로 한 번 발행하고, `xycar_motor_native`가 clamp·ramp 뒤
+반환한 같은 stamp의 `/xycar_motor_executed`만 label로 저장한다. 실행 echo가 오기
+전에는 다음 최신 frame 한 장만 남기고 그보다 오래된 frame은 버린다.
+
+각 `samples.csv` 행은 실행된 `angle/speed`와 그 직전 네 실행 명령을
+`history_*_t_minus_4`부터 `history_*_t_minus_1`까지 oldest-to-newest 순서로
+기록한다. 최초, DRIVE OFF, stale 및 fault에서는 네 쌍을 모두 `[0,0]`으로
+초기화한다. echo 누락·중복·stamp 불일치, writer 오류는 즉시 정지하고 녹화 중인
+session을 incomplete로 닫는다. 저장 root는
+`/home/xytron/xycar_data/history_manual`, `control_mode`는 `history_gamepad`다.
+
+모터 launch와 아래 camera/gamepad/collector launch는 각각 실행 직전 승인을
+받는다. 기존 ROS 1 `motor` container와 `/xycar_motor` stateless publisher는 먼저
+종료한다. 바퀴 지지, 모터 전원 차단, RT release와 `Ctrl+C` 정지 경로를 확인한다.
+
+```bash
+# Terminal 1: 승인 후 ROS 2 native VESC
+ros2 launch xycar_motor_native vesc_motor.launch.py
+
+# Terminal 2: 다시 승인 후 Manual 수집
+ros2 launch xycar_data gamepad_history_collection.launch.py \
+  params_file:=/home/xytron/.config/xycar/gamepad_history_manual.yaml
+```
+
+A를 누른 상태에서 양수 RT 명령이 실행되면 녹화를 시작하고 B로 정상 저장한다.
+종료는 RT를 놓아 실행 speed 0을 확인하고 B로 저장한 뒤, collector `Ctrl+C`,
+마지막으로 native motor launch `Ctrl+C` 순서다. 60초 rate 검증에서는 profile의
+`metrics_period_sec`를 `60.0`으로 복사·설정해 camera/command/executed rate와
+end-to-end p95를 한 안정 구간으로 측정한다.
+
+camera와 Joy가 이미 별도로 준비된 진단에서 collector component만 시작하는
+명령은 아래와 같다. 이 명령도 `/xycar_motor_command` publisher이므로 실행 직전
+승인이 필요하다.
+
+```bash
+ros2 run xycar_data history_gamepad_collector --ros-args \
+  --params-file /home/xytron/.config/xycar/gamepad_history_manual.yaml \
+  -p collection_profile_path:=/home/xytron/.config/xycar/gamepad_history_manual.yaml
+```
+
 ## Remote Gamepad Teleop
 
 Remote Gamepad 휴대폰 앱과 PC 앱을 먼저 연결한다. 차량 바퀴를 지면에서 띄우고

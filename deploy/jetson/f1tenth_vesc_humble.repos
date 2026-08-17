@@ -1,0 +1,5 @@
+repositories:
+  f1tenth_vesc:
+    type: git
+    url: https://github.com/f1tenth/vesc.git
+    version: 1bc8251296abb3936da5f30821b6311d67e861b7

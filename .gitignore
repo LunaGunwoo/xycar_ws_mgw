@@ -47,7 +47,7 @@ CMakeCache.txt
 cmake_install.cmake
 CTestTestfile.cmake
 Testing/
-_deps/
+/_deps/
 
 # Editors and IDEs
 .vscode/

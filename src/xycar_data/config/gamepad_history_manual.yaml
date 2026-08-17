@@ -1,0 +1,36 @@
+history_gamepad_collector:
+  ros__parameters:
+    joy_topic: /joy
+    camera_topic: /image_raw
+    motor_topic: /xycar_motor_command
+    executed_topic: /xycar_motor_executed
+    ready_topic: /xycar_motor_native/ready
+    steering_axis: 0
+    lt_axis: 4
+    rt_axis: 5
+    trigger_axis_mode: negative
+    invert_steering: true
+    max_angle: 100.0
+    max_reverse_speed: 7.0
+    max_forward_speed: 15.0
+    joy_timeout_sec: 0.25
+    execution_timeout_sec: 0.25
+    watchdog_rate_hz: 30.0
+    graph_check_period_sec: 0.25
+    metrics_period_sec: 2.0
+    neutral_trigger_threshold: 0.05
+    stop_publish_count: 5
+    record_start_button: 0
+    record_stop_button: 1
+    recording_root_dir: /home/xytron/xycar_data/history_manual
+    emergency_discard_frames: 15
+    recording_image_format: jpeg
+    recording_jpeg_quality: 95
+    recording_png_compression: 3
+    recording_queue_size: 128
+    recording_min_free_space_mb: 1024
+
+game_controller_node:
+  ros__parameters:
+    autorepeat_rate: 30.0
+    coalesce_interval_ms: 1

@@ -42,6 +42,11 @@ setup(
                 'front_cam_policy_gpu_server = '
                 'xycar_ai_drive.policy_ipc:main'
             ),
+            'history_policy = xycar_ai_drive.history_policy_node:main',
+            (
+                'history_guided_collector = '
+                'xycar_ai_drive.history_guided_collector:main'
+            ),
             (
                 'guided_policy_collector = '
                 'xycar_ai_drive.guided_policy_collector:main'

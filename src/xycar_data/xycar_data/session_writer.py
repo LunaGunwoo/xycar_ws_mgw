@@ -45,6 +45,15 @@ CSV_FIELDS = (
     "speed_delta",
     "human_correction",
     "inference_ms",
+    "history_angle_t_minus_4",
+    "history_speed_t_minus_4",
+    "history_angle_t_minus_3",
+    "history_speed_t_minus_3",
+    "history_angle_t_minus_2",
+    "history_speed_t_minus_2",
+    "history_angle_t_minus_1",
+    "history_speed_t_minus_1",
+    "motor_executed_received_wall_time_ns",
 )
 
 
@@ -89,6 +98,8 @@ class CameraSample:
     speed_delta: Optional[float] = None
     human_correction: Optional[bool] = None
     inference_ms: Optional[float] = None
+    history_commands: Optional[tuple[tuple[float, float], ...]] = None
+    motor_executed_received_wall_time_ns: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -291,6 +302,8 @@ class AsyncSessionWriter:
             self._stopped.set()
 
     def _write_sample(self, session: _OpenSession, sample: CameraSample) -> None:
+        if sample.history_commands is not None and len(sample.history_commands) != 4:
+            raise ValueError('history_commands must contain four angle/speed pairs')
         self._ensure_session_open(session)
         self._ensure_free_space(session.temp_dir)
         if session.temp_dir is None or session.images_dir is None:
@@ -318,6 +331,7 @@ class AsyncSessionWriter:
 
         if session.csv_writer is None or session.csv_file is None:
             raise RuntimeError("sample manifest was not initialized")
+        history = sample.history_commands or ((None, None),) * 4
         session.csv_writer.writerow(
             {
                 "sample_index": sample_index,
@@ -353,6 +367,17 @@ class AsyncSessionWriter:
                 if sample.human_correction is None
                 else str(sample.human_correction).lower(),
                 "inference_ms": _optional_float(sample.inference_ms),
+                "history_angle_t_minus_4": _optional_float(history[0][0]),
+                "history_speed_t_minus_4": _optional_float(history[0][1]),
+                "history_angle_t_minus_3": _optional_float(history[1][0]),
+                "history_speed_t_minus_3": _optional_float(history[1][1]),
+                "history_angle_t_minus_2": _optional_float(history[2][0]),
+                "history_speed_t_minus_2": _optional_float(history[2][1]),
+                "history_angle_t_minus_1": _optional_float(history[3][0]),
+                "history_speed_t_minus_1": _optional_float(history[3][1]),
+                "motor_executed_received_wall_time_ns": ""
+                if sample.motor_executed_received_wall_time_ns is None
+                else sample.motor_executed_received_wall_time_ns,
             }
         )
         session.csv_file.flush()

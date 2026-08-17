@@ -1,27 +1,19 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>xycar_data</name>
+  <name>xycar_motor_native</name>
   <version>0.1.0</version>
-  <description>Gamepad teleop and camera-first dataset tools for Xycar.</description>
+  <description>Fail-closed ROS 2 native VESC gateway for Xycar commands.</description>
   <maintainer email="moongunwoo7019@naver.com">Gunwoo Moon</maintainer>
   <license>Apache-2.0</license>
 
-  <exec_depend>ament_index_python</exec_depend>
-  <exec_depend>cv_bridge</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
-  <exec_depend>joy</exec_depend>
-  <exec_depend>python3-numpy</exec_depend>
-  <exec_depend>python3-opencv</exec_depend>
-  <exec_depend>python3-yaml</exec_depend>
   <exec_depend>rclpy</exec_depend>
-  <exec_depend>ros2launch</exec_depend>
-  <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
+  <exec_depend>vesc_driver</exec_depend>
+  <exec_depend>vesc_msgs</exec_depend>
   <exec_depend>xycar_msgs</exec_depend>
-  <exec_depend>xycar_cam</exec_depend>
-  <exec_depend>xycar_lidar</exec_depend>
 
   <test_depend>python3-pytest</test_depend>
 

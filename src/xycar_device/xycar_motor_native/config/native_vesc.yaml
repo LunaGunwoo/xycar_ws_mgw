@@ -1,0 +1,47 @@
+native_motor_gateway:
+  ros__parameters:
+    command_topic: /xycar_motor_command
+    executed_topic: /xycar_motor_executed
+    erpm_topic: /xycar_native/commands/motor/speed
+    servo_topic: /xycar_native/commands/servo/position
+    vesc_state_topic: /xycar_native/sensors/core
+    command_timeout_sec: 0.25
+    watchdog_rate_hz: 30.0
+    graph_check_period_sec: 0.25
+    feedback_timeout_sec: 0.25
+    feedback_startup_grace_sec: 1.0
+    require_vesc_feedback: true
+    metrics_period_sec: 2.0
+    stop_publish_count: 5
+    angle_min: -50.0
+    angle_max: 100.0
+    speed_min: -50.0
+    speed_max: 100.0
+    angle_to_radians_gain: 0.0068
+    speed_to_mps_gain: 0.08
+    speed_to_erpm_gain: 4614.0
+    speed_to_erpm_offset: 0.0
+    steering_to_servo_gain: -1.2135
+    steering_to_servo_offset: 0.5004
+    erpm_min: -20000.0
+    erpm_max: 40000.0
+    servo_min: 0.15
+    servo_max: 0.85
+    startup_ramp_duration_sec: 0.70
+    nominal_frame_rate_hz: 30.0
+
+/xycar_native/vesc_driver_node:
+  ros__parameters:
+    port: /dev/ttyMOTOR
+    duty_cycle_min: 0.005
+    duty_cycle_max: 0.950
+    current_min: -60.0
+    current_max: 60.0
+    brake_min: 0.0
+    brake_max: 0.0
+    speed_min: -20000.0
+    speed_max: 40000.0
+    position_min: 0.0
+    position_max: 0.0
+    servo_min: 0.15
+    servo_max: 0.85

@@ -232,3 +232,67 @@ def test_export_ar_checkpoint_writes_v3_external_history_contract(
     )
     assert tuple(angle.shape) == (1, 201)
     assert tuple(speed.shape) == (1, 201)
+
+
+def test_export_camera_frame_history_checkpoint_writes_schema_v4(
+    monkeypatch, tmp_path: Path
+):
+    monkeypatch.setattr(
+        export_module,
+        "AutoregressiveControlTokenViTPolicy",
+        _TinyARPolicy,
+    )
+    checkpoint_path = tmp_path / "best-v4.pt"
+    model = _TinyARPolicy(
+        model_name="tiny",
+        pretrained=False,
+        image_size=16,
+        history_frames=4,
+        use_control_type_embedding=False,
+    )
+    torch.save(
+        {
+            "epoch": 1,
+            "best_epoch": 1,
+            "best_score": 5.0,
+            "config": {
+                "model": {
+                    "name": "tiny",
+                    "image_size": 16,
+                    "architecture": "ar_control_tokens",
+                    "history_frames": 4,
+                    "control_token_type_embedding": False,
+                    "history_initial_angle": 0,
+                    "history_initial_speed": 0,
+                    "history_update": "externally_executed_commands",
+                    "history_sample_clock": "camera_frame",
+                }
+            },
+            "model_state": model.state_dict(),
+            "preprocessing": {
+                "geometry": "full_frame_bicubic_resize",
+                "image_size": 16,
+                "mean": [0.5, 0.5, 0.5],
+                "std": [0.5, 0.5, 0.5],
+            },
+            "label_contract": {
+                "num_classes": 201,
+                "decode_mapping": "class_id - 100",
+            },
+        },
+        checkpoint_path,
+    )
+
+    artifact = export_checkpoint(
+        checkpoint_path=checkpoint_path,
+        artifact_id="fixture-camera-frame-history",
+        output_root=tmp_path / "models",
+        require_schema_version=4,
+    )
+    manifest = yaml.safe_load((artifact / "manifest.yaml").read_text())
+
+    assert manifest["schema_version"] == 4
+    assert manifest["history"]["initial_command"] == [0, 0]
+    assert manifest["history"]["initial_class_ids"] == [100, 100]
+    assert manifest["history"]["sample_clock"] == "camera_frame"
+    verify_artifact(artifact, require_schema_version=4)

@@ -43,12 +43,14 @@ class _FakePolicy:
         self.reset_count += 1
 
 
-def _artifact(tmp_path, *, external_history=False):
+def _artifact(tmp_path, *, external_history=False, camera_frame_history=False):
     root = tmp_path / 'fixture-policy'
     root.mkdir()
     (root / 'model.ts').write_bytes(b'model')
     manifest = {
-        'schema_version': 3 if external_history else 1,
+        'schema_version': (
+            4 if camera_frame_history else 3 if external_history else 1
+        ),
         'artifact_id': root.name,
         'model': {
             'format': 'torchscript',
@@ -75,7 +77,7 @@ def _artifact(tmp_path, *, external_history=False):
             'decode_mapping': 'class_id - 100',
         },
     }
-    if external_history:
+    if external_history or camera_frame_history:
         manifest['model']['architecture'] = 'ar_control_tokens'
         manifest['model']['input'] = {
             'kind': 'tuple',
@@ -94,10 +96,14 @@ def _artifact(tmp_path, *, external_history=False):
             'frames': 4,
             'pair_order': ['angle_class_id', 'speed_class_id'],
             'time_order': 'oldest_to_newest',
-            'initial_command': [0, 25],
-            'initial_class_ids': [100, 125],
+            'initial_command': [0, 0] if camera_frame_history else [0, 25],
+            'initial_class_ids': (
+                [100, 100] if camera_frame_history else [100, 125]
+            ),
             'update': 'externally_executed_commands',
         }
+        if camera_frame_history:
+            manifest['history']['sample_clock'] = 'camera_frame'
     (root / 'manifest.yaml').write_text(
         yaml.safe_dump(manifest, sort_keys=False),
         encoding='utf-8',
@@ -147,8 +153,15 @@ def test_ipc_handshake_inference_and_reset(tmp_path):
     _stop_server(client, server, thread)
 
 
-def test_v3_ipc_transports_executed_history(tmp_path):
-    artifact = _artifact(tmp_path, external_history=True)
+@pytest.mark.parametrize('schema_version', [3, 4])
+def test_external_history_ipc_transports_executed_history(
+    tmp_path, schema_version
+):
+    artifact = _artifact(
+        tmp_path,
+        external_history=schema_version == 3,
+        camera_frame_history=schema_version == 4,
+    )
     policy = _FakePolicy(artifact)
     socket_path = tmp_path / 'policy.sock'
     server, thread = _start_server(socket_path, policy)

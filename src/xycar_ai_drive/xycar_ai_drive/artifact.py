@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
-SUPPORTED_ARTIFACT_SCHEMA_VERSIONS = {1, 2, 3}
+SUPPORTED_ARTIFACT_SCHEMA_VERSIONS = {1, 2, 3, 4}
 CHECKSUM_FILENAME = 'SHA256SUMS'
 MANIFEST_FILENAME = 'manifest.yaml'
 
@@ -40,6 +40,7 @@ class PolicyHistoryContract:
     frames: int
     initial_class_ids: tuple[int, int]
     update: str
+    sample_clock: str | None = None
 
 
 @dataclass(frozen=True)
@@ -209,7 +210,7 @@ def _history_contract(
         raise ArtifactContractError('history time order is unsupported')
     expected_update = (
         'externally_executed_commands'
-        if schema_version == 3
+        if schema_version in {3, 4}
         else 'predicted_argmax'
     )
     if history.get('update') != expected_update:
@@ -226,17 +227,31 @@ def _history_contract(
         )
     ):
         raise ArtifactContractError('history initial class ids are invalid')
-    if initial_ids != [100, 125]:
+    expected_initial_ids = [100, 100] if schema_version == 4 else [100, 125]
+    if initial_ids != expected_initial_ids:
         raise ArtifactContractError(
-            'history initial class ids must be [100,125]'
+            f'history initial class ids must be {expected_initial_ids}'
         )
     initial_command = history.get('initial_command')
-    if initial_command != [0, 25]:
-        raise ArtifactContractError('history initial command must be [0,25]')
+    expected_initial_command = [0, 0] if schema_version == 4 else [0, 25]
+    if initial_command != expected_initial_command:
+        raise ArtifactContractError(
+            f'history initial command must be {expected_initial_command}'
+        )
+    sample_clock = history.get('sample_clock')
+    if schema_version == 4 and sample_clock != 'camera_frame':
+        raise ArtifactContractError(
+            'schema v4 history sample clock must be camera_frame'
+        )
+    if schema_version != 4 and sample_clock is not None:
+        raise ArtifactContractError(
+            'legacy history contracts must not define sample_clock'
+        )
     return PolicyHistoryContract(
         frames=4,
         initial_class_ids=(initial_ids[0], initial_ids[1]),
         update=expected_update,
+        sample_clock=sample_clock,
     )
 
 

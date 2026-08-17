@@ -59,6 +59,24 @@ if [ ! -e "${profile_dir}/guided_stateless_collection.yaml" ] \
         "${repo_root}/src/xycar_ai_drive/config/guided_stateless_collection.yaml" \
         "${profile_dir}/guided_stateless_collection.yaml"
 fi
+if [ ! -e "${profile_dir}/gamepad_history_manual.yaml" ] \
+    && [ ! -L "${profile_dir}/gamepad_history_manual.yaml" ]; then
+    install -m 0644 \
+        "${repo_root}/src/xycar_data/config/gamepad_history_manual.yaml" \
+        "${profile_dir}/gamepad_history_manual.yaml"
+fi
+if [ ! -e "${profile_dir}/history_policy.yaml" ] \
+    && [ ! -L "${profile_dir}/history_policy.yaml" ]; then
+    install -m 0644 \
+        "${repo_root}/src/xycar_ai_drive/config/history_policy.yaml" \
+        "${profile_dir}/history_policy.yaml"
+fi
+if [ ! -e "${profile_dir}/guided_history_collection.yaml" ] \
+    && [ ! -L "${profile_dir}/guided_history_collection.yaml" ]; then
+    install -m 0644 \
+        "${repo_root}/src/xycar_ai_drive/config/guided_history_collection.yaml" \
+        "${profile_dir}/guided_history_collection.yaml"
+fi
 if [ ! -e "${profile_dir}/competition_mission_collection.yaml" ] \
     && [ ! -L "${profile_dir}/competition_mission_collection.yaml" ]; then
     install -m 0644 \
