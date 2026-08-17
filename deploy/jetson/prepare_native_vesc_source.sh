@@ -6,7 +6,7 @@ REPO_ROOT=$(cd -- "${SCRIPT_DIR}/../.." && pwd)
 DEPS_ROOT="${REPO_ROOT}/_deps"
 SOURCE_ROOT="${DEPS_ROOT}/src"
 VESC_ROOT="${SOURCE_ROOT}/f1tenth_vesc"
-EXPECTED_COMMIT=1bc8251296abb3936da5f30821b6311d67e861b7
+EXPECTED_COMMIT=c47fccbbd10fb66db3faaaa6e469f2eedba2586f
 
 mkdir -p "${SOURCE_ROOT}"
 if [ ! -e "${VESC_ROOT}" ]; then
