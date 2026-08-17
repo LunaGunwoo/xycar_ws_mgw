@@ -23,7 +23,8 @@ Upstream은 `f1tenth/vesc` ROS 2 commit
 `c47fccbbd10fb66db3faaaa6e469f2eedba2586f`로 고정한다. firmware 5.2용 packet
 layout과 IMU polling이 추가되기 전 버전이며, tracked compatibility patch가 차량의
 VESC firmware 2.18 six-MOS values offsets를 복원한다. 준비 script는 patch 결과의
-SHA-256까지 검사하고 USB serial flow control을 `none`으로 고정한다.
+SHA-256까지 검사하고 USB serial flow control을 `none`으로 고정하며, 이후 공식
+ROS 2 수정의 synchronous receive/error reporting을 backport한다.
 BSD-3-Clause license 사본은
 `deploy/jetson/F1TENTH_VESC_LICENSE`에 보존한다.
 

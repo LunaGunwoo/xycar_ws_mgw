@@ -45,7 +45,8 @@ legacy values offsets를 복원한다. 원본 commit의 onboard-car offsets는 �
 0 V와 비정상 current/RPM/fault를 만들며, 이후 firmware 5.2 protocol과 IMU polling이
 포함된 Humble HEAD도 2.18 장치에서 checksum/out-of-sync를 발생시키므로 사용하지
 않는다. 같은 patch가 USB CDC VESC에 맞춰 serial flow control을 working ROS 1
-driver와 동일한 `none`으로 고정한다.
+driver와 동일한 `none`으로 고정하고, 이후 공식 ROS 2 commit `29c5038`의
+synchronous receive/error-reporting 수정을 backport한다.
 
 ```bash
 ./deploy/jetson/prepare_native_vesc_source.sh
