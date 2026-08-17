@@ -30,58 +30,47 @@ index ef527ed..9771d8b 100644
    <export>
      <build_type>ament_cmake</build_type>
 diff --git a/vesc_driver/src/vesc_interface.cpp b/vesc_driver/src/vesc_interface.cpp
-index 5e7a6f9..bd5b73b 100644
+index 5e7a6f9..93d8afb 100644
 --- a/vesc_driver/src/vesc_interface.cpp
 +++ b/vesc_driver/src/vesc_interface.cpp
-@@ -38,7 +38,6 @@
- #include <iomanip>
- #include <iostream>
- #include <memory>
--#include <mutex>
- #include <sstream>
- #include <string>
- #include <thread>
-@@ -54,7 +53,6 @@ public:
+@@ -54,7 +54,8 @@ public:
    serial_driver_{new drivers::serial_driver::SerialDriver(*owned_ctx)}
    {}
  
 -  void serial_receive_callback(const std::vector<uint8_t> & buffer);
++  void serial_receive_callback(
++    const std::vector<uint8_t> & buffer, const size_t & bytes_transferred);
    void packet_creation_thread();
    void on_configure();
    void connect(const std::string & port);
-@@ -64,7 +62,6 @@ public:
-   PacketHandlerFunction packet_handler_;
-   ErrorHandlerFunction error_handler_;
-   std::unique_ptr<drivers::serial_driver::SerialPortConfig> device_config_;
--  std::mutex buffer_mutex_;
-   std::string device_name_;
-   std::unique_ptr<IoContext> owned_ctx{};
-   std::unique_ptr<drivers::serial_driver::SerialDriver> serial_driver_;
-@@ -78,19 +75,14 @@ private:
+@@ -78,19 +79,20 @@ private:
    std::vector<uint8_t> buffer_;
  };
  
 -void VescInterface::Impl::serial_receive_callback(const std::vector<uint8_t> & buffer)
--{
++void VescInterface::Impl::serial_receive_callback(
++  const std::vector<uint8_t> & buffer, const size_t & bytes_transferred)
+ {
 -  buffer_mutex_.lock(); // wait untill the current buffer read finishes
 -  buffer_.reserve(buffer_.size() + buffer.size());
 -  buffer_.insert(buffer_.end(), buffer.begin(), buffer.end());
 -  buffer_mutex_.unlock();
--}
--
++  const auto count = std::min(bytes_transferred, buffer.size());
++  std::lock_guard<std::mutex> lock(buffer_mutex_);
++  buffer_.reserve(buffer_.size() + count);
++  buffer_.insert(buffer_.end(), buffer.begin(), buffer.begin() + count);
+ }
+ 
  void VescInterface::Impl::packet_creation_thread()
  {
-+  static auto temp_buffer = Buffer(2048, 0);
    while (packet_thread_run_)
    {
 -    buffer_mutex_.lock();
-+    const auto bytes_read = serial_driver_->port()->receive(temp_buffer);
-+    buffer_.reserve(buffer_.size() + temp_buffer.size());
-+    buffer_.insert(buffer_.end(), temp_buffer.begin(), temp_buffer.begin() + bytes_read);
++    std::unique_lock<std::mutex> lock(buffer_mutex_);
      int bytes_needed = VescFrame::VESC_MIN_FRAME_SIZE;
      if (!buffer_.empty()){
        // search buffer for valid packet(s)
-@@ -107,6 +99,12 @@ void VescInterface::Impl::packet_creation_thread()
+@@ -107,6 +109,12 @@ void VescInterface::Impl::packet_creation_thread()
            VescPacketConstPtr packet =
              VescPacketFactory::createPacket(iter, buffer_.end(), &bytes_needed, &error);
            if (packet) {
@@ -94,7 +83,7 @@ index 5e7a6f9..bd5b73b 100644
              // call packet handler
              packet_handler_(packet);
              // update state
-@@ -117,6 +115,8 @@ void VescInterface::Impl::packet_creation_thread()
+@@ -117,6 +125,8 @@ void VescInterface::Impl::packet_creation_thread()
            } else if (bytes_needed > 0) {
              // need more data, break out of while loop
              break;  // for (iter_sof...
@@ -103,7 +92,7 @@ index 5e7a6f9..bd5b73b 100644
            }
          }
  
-@@ -129,27 +129,28 @@ void VescInterface::Impl::packet_creation_thread()
+@@ -129,19 +139,23 @@ void VescInterface::Impl::packet_creation_thread()
        }
  
        // erase "used" buffer
@@ -118,6 +107,7 @@ index 5e7a6f9..bd5b73b 100644
 -    buffer_mutex_.unlock();
 -    // Only attempt to read every 10 ms
 -    std::this_thread::sleep_for(std::chrono::milliseconds(10));
++    lock.unlock();
 +    std::this_thread::sleep_for(std::chrono::milliseconds(5));
    }
  }
@@ -130,11 +120,14 @@ index 5e7a6f9..bd5b73b 100644
    auto pt = drivers::serial_driver::Parity::NONE;
    auto sb = drivers::serial_driver::StopBits::ONE;
    device_config_ = std::make_unique<drivers::serial_driver::SerialPortConfig>(baud_rate, fc, pt, sb);
-   serial_driver_->init_port(port, *device_config_);
+@@ -149,7 +163,9 @@ void VescInterface::Impl::connect(const std::string & port)
    if (!serial_driver_->port()->is_open()) {
      serial_driver_->port()->open();
--    serial_driver_->port()->async_receive(
+     serial_driver_->port()->async_receive(
 -      std::bind(&VescInterface::Impl::serial_receive_callback, this, std::placeholders::_1));
++      std::bind(
++        &VescInterface::Impl::serial_receive_callback, this,
++        std::placeholders::_1, std::placeholders::_2));
    }
  
  }
