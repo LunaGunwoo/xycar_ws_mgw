@@ -1,7 +1,0 @@
-schema_version: 2
-dataset_snapshot: replace_after_history_manual_collection
-splits:
-  # Populate with session-disjoint IDs such as manual/20260817_120000_000_session.
-  train: []
-  val: []
-  test: []

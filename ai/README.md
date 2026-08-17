@@ -7,16 +7,14 @@
 
 - Python: 3.12
 - uv: 0.11.24
-- 새 history dataset: `datasets/history_manual/`, `datasets/history_guided/`
-- rollback dataset: `datasets/stateless_manual/`, `datasets/stateless_guided/`,
-  `datasets/teleop/`
+- 새 dataset: `datasets/stateless_manual/`, `datasets/stateless_guided/`
+- rollback dataset: `datasets/teleop/`
 - training output: `artifacts/`
 - 배포 후보: `artifacts/models/<artifact-id>/`
 
 `.venv`, dataset과 artifact는 Git에 commit하지 않는다. `.venv`는 lockfile에서
-재생성한다. 새 history 학습은 내부 ext4의 두 `datasets/history_*` directory만
-사용한다. 기존 stateless와 `datasets/teleop`은 새 학습에 섞지 않고 rollback
-실험용으로 보존한다.
+재생성한다. 새 학습은 내부 ext4의 두 `datasets/stateless_*` directory만 사용한다.
+기존 `datasets/teleop`은 rollback 실험에만 사용한다.
 Windows `/mnt/c`를 가리키는 symlink는 최초 Windows sync에서 안전하게 실제
 directory로 전환해 학습 시 WSL filesystem 경계를 넘는 image I/O를 제거한다.
 
@@ -436,76 +434,9 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 probe run에는 최종 test 대신 `probe_summary.json`을 기록한다. 승자를 총 20 epoch까지
 resume한 뒤에만 best checkpoint를 prediction rollout 방식으로 test 평가한다.
 
-### Camera-frame History ViT-Small 학습
+### Stateless ViT-Small 증분 학습과 EMA sampling
 
-새 기본 workflow는 stateless/teleop data를 섞지 않고 다음 두 root만 사용한다.
-
-```text
-datasets/history_manual  # control_mode=history_gamepad, generation 0
-datasets/history_guided  # control_mode=history_guided_policy, generation 필수
-```
-
-schema 4 config는 shared angle/speed `ar_control_tokens`, `history_frames=4`, type
-embedding 없음, `[0,0]` 네 쌍 초기화, `camera_frame` clock과
-`externally_executed_commands`를 강제한다. label은 미래 평균이 없는 현재 raw
-angle/speed이며, 각 CSV 행에 기록된 직전 네 실행 명령 8개 필드를 직접 사용한다.
-필드 누락·부분 값·행 사이 history 불연속은 학습 전에 거부한다.
-
-Base는 `front_cam_policy_train_history_base.yaml`과 새 Manual generation 0만
-사용해 ImageNet pretrained ViT-Small에서 시작한다. split YAML의 빈 목록을 실제
-`manual/<session-id>`로 채운 뒤 먼저 검증한다.
-
-```bash
-cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
-/home/xytron/.local/bin/uv lock --check
-/home/xytron/.local/bin/uv run --locked xycar-train \
-  --config config/front_cam_policy_train_history_base.yaml --validate-only
-/home/xytron/.local/bin/uv run --locked xycar-train \
-  --config config/front_cam_policy_train_history_base.yaml
-```
-
-Guide0는 검증된 Base `best.pt`, Guide1 이후는 직전 Guided `best.pt`에서 model
-weight만 계승한다. optimizer, scheduler, epoch, AMP scaler와 early-stopping 상태는
-항상 새로 시작한다. 현재 generation train sample이 없으면 거부하고, 세대별
-sampling과 class/validation weight는 현재부터 `1, 0.5, 0.25, ...`다. 일반
-실행-history validation과 predicted autoregressive rollout validation의 평균
-selection score가 best checkpoint를 결정한다.
-
-```bash
-# YAML의 current_generation, run_name과 split을 현재 Guide에 맞춰 갱신한다.
-/home/xytron/.local/bin/uv run --locked xycar-train \
-  --config config/front_cam_policy_train_history_guided.yaml --validate-only
-/home/xytron/.local/bin/uv run --locked xycar-train \
-  --config config/front_cam_policy_train_history_guided.yaml \
-  --initialize-from artifacts/runs/front_cam_policy/<validated-parent>/best.pt
-
-/home/xytron/.local/bin/uv run --locked xycar-export-policy \
-  --checkpoint artifacts/runs/front_cam_policy/<history-run>/best.pt \
-  --artifact-id <schema-v4-history-artifact-id> \
-  --require-schema-version 4
-```
-
-Manual 직결 LAN sync는 기존 stateless script를 변경하지 않는 전용 명령이다. 같은
-고정 IP, host key, ext4 marker와 exact-mirror 검사를 적용한다. Guided는 기존
-no-delete script에 새 root만 지정한다.
-
-```bash
-cd /home/xytron/xycar_ws/apps/xycar_ws_mgw
-./scripts/ai/sync_history_manual_lan.sh --dry-run
-./scripts/ai/sync_history_manual_lan.sh
-
-XYCAR_AI_VEHICLE_DATASET_ROOT=/home/xytron/xycar_data/history_guided \
-XYCAR_AI_LOCAL_DATASET_ROOT="$PWD/ai/datasets/history_guided" \
-  ./scripts/ai/sync_dataset.sh
-XYCAR_AI_VEHICLE_DATASET_ROOT=/home/xytron/xycar_data/history_guided \
-XYCAR_AI_LOCAL_DATASET_ROOT="$PWD/ai/datasets/history_guided" \
-  ./scripts/ai/sync_dataset.sh --apply
-```
-
-### Stateless ViT-Small 증분 학습과 EMA sampling (보존 경로)
-
-이 workflow는 rollback과 비교를 위해 유지하며 기존 `datasets/teleop`과
-checkpoint를 사용하지 않는다.
+새 기본 workflow는 기존 `datasets/teleop`과 checkpoint를 사용하지 않는다.
 수동·사람 보정 session은 각각 다음 root에 물리적으로 분리하고, 한 학습 run에서만
 두 source를 함께 읽는다.
 
@@ -516,8 +447,8 @@ datasets/stateless_guided  # control_mode=guided_policy, curriculum.generation �
 
 `config/front_cam_policy_train_stateless_ema.yaml`은 pretrained
 `vit_small_patch16_224`, `task_tokens`, history 0, 224x224 road warp와 raw instantaneous
-angle(`train_angle_mean_window: 1`)을 강제하는 schema 3 설정이다. 기존 AR 학습
-설정과 schema v2/v3 runtime도 호환성을 위해 유지한다.
+angle(`train_angle_mean_window: 1`)을 강제하는 schema 3 설정이다. AR 학습 설정과
+schema v2/v3 runtime은 rollback용으로 남아 있지만 새 데이터에는 사용하지 않는다.
 validation selection score가 5 epochs 연속 개선되지 않으면 조기 종료하며, 다음
 generation에서도 이 patience를 유지한다.
 

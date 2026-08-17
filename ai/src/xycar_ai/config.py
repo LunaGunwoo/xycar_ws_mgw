@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-CONFIG_SCHEMA_VERSIONS = {1, 2, 3, 4}
+CONFIG_SCHEMA_VERSIONS = {1, 2, 3}
 CLASS_WEIGHTING_MODES = {"none", "sqrt_inverse_frequency"}
 MODEL_ARCHITECTURES = {"task_tokens", "ar_control_tokens"}
 HISTORY_UPDATE_MODES = {"predicted_argmax", "externally_executed_commands"}
@@ -26,7 +26,6 @@ class ModelConfig:
     history_initial_angle: int = 0
     history_initial_speed: int = 25
     history_update: str = "predicted_argmax"
-    history_sample_clock: str | None = None
 
 
 @dataclass(frozen=True)
@@ -54,7 +53,6 @@ class DataConfig:
     legacy_generation: int = 0
     ema_sampling: bool = False
     sources: tuple[DataSourceConfig, ...] = ()
-    stage: str = "legacy"
 
 
 @dataclass(frozen=True)
@@ -182,7 +180,6 @@ def load_train_config(path: str | Path) -> TrainConfig:
             "history_initial_angle",
             "history_initial_speed",
             "history_update",
-            "history_sample_clock",
         },
     )
     _expect_data_keys(data_payload, schema_version=schema_version)
@@ -276,16 +273,11 @@ def load_train_config(path: str | Path) -> TrainConfig:
                 if "history_update" in model_payload
                 else "predicted_argmax"
             ),
-            history_sample_clock=(
-                _string(model_payload, "history_sample_clock")
-                if "history_sample_clock" in model_payload
-                else None
-            ),
         ),
         data=DataConfig(
             root=(
                 None
-                if schema_version in {3, 4}
+                if schema_version == 3
                 else _resolve_project_path(
                     project_root, _string(data_payload, "root")
                 )
@@ -337,16 +329,11 @@ def load_train_config(path: str | Path) -> TrainConfig:
                 if "legacy_generation" in data_payload
                 else 0
             ),
-            ema_sampling=schema_version in {2, 3, 4},
+            ema_sampling=schema_version in {2, 3},
             sources=(
                 _parse_data_sources(project_root, data_payload)
-                if schema_version in {3, 4}
+                if schema_version == 3
                 else ()
-            ),
-            stage=(
-                _string(data_payload, "stage")
-                if schema_version == 4
-                else "legacy"
             ),
         ),
         preprocessing=PreprocessingConfig(
@@ -430,26 +417,16 @@ def _validate(config: TrainConfig) -> None:
             raise ValueError(
                 "task_tokens model cannot use control_token_type_embedding"
             )
-        if config.model.history_sample_clock is not None:
-            raise ValueError("task_tokens model cannot define history_sample_clock")
     else:
         if config.model.history_frames != 4:
             raise ValueError("ar_control_tokens model.history_frames must be 4")
-        expected_initial = (
-            (0, 0)
-            if config.model.history_sample_clock == "camera_frame"
-            else (0, 25)
-        )
         if (
             config.model.history_initial_angle,
             config.model.history_initial_speed,
-        ) != expected_initial:
+        ) != (0, 25):
             raise ValueError(
-                "ar_control_tokens initial history command must be "
-                f"{expected_initial}"
+                "ar_control_tokens initial history command must be (0, 25)"
             )
-        if config.model.history_sample_clock not in {None, "camera_frame"}:
-            raise ValueError("unsupported model.history_sample_clock")
     if config.data.num_workers < 0:
         raise ValueError("data.num_workers must be >= 0")
     if config.data.sources:
@@ -483,72 +460,31 @@ def _validate(config: TrainConfig) -> None:
         sources_by_id = {
             source.source_id: source for source in config.data.sources
         }
-        history_mode = config.model.history_sample_clock == "camera_frame"
-        if history_mode and config.data.stage == "legacy":
-            raise ValueError("camera-frame history requires schema v4 data")
-        if config.data.stage != "legacy" and not history_mode:
+        if set(sources_by_id) != {"manual", "guided"}:
             raise ValueError(
-                "schema v4 data requires camera-frame execution history"
-            )
-        if history_mode and config.data.stage == "base" and (
-            config.data.current_generation != 0
-        ):
-            raise ValueError("history base data must use current_generation 0")
-        expected_sources = (
-            {"manual"}
-            if history_mode and config.data.stage == "base"
-            else {"manual", "guided"}
-        )
-        if set(sources_by_id) != expected_sources:
-            raise ValueError(
-                f"{config.data.stage} data requires sources {sorted(expected_sources)}"
+                "multi-source stateless data requires manual and guided sources"
             )
         manual = sources_by_id["manual"]
-        expected_manual_mode = "history_gamepad" if history_mode else "gamepad"
+        guided = sources_by_id["guided"]
+        if manual.control_modes != ("gamepad",) or manual.fixed_generation != 0:
+            raise ValueError(
+                "manual source must accept only gamepad sessions at fixed_generation 0"
+            )
         if (
-            manual.control_modes != (expected_manual_mode,)
-            or manual.fixed_generation != 0
+            guided.control_modes != ("guided_policy",)
+            or not guided.require_curriculum_generation
         ):
             raise ValueError(
-                f"manual source must accept only {expected_manual_mode} at generation 0"
+                "guided source must accept only guided_policy sessions and require generation"
             )
-        if "guided" in sources_by_id:
-            guided = sources_by_id["guided"]
-            expected_guided_mode = (
-                "history_guided_policy" if history_mode else "guided_policy"
-            )
-            if (
-                guided.control_modes != (expected_guided_mode,)
-                or not guided.require_curriculum_generation
-            ):
-                raise ValueError(
-                    f"guided source must accept only {expected_guided_mode} "
-                    "and require generation"
-                )
-        common_invalid = (
+        if (
             config.model.name != STATELESS_EMA_MODEL
+            or config.model.architecture != "task_tokens"
+            or config.model.history_frames != 0
             or not config.model.pretrained
             or config.model.image_size != 224
             or config.data.train_angle_mean_window != 1
             or config.preprocessing.road_warp_config is None
-        )
-        if history_mode:
-            if (
-                common_invalid
-                or config.model.architecture != "ar_control_tokens"
-                or config.model.history_frames != 4
-                or config.model.control_token_type_embedding
-                or config.model.history_update != "externally_executed_commands"
-                or config.data.stage not in {"base", "guided"}
-            ):
-                raise ValueError(
-                    "camera-frame history data requires pretrained shared-token "
-                    "ViT-Small AR4, raw angle, road warp, and executed history"
-                )
-        elif (
-            common_invalid
-            or config.model.architecture != "task_tokens"
-            or config.model.history_frames != 0
         ):
             raise ValueError(
                 "multi-source stateless data requires pretrained ViT-Small, "
@@ -666,20 +602,17 @@ def _expect_keys(
 
 
 def _expect_data_keys(payload: Mapping[str, object], *, schema_version: int) -> None:
-    if schema_version in {3, 4}:
-        required = {
-            "sources",
-            "split_manifest",
-            "require_all_matching_sessions",
-            "num_workers",
-            "current_generation",
-            "generation_decay",
-        }
-        if schema_version == 4:
-            required.add("stage")
+    if schema_version == 3:
         _expect_keys(
             payload,
-            required,
+            {
+                "sources",
+                "split_manifest",
+                "require_all_matching_sessions",
+                "num_workers",
+                "current_generation",
+                "generation_decay",
+            },
             "data",
             optional={"train_angle_mean_window"},
         )

@@ -37,10 +37,6 @@ setup(
         "console_scripts": [
             "gamepad_teleop = xycar_data.gamepad_teleop:main",
             (
-                "history_gamepad_collector = "
-                "xycar_data.history_gamepad_collector:main"
-            ),
-            (
                 "mission_sequence_collector = "
                 "xycar_data.gamepad_teleop:main"
             ),

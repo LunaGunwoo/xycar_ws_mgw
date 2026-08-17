@@ -21,8 +21,7 @@ from xycar_ai.front_cam_policy_model import (
 )
 
 LEGACY_ARTIFACT_SCHEMA_VERSION = 1
-LEGACY_AR_ARTIFACT_SCHEMA_VERSION = 3
-CAMERA_FRAME_AR_ARTIFACT_SCHEMA_VERSION = 4
+AR_ARTIFACT_SCHEMA_VERSION = 3
 ARTIFACT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 DEFAULT_OUTPUT_ROOT = Path("artifacts/models")
 MODEL_FILENAME = "model.ts"
@@ -72,11 +71,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--require-schema-version",
         type=int,
-        choices=(
-            LEGACY_ARTIFACT_SCHEMA_VERSION,
-            LEGACY_AR_ARTIFACT_SCHEMA_VERSION,
-            CAMERA_FRAME_AR_ARTIFACT_SCHEMA_VERSION,
-        ),
+        choices=(LEGACY_ARTIFACT_SCHEMA_VERSION, AR_ARTIFACT_SCHEMA_VERSION),
         help="Reject export unless the artifact has this schema version.",
     )
     return parser
@@ -116,19 +111,11 @@ def export_checkpoint(
     model_config = _mapping(model_config, "model", "checkpoint.config")
     model_name = _string(model_config, "name", "checkpoint.config.model")
     architecture = str(model_config.get("architecture", "task_tokens"))
-    history_sample_clock = model_config.get("history_sample_clock")
-    if architecture == AR_CONTROL_TOKEN_ARCHITECTURE:
-        schema_version = (
-            CAMERA_FRAME_AR_ARTIFACT_SCHEMA_VERSION
-            if history_sample_clock == "camera_frame"
-            else LEGACY_AR_ARTIFACT_SCHEMA_VERSION
-        )
-    else:
-        if history_sample_clock is not None:
-            raise PolicyExportError(
-                "stateless checkpoint must not define a history sample clock"
-            )
-        schema_version = LEGACY_ARTIFACT_SCHEMA_VERSION
+    schema_version = (
+        AR_ARTIFACT_SCHEMA_VERSION
+        if architecture == AR_CONTROL_TOKEN_ARCHITECTURE
+        else LEGACY_ARTIFACT_SCHEMA_VERSION
+    )
     if (
         require_schema_version is not None
         and schema_version != require_schema_version
@@ -151,26 +138,12 @@ def export_checkpoint(
     history_frames = int(model_config.get("history_frames", 0))
     use_type_embedding = bool(model_config.get("control_token_type_embedding", False))
     if architecture == AR_CONTROL_TOKEN_ARCHITECTURE:
-        if history_sample_clock not in {None, "camera_frame"}:
-            raise PolicyExportError("unsupported AR history sample clock")
-        if model_config.get(
-            "history_update", "externally_executed_commands"
-        ) != "externally_executed_commands":
-            raise PolicyExportError(
-                "exported AR checkpoint must use externally executed commands"
-            )
-        expected_initial = (
-            (0, 0)
-            if schema_version == CAMERA_FRAME_AR_ARTIFACT_SCHEMA_VERSION
-            else (0, 25)
-        )
         if (
             model_config.get("history_initial_angle", 0),
             model_config.get("history_initial_speed", 25),
-        ) != expected_initial:
+        ) != (0, 25):
             raise PolicyExportError(
-                "AR checkpoint initial history command must be "
-                f"{expected_initial}"
+                "AR checkpoint initial history command must be (0, 25)"
             )
         policy = AutoregressiveControlTokenViTPolicy(
             model_name=model_name,
@@ -378,12 +351,7 @@ def _build_manifest(
             "initial_class_ids": [initial_angle + 100, initial_speed + 100],
             "update": "externally_executed_commands",
         }
-        sample_clock = model_config.get("history_sample_clock")
-        if sample_clock == "camera_frame":
-            history_contract["sample_clock"] = "camera_frame"
-            schema_version = CAMERA_FRAME_AR_ARTIFACT_SCHEMA_VERSION
-        else:
-            schema_version = LEGACY_AR_ARTIFACT_SCHEMA_VERSION
+        schema_version = AR_ARTIFACT_SCHEMA_VERSION
     else:
         model_input = {
             "name": "images",

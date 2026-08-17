@@ -36,10 +36,6 @@ REQUIRED_CSV_FIELDS = {
     "camera_stamp_nanosec",
     "camera_received_wall_time_ns",
 }
-RECORDED_HISTORY_FIELDS = tuple(
-    (f"history_angle_t_minus_{offset}", f"history_speed_t_minus_{offset}")
-    for offset in range(4, 0, -1)
-)
 
 
 class PolicyDatasetError(ValueError):
@@ -199,19 +195,13 @@ def attach_training_teacher_forced_history(
 def attach_executed_command_history(
     splits: PolicyDataSplits,
     history_frames: int,
-    *,
-    require_recorded_history: bool = False,
 ) -> PolicyDataSplits:
     """Attach the actual previously executed commands to every split."""
     if history_frames <= 0:
         raise ValueError("history_frames must be positive")
     groups = {
         name: tuple(
-            _attach_session_executed_history(
-                session,
-                history_frames,
-                require_recorded_history=require_recorded_history,
-            )
+            _attach_session_executed_history(session, history_frames)
             for session in sessions
         )
         for name, sessions in splits._session_groups().items()
@@ -227,27 +217,7 @@ def attach_executed_command_history(
 def _attach_session_executed_history(
     session: PolicySession,
     history_frames: int,
-    *,
-    require_recorded_history: bool = False,
 ) -> PolicySession:
-    recorded_count = sum(
-        sample.history_class_ids is not None for sample in session.samples
-    )
-    if recorded_count:
-        if history_frames != 4:
-            raise PolicyDatasetError(
-                "recorded execution history requires history_frames=4"
-            )
-        if recorded_count != len(session.samples):
-            raise PolicyDatasetError(
-                f"session {session.session_id} mixes recorded and missing history"
-            )
-        _validate_recorded_history_contract(session)
-        return session
-    if require_recorded_history:
-        raise PolicyDatasetError(
-            f"session {session.session_id} has no recorded execution history"
-        )
     initial = _session_initial_history(session, history_frames)
     history = list(initial)
     samples: list[PolicySample] = []
@@ -255,43 +225,6 @@ def _attach_session_executed_history(
         samples.append(replace(sample, history_class_ids=tuple(history)))
         history = history[1:] + [(sample.angle_class_id, sample.speed_class_id)]
     return replace(session, samples=tuple(samples))
-
-
-def _validate_recorded_history_contract(session: PolicySession) -> None:
-    history_contract = session.metadata.get("history")
-    if not isinstance(history_contract, Mapping):
-        raise PolicyDatasetError(
-            f"session {session.session_id} has no history metadata"
-        )
-    expected = {
-        "frames": 4,
-        "time_order": "oldest_to_newest",
-        "initial_command": [0, 0],
-        "update": "externally_executed_commands",
-    }
-    for key, value in expected.items():
-        if history_contract.get(key) != value:
-            raise PolicyDatasetError(
-                f"session {session.session_id} has incompatible history.{key}"
-            )
-    if session.metadata.get("sample_clock") != "camera_frame":
-        raise PolicyDatasetError(
-            f"session {session.session_id} sample_clock must be camera_frame"
-        )
-    for previous, current in zip(
-        session.samples,
-        session.samples[1:],
-        strict=False,
-    ):
-        assert previous.history_class_ids is not None
-        assert current.history_class_ids is not None
-        expected_history = previous.history_class_ids[1:] + (
-            (previous.angle_class_id, previous.speed_class_id),
-        )
-        if current.history_class_ids != expected_history:
-            raise PolicyDatasetError(
-                f"session {session.session_id} execution history is discontinuous"
-            )
 
 
 def _session_initial_history(
@@ -854,11 +787,6 @@ def _sample_from_row(
             )
     angle = quantize_command(angle_raw)
     speed = quantize_command(speed_raw)
-    history_class_ids = _recorded_history_from_row(
-        row,
-        row_number=row_number,
-        session_path=session_path,
-    )
     return PolicySample(
         session_id=session_id or session_path.name,
         image_path=image_path,
@@ -873,54 +801,9 @@ def _sample_from_row(
         speed=speed,
         angle_class_id=angle + COMMAND_OFFSET,
         speed_class_id=speed + COMMAND_OFFSET,
-        history_class_ids=history_class_ids,
         generation=generation,
         source_id=source_id,
     )
-
-
-def _recorded_history_from_row(
-    row: Mapping[str, str],
-    *,
-    row_number: int,
-    session_path: Path,
-) -> tuple[tuple[int, int], ...] | None:
-    field_names = tuple(
-        field for pair in RECORDED_HISTORY_FIELDS for field in pair
-    )
-    present = tuple(field in row for field in field_names)
-    if not any(present):
-        return None
-    if not all(present):
-        raise PolicyDatasetError(
-            f"partial history columns at {session_path / 'samples.csv'}:{row_number}"
-        )
-    values = tuple(row.get(field, "").strip() for field in field_names)
-    if not any(values):
-        return None
-    if not all(values):
-        raise PolicyDatasetError(
-            f"partial history values at {session_path / 'samples.csv'}:{row_number}"
-        )
-    result: list[tuple[int, int]] = []
-    for angle_field, speed_field in RECORDED_HISTORY_FIELDS:
-        angle = _float_field(row, angle_field, row_number, session_path)
-        speed = _float_field(row, speed_field, row_number, session_path)
-        if not (
-            COMMAND_MIN <= angle <= COMMAND_MAX
-            and COMMAND_MIN <= speed <= COMMAND_MAX
-        ):
-            raise PolicyDatasetError(
-                "history command out of range at "
-                f"{session_path / 'samples.csv'}:{row_number}"
-            )
-        result.append(
-            (
-                quantize_command(angle) + COMMAND_OFFSET,
-                quantize_command(speed) + COMMAND_OFFSET,
-            )
-        )
-    return tuple(result)
 
 
 def metadata_matches_policy_filter(

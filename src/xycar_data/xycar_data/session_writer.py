@@ -45,15 +45,6 @@ CSV_FIELDS = (
     "speed_delta",
     "human_correction",
     "inference_ms",
-    "history_angle_t_minus_4",
-    "history_speed_t_minus_4",
-    "history_angle_t_minus_3",
-    "history_speed_t_minus_3",
-    "history_angle_t_minus_2",
-    "history_speed_t_minus_2",
-    "history_angle_t_minus_1",
-    "history_speed_t_minus_1",
-    "motor_executed_received_wall_time_ns",
 )
 
 
@@ -98,8 +89,6 @@ class CameraSample:
     speed_delta: Optional[float] = None
     human_correction: Optional[bool] = None
     inference_ms: Optional[float] = None
-    history_commands: Optional[tuple[tuple[float, float], ...]] = None
-    motor_executed_received_wall_time_ns: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +100,7 @@ class SessionResult:
     lidar_linked_count: int
     lidar_missing_count: int
     reason: str
+    discarded: bool = False
 
 
 @dataclass(frozen=True)
@@ -132,6 +122,12 @@ class _FinishJob:
     complete: bool
     extra_metadata: Mapping[str, Any]
     final_samples: tuple[CameraSample, ...]
+
+
+@dataclass(frozen=True)
+class _DiscardJob:
+    token: int
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -232,6 +228,12 @@ class AsyncSessionWriter:
             )
         )
 
+    def discard(self, token: int, reason: str) -> bool:
+        """Delete every file written for the active session."""
+        if self.failure is not None:
+            return False
+        return self._enqueue(_DiscardJob(token, reason))
+
     def poll_results(self) -> list[SessionResult]:
         results: list[SessionResult] = []
         while True:
@@ -287,6 +289,11 @@ class AsyncSessionWriter:
                         extra_metadata=job.extra_metadata,
                     )
                     current = None
+                elif isinstance(job, _DiscardJob):
+                    if current is None or current.token != job.token:
+                        raise RuntimeError("discard does not belong to the active session")
+                    self._discard_session(current, job.reason)
+                    current = None
                 else:
                     raise RuntimeError(f"unknown writer job: {type(job).__name__}")
         except Exception as exc:
@@ -302,8 +309,6 @@ class AsyncSessionWriter:
             self._stopped.set()
 
     def _write_sample(self, session: _OpenSession, sample: CameraSample) -> None:
-        if sample.history_commands is not None and len(sample.history_commands) != 4:
-            raise ValueError('history_commands must contain four angle/speed pairs')
         self._ensure_session_open(session)
         self._ensure_free_space(session.temp_dir)
         if session.temp_dir is None or session.images_dir is None:
@@ -331,7 +336,6 @@ class AsyncSessionWriter:
 
         if session.csv_writer is None or session.csv_file is None:
             raise RuntimeError("sample manifest was not initialized")
-        history = sample.history_commands or ((None, None),) * 4
         session.csv_writer.writerow(
             {
                 "sample_index": sample_index,
@@ -367,17 +371,6 @@ class AsyncSessionWriter:
                 if sample.human_correction is None
                 else str(sample.human_correction).lower(),
                 "inference_ms": _optional_float(sample.inference_ms),
-                "history_angle_t_minus_4": _optional_float(history[0][0]),
-                "history_speed_t_minus_4": _optional_float(history[0][1]),
-                "history_angle_t_minus_3": _optional_float(history[1][0]),
-                "history_speed_t_minus_3": _optional_float(history[1][1]),
-                "history_angle_t_minus_2": _optional_float(history[2][0]),
-                "history_speed_t_minus_2": _optional_float(history[2][1]),
-                "history_angle_t_minus_1": _optional_float(history[3][0]),
-                "history_speed_t_minus_1": _optional_float(history[3][1]),
-                "motor_executed_received_wall_time_ns": ""
-                if sample.motor_executed_received_wall_time_ns is None
-                else sample.motor_executed_received_wall_time_ns,
             }
         )
         session.csv_file.flush()
@@ -507,6 +500,31 @@ class AsyncSessionWriter:
                 lidar_linked_count=session.lidar_linked_count,
                 lidar_missing_count=session.lidar_missing_count,
                 reason=reason,
+            )
+        )
+
+    def _discard_session(self, session: _OpenSession, reason: str) -> None:
+        if session.csv_file is not None and not session.csv_file.closed:
+            session.csv_file.close()
+        sample_count = session.sample_count
+        lidar_linked_count = session.lidar_linked_count
+        lidar_missing_count = session.lidar_missing_count
+        if session.temp_dir is not None:
+            if session.temp_dir.parent != self.root_dir:
+                raise RuntimeError(
+                    f"refusing to discard session outside root: {session.temp_dir}"
+                )
+            shutil.rmtree(session.temp_dir)
+        self._results.put(
+            SessionResult(
+                token=session.token,
+                completed=False,
+                path=None,
+                sample_count=sample_count,
+                lidar_linked_count=lidar_linked_count,
+                lidar_missing_count=lidar_missing_count,
+                reason=reason,
+                discarded=True,
             )
         )
 

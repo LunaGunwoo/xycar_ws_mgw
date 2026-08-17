@@ -79,9 +79,6 @@ def main(argv: Iterable[str] | None = None) -> int:
         splits = attach_executed_command_history(
             splits,
             config.model.history_frames,
-            require_recorded_history=(
-                config.model.history_sample_clock == "camera_frame"
-            ),
         )
     elif config.model.architecture == AR_CONTROL_TOKEN_ARCHITECTURE:
         validate_session_initial_classes(
@@ -460,18 +457,6 @@ def build_label_contract(config: TrainConfig) -> dict[str, object]:
                     "known_train_label_leakage": False,
                 }
             )
-            if config.model.history_sample_clock == "camera_frame":
-                history_contract.update(
-                    {
-                        "sample_clock": "camera_frame",
-                        "train_source": "samples_csv_recorded_executed_history",
-                        "evaluation_source": [
-                            "samples_csv_recorded_executed_history",
-                            "predicted_argmax_rollout",
-                        ],
-                        "edge_padding": "recorded_per_sample",
-                    }
-                )
         else:
             history_contract.update(
                 {
@@ -507,21 +492,6 @@ def validate_incremental_initialization(
     if not config.data.sources:
         return
     generation = config.data.current_generation
-    if config.model.history_sample_clock == "camera_frame":
-        if config.data.stage == "base":
-            if generation != 0:
-                raise ValueError("history base must use generation 0")
-            if initialize_from:
-                raise ValueError(
-                    "history base must start from pretrained ImageNet weights"
-                )
-            return
-        if not initialize_from and not resume:
-            raise ValueError(
-                "history guided training requires --initialize-from the "
-                "validated base/previous guided best.pt"
-            )
-        return
     if generation == 0 and initialize_from:
         raise ValueError(
             "stateless generation 0 must start from pretrained ImageNet weights"
@@ -608,48 +578,22 @@ def evaluate_policy(
     scaler: torch.amp.GradScaler,
     amp_enabled: bool,
 ) -> dict[str, float]:
-    if isinstance(model, AutoregressiveControlTokenViTPolicy):
-        if config.model.history_update == "predicted_argmax":
-            return run_rollout_evaluation(
-                model=model,
-                sessions=sessions,
-                split_name=split_name,
-                config=config,
-                model_data_config=model_data_config,
-                road_warp=road_warp,
-                device=device,
-                angle_criterion=angle_criterion,
-                speed_criterion=speed_criterion,
-                amp_enabled=amp_enabled,
-            )
-        if config.model.history_sample_clock == "camera_frame":
-            execution_metrics = run_epoch(
-                model=model,
-                loader=loader,
-                split_name=split_name,
-                device=device,
-                angle_criterion=angle_criterion,
-                speed_criterion=speed_criterion,
-                optimizer=None,
-                scaler=scaler,
-                amp_enabled=amp_enabled,
-                grad_clip=config.training.grad_clip,
-                speed_loss_weight=config.loss.speed_loss_weight,
-                emd_loss_weight=config.loss.emd_loss_weight,
-            )
-            rollout_metrics = run_rollout_evaluation(
-                model=model,
-                sessions=sessions,
-                split_name=f"{split_name}_rollout",
-                config=config,
-                model_data_config=model_data_config,
-                road_warp=road_warp,
-                device=device,
-                angle_criterion=angle_criterion,
-                speed_criterion=speed_criterion,
-                amp_enabled=amp_enabled,
-            )
-            return {**execution_metrics, **rollout_metrics}
+    if (
+        isinstance(model, AutoregressiveControlTokenViTPolicy)
+        and config.model.history_update == "predicted_argmax"
+    ):
+        return run_rollout_evaluation(
+            model=model,
+            sessions=sessions,
+            split_name=split_name,
+            config=config,
+            model_data_config=model_data_config,
+            road_warp=road_warp,
+            device=device,
+            angle_criterion=angle_criterion,
+            speed_criterion=speed_criterion,
+            amp_enabled=amp_enabled,
+        )
     return run_epoch(
         model=model,
         loader=loader,
@@ -698,16 +642,8 @@ def run_rollout_evaluation(
     )
     with torch.inference_mode():
         for session in sessions:
-            first_history = session.samples[0].history_class_ids
-            if (
-                config.model.history_sample_clock == "camera_frame"
-                and first_history is not None
-            ):
-                initial_history = list(first_history)
-            else:
-                initial_history = [initial_pair] * config.model.history_frames
             history = torch.tensor(
-                [initial_history],
+                [[initial_pair] * config.model.history_frames],
                 dtype=torch.long,
                 device=device,
             )
@@ -888,32 +824,8 @@ def validation_selection_score(
     sessions: Sequence[PolicySession],
     config: TrainConfig,
 ) -> float:
-    execution_score = _selection_score_for_prefix(
-        metrics,
-        sessions=sessions,
-        config=config,
-        split_name="val",
-    )
-    if config.model.history_sample_clock != "camera_frame":
-        return execution_score
-    rollout_score = _selection_score_for_prefix(
-        metrics,
-        sessions=sessions,
-        config=config,
-        split_name="val_rollout",
-    )
-    return (execution_score + rollout_score) / 2.0
-
-
-def _selection_score_for_prefix(
-    metrics: dict[str, float],
-    *,
-    sessions: Sequence[PolicySession],
-    config: TrainConfig,
-    split_name: str,
-) -> float:
     if not config.data.ema_sampling:
-        return selection_score(metrics, split_name=split_name)
+        return selection_score(metrics)
     generations = sorted({session.generation for session in sessions})
     if not generations:
         raise ValueError("validation split has no generations")
@@ -930,7 +842,7 @@ def _selection_score_for_prefix(
         mass = config.data.generation_decay ** (
             config.data.current_generation - generation
         )
-        prefix = f"{split_name}_generation_{generation}"
+        prefix = f"val_generation_{generation}"
         weighted_score += mass * (
             metrics[f"{prefix}_angle_mae"] + 0.25 * metrics[f"{prefix}_speed_mae"]
         )
@@ -1006,10 +918,6 @@ def initialize_model_weights(
         "architecture": config.model.architecture,
         "history_frames": config.model.history_frames,
         "control_token_type_embedding": config.model.control_token_type_embedding,
-        "history_initial_angle": config.model.history_initial_angle,
-        "history_initial_speed": config.model.history_initial_speed,
-        "history_update": config.model.history_update,
-        "history_sample_clock": config.model.history_sample_clock,
     }
     actual = {
         "architecture": (
@@ -1024,26 +932,6 @@ def initialize_model_weights(
         ),
         "control_token_type_embedding": (
             checkpoint_model.get("control_token_type_embedding", False)
-            if isinstance(checkpoint_model, dict)
-            else None
-        ),
-        "history_initial_angle": (
-            checkpoint_model.get("history_initial_angle", 0)
-            if isinstance(checkpoint_model, dict)
-            else None
-        ),
-        "history_initial_speed": (
-            checkpoint_model.get("history_initial_speed", 25)
-            if isinstance(checkpoint_model, dict)
-            else None
-        ),
-        "history_update": (
-            checkpoint_model.get("history_update", "predicted_argmax")
-            if isinstance(checkpoint_model, dict)
-            else None
-        ),
-        "history_sample_clock": (
-            checkpoint_model.get("history_sample_clock")
             if isinstance(checkpoint_model, dict)
             else None
         ),
@@ -1063,31 +951,12 @@ def initialize_model_weights(
             if isinstance(checkpoint_data, dict)
             else None
         )
-        if config.model.history_sample_clock == "camera_frame":
-            source_stage = (
-                checkpoint_data.get("stage")
-                if isinstance(checkpoint_data, dict)
-                else None
+        expected_generation = config.data.current_generation - 1
+        if source_generation != expected_generation:
+            raise ValueError(
+                "initialization checkpoint must be from the immediately "
+                f"previous stateless generation {expected_generation}"
             )
-            expected_generation = max(config.data.current_generation - 1, 0)
-            expected_stage = (
-                "base" if config.data.current_generation == 0 else "guided"
-            )
-            if (
-                source_generation != expected_generation
-                or source_stage != expected_stage
-            ):
-                raise ValueError(
-                    "history guided initialization checkpoint must be from "
-                    f"{expected_stage} generation {expected_generation}"
-                )
-        else:
-            expected_generation = config.data.current_generation - 1
-            if source_generation != expected_generation:
-                raise ValueError(
-                    "initialization checkpoint must be from the immediately "
-                    f"previous stateless generation {expected_generation}"
-                )
     model_state = payload.get("model_state")
     if not isinstance(model_state, Mapping):
         raise ValueError("initialization checkpoint has no model_state")
@@ -1175,8 +1044,6 @@ def validate_resume_payload(
         "control_token_type_embedding": (config.model.control_token_type_embedding),
         "history_initial_angle": config.model.history_initial_angle,
         "history_initial_speed": config.model.history_initial_speed,
-        "history_update": config.model.history_update,
-        "history_sample_clock": config.model.history_sample_clock,
     }
     checkpoint_model_contract = {
         "architecture": (
@@ -1201,16 +1068,6 @@ def validate_resume_payload(
         ),
         "history_initial_speed": (
             checkpoint_model.get("history_initial_speed", 25)
-            if isinstance(checkpoint_model, dict)
-            else None
-        ),
-        "history_update": (
-            checkpoint_model.get("history_update", "predicted_argmax")
-            if isinstance(checkpoint_model, dict)
-            else None
-        ),
-        "history_sample_clock": (
-            checkpoint_model.get("history_sample_clock")
             if isinstance(checkpoint_model, dict)
             else None
         ),

@@ -17,12 +17,7 @@ from xycar_data.session_writer import (
 )
 
 
-def _sample(
-    index: int,
-    *,
-    history_commands=None,
-    motor_executed_received_wall_time_ns=None,
-) -> CameraSample:
+def _sample(index: int) -> CameraSample:
     return CameraSample(
         image=np.full((4, 6, 3), index, dtype=np.uint8),
         camera_sequence=index,
@@ -35,10 +30,6 @@ def _sample(
         input_key='gamepad',
         lidar=None,
         lidar_skew_sec=None,
-        history_commands=history_commands,
-        motor_executed_received_wall_time_ns=(
-            motor_executed_received_wall_time_ns
-        ),
     )
 
 
@@ -134,41 +125,6 @@ def test_jpeg_session_writes_jpg_paths_that_opencv_can_read(tmp_path):
         writer.shutdown()
 
 
-def test_history_sample_writes_four_executed_commands_oldest_first(tmp_path):
-    writer = _writer(tmp_path / 'history')
-    history = ((-4.0, 10.0), (-3.0, 11.0), (-2.0, 12.0), (-1.0, 13.0))
-    try:
-        token = writer.start_session({'control_mode': 'history_gamepad'})
-        assert token is not None
-        assert writer.submit(
-            token,
-            _sample(
-                1,
-                history_commands=history,
-                motor_executed_received_wall_time_ns=123456789,
-            ),
-        )
-        assert writer.finish(token, 'b_button')
-        result = _wait_for_result(writer)
-        assert result.path is not None
-        with (result.path / 'samples.csv').open(
-            encoding='utf-8',
-            newline='',
-        ) as stream:
-            row = next(csv.DictReader(stream))
-        assert [
-            row[f'history_angle_t_minus_{offset}']
-            for offset in range(4, 0, -1)
-        ] == ['-4.000000', '-3.000000', '-2.000000', '-1.000000']
-        assert [
-            row[f'history_speed_t_minus_{offset}']
-            for offset in range(4, 0, -1)
-        ] == ['10.000000', '11.000000', '12.000000', '13.000000']
-        assert row['motor_executed_received_wall_time_ns'] == '123456789'
-    finally:
-        writer.shutdown()
-
-
 def test_emergency_finish_keeps_prefix_and_records_discard_count(tmp_path):
     writer = _writer(tmp_path / 'teleop')
     try:
@@ -218,6 +174,29 @@ def test_empty_finished_session_creates_no_directory(tmp_path):
         assert result.path is None
         assert result.sample_count == 0
         assert not root.exists()
+    finally:
+        writer.shutdown()
+
+
+def test_discard_deletes_entire_active_session(tmp_path):
+    root = tmp_path / 'guided'
+    writer = _writer(root)
+    try:
+        token = writer.start_session({'control_mode': 'guided_policy'})
+        assert token is not None
+        for index in range(1, 6):
+            assert writer.submit(token, _sample(index))
+        assert writer.discard(token, 'x_button')
+
+        result = _wait_for_result(writer)
+
+        assert not result.completed
+        assert result.discarded
+        assert result.path is None
+        assert result.sample_count == 5
+        assert not list(root.glob('_recording_*'))
+        assert not list(root.glob('*_session*'))
+        assert not list(root.glob('*_incomplete*'))
     finally:
         writer.shutdown()
 

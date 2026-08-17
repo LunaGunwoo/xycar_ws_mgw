@@ -1,8 +1,0 @@
-schema_version: 2
-dataset_snapshot: replace_for_each_history_guided_generation
-splits:
-  # Keep prior generations and add the current generation as qualified IDs.
-  # The current generation must contain at least one train sample.
-  train: []
-  val: []
-  test: []

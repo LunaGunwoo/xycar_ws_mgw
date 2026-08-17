@@ -3,10 +3,8 @@
 고정 224x224 TorchScript ViT 정책으로 `/image_raw`를 계속 추론하고,
 게임패드로 일반 AI 주행 또는 사람 보정 기반 고속 데이터 수집을 수행하는
 ROS 2 패키지다.
-기존 stateless 경로의 모터 메시지는
-`std_msgs/Float32MultiArray([angle, speed])`이며 ON/OFF와 관계없이 20 Hz로
-발행한다. 새 history 경로는 별도 `xycar_msgs/XycarMotor`와 camera header를 써서
-새 frame 추론 완료 즉시 한 번만 발행한다.
+모터 메시지는 `std_msgs/Float32MultiArray([angle, speed])`이며 ON/OFF와 관계없이
+20 Hz로 발행한다.
 
 ## 동작 계약
 
@@ -60,77 +58,8 @@ RGB `[1,3,224,224]` 하나를 받고 계속 지원한다. schema v2 AR artifact�
 int64 history `[1,4,2]` tuple을 받으며 history pair 순서는
 `[angle_class_id, speed_class_id]`, 시간 순서는 오래된 값부터 최신 값까지다. 이후
 schema v3는 같은 tensor shape를 사용하지만 history source를 실제 실행 명령으로
-강제한다. schema v4는 `[0,0]` 네 쌍에서 시작하고 `sample_clock=camera_frame`,
-`update=externally_executed_commands`를 추가로 강제한다. CPU thread 8개로 model을
-load하고 3회 warm-up한다. artifact 생성과 배포는 개발 Laptop의 MGW root에서
-수행한다.
-
-## Camera-frame history 주행과 Guided 수집
-
-`history_policy`는 schema v4 AR4 artifact 전용이다. 추론 worker는 한 번에 하나만
-처리하며 처리 중 도착한 frame은 최신 한 장만 남긴다. prediction을
-`/xycar_motor_command`로 발행한 뒤 같은 camera stamp의
-`/xycar_motor_executed`가 확인될 때까지 다음 추론을 보류하고, 확인된 실제
-angle/speed만 네-command history에 추가한다. 미발행 prediction과 echo 없는
-prediction은 history에 들어가지 않는다. 중복·역순·불일치 echo, 0.25초 stale,
-경쟁 publisher와 native gateway not-ready는 DRIVE OFF와 `[0,0]` reset 조건이다.
-
-일반 history CUDA 주행 명령은 다음과 같다. 별도 terminal에서 먼저 승인된
-`xycar_motor_native/vesc_motor.launch.py`를 실행해야 한다. 이 launch도 camera,
-gamepad와 motor publisher를 시작하므로 실행 직전 다시 승인받고 바퀴 지지 또는
-안전 공간, 전원 차단, A와 `Ctrl+C` 정지를 확인한다.
-
-```bash
-ros2 launch xycar_ai_drive jetson_history_policy.launch.py \
-  artifact_id:=<schema-v4-history-artifact-id> \
-  params_file:=/home/xytron/.config/xycar/history_policy.yaml \
-  use_camera:=true use_gamepad:=true allow_motion:=true
-```
-
-30Hz 가능성 검증은 대표 schema v3 AR4 artifact도 사용할 수 있다. 이때 실제
-수집이나 주행으로 오인하지 않도록 `allow_motion:=false force_speed_zero:=true
-require_schema4:=false`를 함께 지정하고, 60초 profile에서 camera/inference/
-command/executed와 native gateway의 ERPM command rate, skipped/duplicate/
-out-of-order, 단계별 p95를 확인한다. 이 zero-only 실행도 motor publisher와
-serial을 사용하므로 승인이 필요하다.
-
-`history_guided_collector`는 같은 frame의 model angle/speed에 사람의 절대 조향과
-RT/LT speed 보정을 합성하고, native execution echo가 확인된 값만
-`history_guided`에 기록한다. 모든 generation은 `speed_cap=30`을 명시해야 하며
-다른 값이면 launch 전에 거부한다. Y는 DRIVE ON/OFF, A는 녹화 시작, B는 저장,
-X는 tail 폐기 후 저장이다.
-
-```bash
-ros2 launch xycar_ai_drive jetson_history_guided_collection.launch.py \
-  artifact_id:=<validated-schema-v4-history-artifact-id> \
-  params_file:=/home/xytron/.config/xycar/guided_history_collection.yaml \
-  curriculum_generation:=0 speed_cap:=30 \
-  use_camera:=true use_gamepad:=true allow_motion:=true
-```
-
-종료는 먼저 Y로 DRIVE OFF하고 `/xycar_motor_executed`의 speed 0을 확인한 뒤 Guided
-launch `Ctrl+C`, 마지막으로 native motor launch `Ctrl+C` 순서다. 일반 history
-주행은 A로 OFF한 뒤 같은 순서를 따른다. 기존 stateless/ROS 1 bridge launch와
-동시에 실행하지 않는다.
-
-host CPU 진단용 일반 launch와 component entry point는 다음과 같다. 모두 native
-motor command publisher를 만들 수 있으므로 hardware graph에서는 실행 직전 승인을
-받는다.
-
-```bash
-ros2 launch xycar_ai_drive history_policy.launch.py \
-  artifact_id:=<schema-v4-history-artifact-id> allow_motion:=false
-ros2 launch xycar_ai_drive history_guided_collection.launch.py \
-  artifact_id:=<schema-v4-history-artifact-id> \
-  curriculum_generation:=0 speed_cap:=30 allow_motion:=false
-ros2 run xycar_ai_drive history_policy --ros-args \
-  --params-file /home/xytron/.config/xycar/history_policy.yaml \
-  -p artifact_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/<artifact-id>
-ros2 run xycar_ai_drive history_guided_collector --ros-args \
-  --params-file /home/xytron/.config/xycar/guided_history_collection.yaml \
-  -p artifact_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/<artifact-id> \
-  -p collection_profile_path:=/home/xytron/.config/xycar/guided_history_collection.yaml
-```
+강제한다. CPU thread 8개로 model을 load하고 3회 warm-up한다. artifact 생성과 배포는 개발
+Laptop의 MGW root에서 수행한다.
 
 ## 사람 보정 데이터 수집
 
@@ -168,16 +97,21 @@ angle/speed는 공통 ViT backbone과 별도 출력 head를 공유하므로 한 
 허용된다.
 
 - Y: DRIVE ON/OFF. 시작은 OFF이며 stick과 trigger를 중립으로 놓고 release 후
-  눌러야 ON이 된다.
+  눌러야 ON이 된다. 녹화 중 다시 누르면 즉시 zero command와 DRIVE OFF로
+  전환한다.
 - A: 양수 speed 주행 중 새 session 녹화 시작.
 - B: 주행을 유지하면서 현재 session 정상 저장.
-- X: 주행을 유지하면서 최근 10 frame을 버리고 정상 저장.
-- 녹화 중 Y OFF: 최근 10 frame을 버리고 정상 저장.
+- X: 주행을 유지하면서 현재 session 전체 삭제. metadata나 incomplete
+  directory를 남기지 않으며 복구할 수 없다.
+- 녹화 중 Y 긴급 정지: 최근 10 frame을 버리고 나머지를
+  `stop_reason=y_emergency_stop`으로 정상 저장.
 - stale Joy/camera, inference·writer 오류, motor subscriber 소실 또는 경쟁 motor
   publisher 출현: 즉시 정지하고 session을 incomplete로 마감한다.
 
-raw session은 `recording_root_dir`에 모두 보존한다. `curriculum_generation`은 이
-session을 어느 학습 세대로 취급할지 나타내며, `speed_cap`은 해당 라운드에서
+정상 저장하거나 fault로 마감한 raw session은 `recording_root_dir`에 모두
+보존한다. 사용자가 X로 명시적으로 삭제한 현재 session만 이 보존 대상이 아니다.
+`curriculum_generation`은 session을 어느 학습 세대로 취급할지 나타내며,
+`speed_cap`은 해당 라운드에서
 사람과 모델이 합성한 전진 명령의 상한이다. 두 값은 launch 인자로 지정한다.
 외부 profile `/home/xytron/.config/xycar/guided_stateless_collection.yaml`에는
 `max_steering_angle`, trigger 증감, deadzone, 버튼, timeout과

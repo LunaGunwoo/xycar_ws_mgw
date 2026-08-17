@@ -1,9 +1,8 @@
 # Jetson deployment runtime
 
-JetPack 6.2.1 ARM64 차량 PC에서 ROS 2 Humble host, ROS 2 native VESC, 보존된
-ROS 1 Noetic motor/`ros1_bridge`, CUDA policy server를 재현하는 배포 자산이다.
-image base와 bridge source는 `images.lock.env`, native VESC는
-`f1tenth_vesc_humble.repos`의 digest·commit으로 고정한다.
+JetPack 6.2.1 ARM64 차량 PC에서 ROS 2 Humble host, ROS 1 Noetic motor,
+`ros1_bridge`, CUDA policy server를 재현하는 배포 자산이다. image base와 bridge
+source는 `images.lock.env`의 digest·commit으로 고정한다.
 
 운영 기준상 기존 x86 mini PC `xycar`는 CPU inference 비교·rollback용으로
 보존하고, 앞으로의 model 배포와 실차 inference는 Jetson `xycar-gpu`의 CUDA GPU
@@ -30,32 +29,6 @@ cd /home/xytron/xycar_ws_mgw
 ./deploy/jetson/build_images.sh
 ./deploy/jetson/build_noetic_ws.sh
 ./deploy/jetson/install_runtime.sh
-```
-
-새 history native motor package는 공식 F1TENTH VESC ROS 2 source를 ignored
-dependency overlay에 준비한 뒤 함께 빌드한다. script는 exact commit과 clean
-checkout, upstream license를 검증한 후 차량의 firmware 2.18 values layout
-호환 patch를 적용한다. patch 결과는 파일별 SHA-256으로 검증하며 기존의 다른
-dirty/different checkout을 덮어쓰지 않는다.
-
-차량 VESC firmware 2.18에 맞춰 source는 공식 ROS 2 commit
-`c47fccbbd10fb66db3faaaa6e469f2eedba2586f`로 고정하고,
-`patches/f1tenth-vesc-fw218-values.patch`로 working ROS 1 driver와 동일한 six-MOS
-legacy values offsets를 복원한다. 원본 commit의 onboard-car offsets는 이 차량에서
-0 V와 비정상 current/RPM/fault를 만들며, 이후 firmware 5.2 protocol과 IMU polling이
-포함된 Humble HEAD도 2.18 장치에서 checksum/out-of-sync를 발생시키므로 사용하지
-않는다. 같은 patch가 USB CDC VESC에 맞춰 serial flow control을 working ROS 1
-driver와 동일한 `none`으로 고정한다. Humble `serial_driver`의 async callback은
-고정 크기 buffer와 실제 수신 길이를 따로 전달하므로, 실제 길이만 parser queue에
-추가한다. 전체 buffer를 추가하면 zero padding 때문에 telemetry가 burst한다.
-
-```bash
-./deploy/jetson/prepare_native_vesc_source.sh
-source /opt/ros/humble/setup.bash
-colcon build --symlink-install \
-  --base-paths src _deps/src/f1tenth_vesc \
-  --packages-select vesc_msgs vesc_driver xycar_msgs \
-    xycar_motor_native xycar_data xycar_ai_drive
 ```
 
 `provision_host.sh`는 JetPack 6.2.1의 `5.15.148-tegra` kernel header로 MSI
@@ -85,7 +58,7 @@ migration backup에 보존한 뒤, Desktop `x27.desktop`이 Jetson motor wrapper
 `~/.local/lib/xycar-ai-gpu/`에 함께 복사하므로 source checkout 위치나 이후의
 부분 빌드에 의존하지 않는다. motor wrapper와 lock도 같은 이유로
 `~/.local/lib/xycar-motor/`에 복사한다.
-수집/runtime profile 여섯 개는 `~/.config/xycar/`에 파일이 없을 때만 설치한다.
+수집 profile 세 개는 `~/.config/xycar/`에 파일이 없을 때만 설치한다.
 차량에서 튜닝한 기존 profile은 이후 재설치에서도 덮어쓰지 않는다.
 
 Guided collector의 Controller 조향 takeover 계약에서는 외부 profile에
@@ -96,9 +69,6 @@ Guided collector의 Controller 조향 takeover 계약에서는 외부 profile에
 ```text
 ~/.config/xycar/gamepad_stateless_manual.yaml
 ~/.config/xycar/guided_stateless_collection.yaml
-~/.config/xycar/gamepad_history_manual.yaml
-~/.config/xycar/history_policy.yaml
-~/.config/xycar/guided_history_collection.yaml
 ~/.config/xycar/competition_mission_collection.yaml
 ```
 
@@ -144,7 +114,7 @@ source install/setup.bash
 ros2 launch xycar_ai_drive jetson_guided_collection.launch.py \
   params_file:=/home/xytron/.config/xycar/guided_stateless_collection.yaml \
   artifact_id:=<schema-v1-stateless-artifact-id> \
-  curriculum_generation:=1 speed_cap:=30.0 \
+  curriculum_generation:=1 speed_cap:=9.0 \
   use_camera:=true use_gamepad:=true allow_motion:=true
 ```
 
@@ -155,29 +125,6 @@ GPU server의 network-none, versioned artifact와 Unix socket 안전 경계는 �
 GPU server는 network와 hardware device 없이 실행되고, host Humble node와 권한
 `0600` Unix socket으로만 통신한다. server 단절·timeout·artifact/device mismatch는
 CPU fallback 없이 motion OFF와 `[0,0]`으로 처리한다.
-
-History는 ROS 1 `motor` 대신 별도 승인한 native VESC launch를 사용한다. 두
-backend를 동시에 실행하지 않는다. native motor와 history policy/collector는
-각각 실행 직전 승인을 받고 종료는 A/Y OFF, executed speed 0, policy/collector
-`Ctrl+C`, native motor `Ctrl+C` 순서다.
-
-```bash
-# Terminal 1
-ros2 launch xycar_motor_native vesc_motor.launch.py
-
-# Terminal 2: schema v4 일반 주행
-ros2 launch xycar_ai_drive jetson_history_policy.launch.py \
-  artifact_id:=<schema-v4-history-artifact-id> \
-  params_file:=/home/xytron/.config/xycar/history_policy.yaml \
-  use_camera:=true use_gamepad:=true allow_motion:=true
-
-# 또는 schema v4 Guided 수집
-ros2 launch xycar_ai_drive jetson_history_guided_collection.launch.py \
-  artifact_id:=<validated-schema-v4-history-artifact-id> \
-  params_file:=/home/xytron/.config/xycar/guided_history_collection.yaml \
-  curriculum_generation:=0 speed_cap:=30 \
-  use_camera:=true use_gamepad:=true allow_motion:=true
-```
 
 ## Competition bundle wrapper
 

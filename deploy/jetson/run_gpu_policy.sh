@@ -9,7 +9,7 @@ ARTIFACT_ID=${ARTIFACT_ID:-front-cam-policy-tiny-hflip-p05-patience5-e5-20260811
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-/home/xytron/xycar_ws_mgw/artifacts/models}
 HOST_POLICY_LAUNCH=${HOST_POLICY_LAUNCH:-front_cam_policy.launch.py}
 case "${HOST_POLICY_LAUNCH}" in
-    front_cam_policy.launch.py|guided_policy_collection.launch.py|history_policy.launch.py|history_guided_collection.launch.py) ;;
+    front_cam_policy.launch.py|guided_policy_collection.launch.py) ;;
     *)
         echo "[ERROR] 지원하지 않는 host policy launch: ${HOST_POLICY_LAUNCH}" >&2
         exit 1

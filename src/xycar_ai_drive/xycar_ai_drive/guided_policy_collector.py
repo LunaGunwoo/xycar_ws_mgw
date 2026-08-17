@@ -89,6 +89,7 @@ class _PendingFinish:
     complete: bool
     discarded: int
     final_samples: tuple[CameraSample, ...]
+    delete_session: bool = False
 
 
 def fuse_guided_command(
@@ -252,7 +253,7 @@ class GuidedPolicyCollectorNode(Node):
         self._refresh_graph(time.monotonic())
         self.get_logger().warning(
             'Guided collector started DRIVE OFF. Release and press Y to '
-            'toggle motion; A starts, B saves, and X discards the tail.'
+            'toggle motion; A starts, B saves, and X deletes the session.'
         )
 
     def _declare_parameters(self) -> None:
@@ -552,11 +553,11 @@ class GuidedPolicyCollectorNode(Node):
             self._publish_stop()
             self._publish_enabled(False)
             self._finish_active_session(
-                reason='y_drive_off',
+                reason='y_emergency_stop',
                 discard_tail=True,
                 complete=True,
             )
-            self.get_logger().warning('Guided motion toggled OFF by Y.')
+            self.get_logger().warning('Guided emergency stop triggered by Y.')
         elif action == ToggleAction.REJECTED:
             self._publish_stop()
             self.get_logger().warning(
@@ -573,11 +574,7 @@ class GuidedPolicyCollectorNode(Node):
                 complete=True,
             )
         if discard_pressed:
-            self._finish_active_session(
-                reason='x_button',
-                discard_tail=True,
-                complete=True,
-            )
+            self._discard_active_session(reason='x_button')
 
     def _on_camera(self, message: Image) -> None:
         try:
@@ -963,20 +960,41 @@ class GuidedPolicyCollectorNode(Node):
         )
         self._retry_pending_finish()
 
+    def _discard_active_session(self, *, reason: str) -> None:
+        token = self._session_token
+        if token is None:
+            return
+        self._recording_tail.clear()
+        self._session_token = None
+        self._finishing_token = token
+        self._pending_finish = _PendingFinish(
+            token=token,
+            reason=reason,
+            complete=True,
+            discarded=0,
+            final_samples=(),
+            delete_session=True,
+        )
+        self._retry_pending_finish()
+
     def _retry_pending_finish(self) -> None:
         pending = self._pending_finish
         if pending is None or self.writer.failure is not None:
             return
-        if self.writer.finish(
-            pending.token,
-            pending.reason,
-            complete=pending.complete,
-            extra_metadata={
-                'emergency_discard_count': pending.discarded,
-                'emergency_discard_frames': self.tail_discard_frames,
-            },
-            final_samples=pending.final_samples,
-        ):
+        if pending.delete_session:
+            accepted = self.writer.discard(pending.token, pending.reason)
+        else:
+            accepted = self.writer.finish(
+                pending.token,
+                pending.reason,
+                complete=pending.complete,
+                extra_metadata={
+                    'emergency_discard_count': pending.discarded,
+                    'emergency_discard_frames': self.tail_discard_frames,
+                },
+                final_samples=pending.final_samples,
+            )
+        if accepted:
             self._pending_finish = None
 
     def _poll_writer_results(self) -> None:
@@ -984,7 +1002,12 @@ class GuidedPolicyCollectorNode(Node):
             if result.token != self._finishing_token:
                 continue
             self._finishing_token = None
-            if result.completed:
+            if result.discarded:
+                self.get_logger().warning(
+                    'Guided session deleted by X; '
+                    f'written_samples={result.sample_count}'
+                )
+            elif result.completed:
                 self.get_logger().info(
                     f'Guided session saved: {result.path or "no files"}; '
                     f'samples={result.sample_count}; reason={result.reason}'
