@@ -90,40 +90,75 @@ def test_class_decode_blocks_reverse_without_positive_speed_cap():
         decode_class_ids(100, 201)
 
 
-def test_guided_command_fuses_joint_angle_speed_and_clamps_safely():
+def test_guided_command_hands_active_steering_to_controller():
     fused = fuse_guided_command(
         DriveCommand(angle=20.0, speed=6.0),
         GuideInput(steering_axis=0.5, lt_depth=0.0, rt_depth=1.0),
-        residual_gain=200.0,
+        max_steering_angle=100.0,
         invert_steering=True,
         rt_speed_increment=2.0,
         lt_speed_decrement=5.0,
         speed_cap=7.0,
         correction_deadzone=0.05,
     )
-    assert fused.executed == DriveCommand(angle=-80.0, speed=7.0)
-    assert fused.steering_residual == -100.0
+    assert fused.executed == DriveCommand(angle=-50.0, speed=7.0)
+    assert fused.steering_residual == -70.0
     assert fused.speed_delta == 2.0
     assert fused.human_correction
 
-    stopped = fuse_guided_command(
+    clamped = fuse_guided_command(
         DriveCommand(angle=-90.0, speed=1.0),
-        GuideInput(steering_axis=1.0, lt_depth=1.0, rt_depth=0.0),
-        residual_gain=200.0,
+        GuideInput(steering_axis=2.0, lt_depth=1.0, rt_depth=0.0),
+        max_steering_angle=100.0,
         invert_steering=False,
         rt_speed_increment=2.0,
         lt_speed_decrement=5.0,
         speed_cap=7.0,
         correction_deadzone=0.05,
     )
-    assert stopped.executed == DriveCommand(angle=100.0, speed=0.0)
+    assert clamped.executed == DriveCommand(angle=100.0, speed=0.0)
+    assert clamped.steering_residual == 190.0
+
+    neutral = fuse_guided_command(
+        DriveCommand(angle=-35.0, speed=6.0),
+        GuideInput(),
+        max_steering_angle=100.0,
+        invert_steering=True,
+        rt_speed_increment=2.0,
+        lt_speed_decrement=5.0,
+        speed_cap=30.0,
+        correction_deadzone=0.05,
+    )
+    assert neutral.executed == DriveCommand(angle=-35.0, speed=6.0)
+    assert neutral.steering_residual == 0.0
+    assert not neutral.human_correction
+
+    tiny_override = fuse_guided_command(
+        DriveCommand(angle=80.0, speed=6.0),
+        GuideInput(steering_axis=0.001),
+        max_steering_angle=100.0,
+        invert_steering=True,
+        rt_speed_increment=2.0,
+        lt_speed_decrement=5.0,
+        speed_cap=30.0,
+        correction_deadzone=0.05,
+    )
+    assert tiny_override.executed.angle == pytest.approx(-0.1)
+    assert tiny_override.steering_residual == pytest.approx(-80.1)
+    assert tiny_override.human_correction
     assert trigger_depth(-1.0, 'negative') == 1.0
     assert trigger_depth(1.0, 'signed') == 0.0
 
 
 def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
     profile = tmp_path / 'guided.yaml'
-    profile.write_text('guided: stateless\n', encoding='utf-8')
+    profile.write_text(
+        'guided_policy_collector:\n'
+        '  ros__parameters:\n'
+        '    max_steering_angle: 100.0\n',
+        encoding='utf-8',
+    )
+    _validate_collection_profile(str(profile))
     assert GuidedPolicyCollectorNode._initial_history(
         SimpleNamespace(artifact=SimpleNamespace(history=None))
     ) is None
@@ -134,6 +169,24 @@ def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
     ).hexdigest()
     with pytest.raises(ValueError, match='existing absolute file'):
         _validate_collection_profile(str(tmp_path / 'missing.yaml'))
+    legacy_profile = tmp_path / 'legacy.yaml'
+    legacy_profile.write_text(
+        'guided_policy_collector:\n'
+        '  ros__parameters:\n'
+        '    residual_gain: 200.0\n',
+        encoding='utf-8',
+    )
+    with pytest.raises(ValueError, match='legacy residual_gain'):
+        _validate_collection_profile(str(legacy_profile))
+    missing_angle_profile = tmp_path / 'missing_angle.yaml'
+    missing_angle_profile.write_text(
+        'guided_policy_collector:\n'
+        '  ros__parameters:\n'
+        '    speed_cap: 30.0\n',
+        encoding='utf-8',
+    )
+    with pytest.raises(ValueError, match='explicitly set max_steering_angle'):
+        _validate_collection_profile(str(missing_angle_profile))
 
     writer = AsyncSessionWriter(
         tmp_path / 'sessions',
@@ -166,8 +219,8 @@ def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
     )
     guide = GuideInput(steering_axis=0.5, rt_depth=1.0)
     fused = FusedCommand(
-        executed=DriveCommand(angle=-80.0, speed=8.0),
-        steering_residual=-100.0,
+        executed=DriveCommand(angle=-50.0, speed=8.0),
+        steering_residual=-70.0,
         speed_delta=2.0,
         human_correction=True,
     )
@@ -186,7 +239,7 @@ def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
     ) as stream:
         rows = list(csv.DictReader(stream))
     assert [(row['angle'], row['speed']) for row in rows] == [
-        ('-80.000000', '8.000000')
+        ('-50.000000', '8.000000')
     ]
     assert [(row['model_angle'], row['model_speed']) for row in rows] == [
         ('20.000000', '6.000000')
@@ -196,11 +249,19 @@ def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
 
 def test_stateless_external_collection_templates_and_launch_contract():
     package_root = Path(__file__).parents[1]
-    profile = yaml.safe_load(
-        (
-            package_root / 'config' / 'guided_stateless_collection.yaml'
-        ).read_text(encoding='utf-8')
-    )['guided_policy_collector']['ros__parameters']
+    profile_paths = (
+        package_root / 'config' / 'guided_stateless_collection.yaml',
+        package_root / 'config' / 'guided_policy_collection.yaml',
+    )
+    for path in profile_paths:
+        _validate_collection_profile(str(path))
+    profiles = [
+        yaml.safe_load(path.read_text(encoding='utf-8'))[
+            'guided_policy_collector'
+        ]['ros__parameters']
+        for path in profile_paths
+    ]
+    profile = profiles[0]
     launch_text = (
         package_root / 'launch' / 'jetson_guided_collection.launch.py'
     ).read_text(encoding='utf-8')
@@ -212,6 +273,9 @@ def test_stateless_external_collection_templates_and_launch_contract():
 
     assert profile['recording_root_dir'].endswith('/stateless_guided')
     assert profile['speed_cap'] == 30.0
+    for configured_profile in profiles:
+        assert configured_profile['max_steering_angle'] == 100.0
+        assert 'residual_gain' not in configured_profile
     assert profile['rt_speed_increment'] == 2.0
     assert profile['lt_speed_decrement'] == 5.0
     assert profile['curriculum_generation'] == 1
@@ -221,6 +285,7 @@ def test_stateless_external_collection_templates_and_launch_contract():
     assert "['params_file:=', params_file]" in launch_text
     assert 'OpaqueFunction(function=_require_params_file)' in launch_text
     for metadata_group in (
+        "'steering_mode':",
         "'collection_profile':",
         "'runtime_safety':",
         "'inference_runtime':",

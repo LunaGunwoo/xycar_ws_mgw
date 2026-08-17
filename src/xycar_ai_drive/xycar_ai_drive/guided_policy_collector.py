@@ -8,12 +8,13 @@ import signal
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import rclpy
+import yaml
 from cv_bridge import CvBridge, CvBridgeError
 from rclpy.node import Node
 from rclpy.parameter import Parameter
@@ -94,7 +95,7 @@ def fuse_guided_command(
     model: DriveCommand,
     guide: GuideInput,
     *,
-    residual_gain: float,
+    max_steering_angle: float,
     invert_steering: bool,
     rt_speed_increment: float,
     lt_speed_decrement: float,
@@ -102,15 +103,26 @@ def fuse_guided_command(
     correction_deadzone: float,
 ) -> FusedCommand:
     steering_sign = -1.0 if invert_steering else 1.0
-    residual = guide.steering_axis * residual_gain * steering_sign
+    controller_angle = max(
+        -100.0,
+        min(
+            100.0,
+            guide.steering_axis * max_steering_angle * steering_sign,
+        ),
+    )
+    angle = (
+        model.angle
+        if guide.steering_axis == 0.0
+        else controller_angle
+    )
+    residual = angle - model.angle
     speed_delta = (
         guide.rt_depth * rt_speed_increment
         - guide.lt_depth * lt_speed_decrement
     )
-    angle = max(-100.0, min(100.0, model.angle + residual))
     speed = max(0.0, min(speed_cap, model.speed + speed_delta))
     correction = (
-        abs(guide.steering_axis) > correction_deadzone
+        guide.steering_axis != 0.0
         or guide.lt_depth > correction_deadzone
         or guide.rt_depth > correction_deadzone
     )
@@ -263,7 +275,7 @@ class GuidedPolicyCollectorNode(Node):
         self.declare_parameter('rt_axis', 5)
         self.declare_parameter('trigger_axis_mode', 'negative')
         self.declare_parameter('invert_steering', True)
-        self.declare_parameter('residual_gain', 200.0)
+        self.declare_parameter('max_steering_angle', 100.0)
         self.declare_parameter('rt_speed_increment', 2.0)
         self.declare_parameter('lt_speed_decrement', 5.0)
         self.declare_parameter('speed_cap', 27.0)
@@ -343,7 +355,7 @@ class GuidedPolicyCollectorNode(Node):
         ):
             setattr(self, name, int(value(name)))
         for name in (
-            'residual_gain',
+            'max_steering_angle',
             'rt_speed_increment',
             'lt_speed_decrement',
             'speed_cap',
@@ -394,7 +406,6 @@ class GuidedPolicyCollectorNode(Node):
         if self.trigger_axis_mode not in {'negative', 'positive', 'signed'}:
             raise ValueError('unsupported trigger_axis_mode')
         positive_values = (
-            self.residual_gain,
             self.rt_speed_increment,
             self.lt_speed_decrement,
             self.speed_cap,
@@ -413,6 +424,11 @@ class GuidedPolicyCollectorNode(Node):
             )
         if not 0 <= self.correction_deadzone < 1:
             raise ValueError('correction_deadzone must be in [0,1)')
+        if (
+            not math.isfinite(self.max_steering_angle)
+            or not 0 < self.max_steering_angle <= 100
+        ):
+            raise ValueError('max_steering_angle must be in (0,100]')
         if not 0 <= self.speed_cap <= 100:
             raise ValueError('speed_cap must be in [0,100]')
         if self.tail_discard_frames < 0 or self.curriculum_generation < 0:
@@ -684,7 +700,7 @@ class GuidedPolicyCollectorNode(Node):
         fused = fuse_guided_command(
             prediction.command,
             guide,
-            residual_gain=self.residual_gain,
+            max_steering_angle=self.max_steering_angle,
             invert_steering=self.invert_steering,
             rt_speed_increment=self.rt_speed_increment,
             lt_speed_decrement=self.lt_speed_decrement,
@@ -814,7 +830,10 @@ class GuidedPolicyCollectorNode(Node):
                 'joy_topic': self.joy_topic,
             },
             'guided_control': {
-                'residual_gain': self.residual_gain,
+                'steering_mode': (
+                    'model_when_neutral_controller_absolute_when_active'
+                ),
+                'max_steering_angle': self.max_steering_angle,
                 'invert_steering': self.invert_steering,
                 'rt_speed_increment': self.rt_speed_increment,
                 'lt_speed_decrement': self.lt_speed_decrement,
@@ -1070,6 +1089,33 @@ def _validate_collection_profile(configured_path: str) -> None:
     if not path.is_absolute() or not path.is_file():
         raise ValueError(
             'collection_profile_path must be an existing absolute file'
+        )
+    try:
+        payload = yaml.safe_load(path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise ValueError(
+            f'collection profile must be valid UTF-8 YAML: {path}'
+        ) from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError('collection profile root must be a mapping')
+    node_config = payload.get('guided_policy_collector')
+    if not isinstance(node_config, Mapping):
+        raise ValueError(
+            'collection profile must configure guided_policy_collector'
+        )
+    parameters = node_config.get('ros__parameters')
+    if not isinstance(parameters, Mapping):
+        raise ValueError(
+            'guided_policy_collector.ros__parameters must be a mapping'
+        )
+    if 'residual_gain' in parameters:
+        raise ValueError(
+            'legacy residual_gain is not supported; replace it with '
+            'max_steering_angle'
+        )
+    if 'max_steering_angle' not in parameters:
+        raise ValueError(
+            'collection profile must explicitly set max_steering_angle'
         )
 
 

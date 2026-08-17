@@ -63,11 +63,16 @@ Laptop의 MGW root에서 수행한다.
 
 ## 사람 보정 데이터 수집
 
-`guided_policy_collector`는 모델의 angle/speed 두 head를 한 번에 추론하고 사람의
-조향·속도 보정을 합쳐 하나의 motor publisher로 발행한다.
+`guided_policy_collector`는 모델의 angle/speed 두 head를 한 번에 추론한다. 왼쪽
+stick이 중립이면 모델 angle을 사용하고, stick을 움직이는 동안에는 모델 angle을
+버리고 Controller의 절대 조향을 사용한다. speed는 모델 예측과 사람의 RT/LT
+보정을 합쳐 하나의 motor publisher로 발행한다.
 
 ```text
-executed_angle = clamp(model_angle + signed_left_stick * 200, -100, 100)
+executed_angle = (
+  model_angle                                      if left_stick == 0
+  clamp(signed_left_stick * max_steering_angle)   otherwise
+)
 executed_speed = clamp(
   model_speed
   + RT_depth * rt_speed_increment
@@ -76,11 +81,14 @@ executed_speed = clamp(
   speed_cap)
 ```
 
-기본 Remote Gamepad에서는 조향 부호를 반전한다. 값은 모두 hold 동안만 적용되고
-누적 trim으로 남지 않는다. CSV label은 모델 원본이 아니라 실제 발행된
-`executed_angle/executed_speed`이며 model prediction, stick/trigger depth, residual,
-사람 개입 여부와 inference latency도 함께 저장한다. angle/speed는 공통 ViT
-backbone과 별도 출력 head를 공유하므로 한 번의 수집과 학습에서 동시에 다룬다.
+기본 Remote Gamepad에서는 조향 부호를 반전하고 `max_steering_angle=100`으로 전체
+조향 범위를 사용한다. `game_controller_node`의 deadzone을 거친 `steering_axis`가
+정확히 0일 때만 모델 조향을 유지한다. CSV label은 모델 원본이 아니라 실제 발행된
+`executed_angle/executed_speed`이며 model prediction, stick/trigger depth,
+`executed_angle - model_angle`, 사람 개입 여부와 inference latency도 함께 저장한다.
+새 CSV field는 추가하지 않으며 학습 label은 계속 `angle`과 `speed`다.
+angle/speed는 공통 ViT backbone과 별도 출력 head를 공유하므로 한 번의 수집과
+학습에서 동시에 다룬다.
 새 stateless curriculum의 모든 guided round는 `speed_cap=30`을 사용한다. 이 값은
 목표 속도나 최소 속도가 아니라 합성 결과에 대한 hard ceiling이다. 세대별 실제
 속도 분포는 parent model의 speed와 YAML의 RT/LT 보정량으로 점진적으로 넓히며,
@@ -101,12 +109,16 @@ raw session은 `recording_root_dir`에 모두 보존한다. `curriculum_generati
 session을 어느 학습 세대로 취급할지 나타내며, `speed_cap`은 해당 라운드에서
 사람과 모델이 합성한 전진 명령의 상한이다. 두 값은 launch 인자로 지정한다.
 외부 profile `/home/xytron/.config/xycar/guided_stateless_collection.yaml`에는
-residual gain, trigger 증감, deadzone, 버튼, timeout과
+`max_steering_angle`, trigger 증감, deadzone, 버튼, timeout과
 `/home/xytron/xycar_data/stateless_guided` 저장 root를 둔다. session metadata는
 profile 경로·SHA-256과 최종 적용된 보정, inference, recording, 안전 parameter를
 기록한다. 수집 이미지는 30 Hz camera보다 충분한 writer 처리량을 확보하도록 기본
 JPEG 품질 95로 저장하며 `recording_image_format`과
 `recording_jpeg_quality`를 외부 profile에서 조정할 수 있다.
+
+기존 `residual_gain` profile은 호환 실행하지 않는다. 배포 전에 해당 key를 제거하고
+같은 위치에 `max_steering_angle: 100.0`을 명시해야 하며, legacy key가 남거나 새
+key가 빠지면 collector가 DRIVE OFF 상태에서 시작을 거부한다.
 
 아래 명령은 camera, gamepad와 motor publisher를 시작하므로 매 실행 직전 사용자
 승인이 필요하다. 바퀴 지지 또는 안전 주행 공간, motor 전원 차단 수단, Y와

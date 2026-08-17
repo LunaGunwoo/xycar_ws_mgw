@@ -61,6 +61,11 @@ migration backup에 보존한 뒤, Desktop `x27.desktop`이 Jetson motor wrapper
 수집 profile 세 개는 `~/.config/xycar/`에 파일이 없을 때만 설치한다.
 차량에서 튜닝한 기존 profile은 이후 재설치에서도 덮어쓰지 않는다.
 
+Guided collector의 Controller 조향 takeover 계약에서는 외부 profile에
+`max_steering_angle: 100.0`이 반드시 있어야 한다. 기존 `residual_gain`은 시작
+거부 대상이므로 이미 설치된 Guided profile은 재설치와 별개로 해당 key를 직접
+교체한다. 나머지 speed, generation과 저장 root 값은 보존한다.
+
 ```text
 ~/.config/xycar/gamepad_stateless_manual.yaml
 ~/.config/xycar/guided_stateless_collection.yaml

@@ -19,7 +19,7 @@ guided_policy_collector:
     rt_axis: 5
     trigger_axis_mode: negative
     invert_steering: true
-    residual_gain: 200.0
+    max_steering_angle: 100.0
     rt_speed_increment: 2.0
     lt_speed_decrement: 5.0
     speed_cap: 30.0
