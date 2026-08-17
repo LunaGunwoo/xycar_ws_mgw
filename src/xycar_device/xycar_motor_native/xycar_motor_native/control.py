@@ -22,6 +22,42 @@ class VescSetpoint:
 
 
 @dataclass(frozen=True)
+class VescFeedback:
+    voltage_input: float
+    temperature_pcb: float
+    current_motor: float
+    current_input: float
+    speed: float
+    duty_cycle: float
+    fault_code: int
+
+
+@dataclass(frozen=True)
+class VescFeedbackContract:
+    voltage_min: float = 5.0
+    voltage_max: float = 60.0
+    temperature_min: float = -40.0
+    temperature_max: float = 200.0
+    current_abs_max: float = 200.0
+    erpm_abs_max: float = 100000.0
+    duty_abs_max: float = 1.1
+
+    def validate(self) -> None:
+        if not all(math.isfinite(value) for value in self.__dict__.values()):
+            raise ValueError('VESC feedback limits must be finite')
+        if self.voltage_min < 0.0 or self.voltage_min >= self.voltage_max:
+            raise ValueError('VESC feedback voltage limits are invalid')
+        if self.temperature_min >= self.temperature_max:
+            raise ValueError('VESC feedback temperature limits are invalid')
+        if min(
+            self.current_abs_max,
+            self.erpm_abs_max,
+            self.duty_abs_max,
+        ) <= 0.0:
+            raise ValueError('VESC feedback absolute limits must be positive')
+
+
+@dataclass(frozen=True)
 class NativeMotorContract:
     angle_min: float = -50.0
     angle_max: float = 100.0
@@ -203,6 +239,46 @@ class CommandFreshnessWatchdog:
             return None
         age = max(0.0, now - self._last_command_time)
         return age if age > self.timeout_sec else None
+
+
+def vesc_feedback_error(
+    feedback: VescFeedback,
+    contract: VescFeedbackContract,
+) -> str | None:
+    """Return a fail-closed reason when decoded VESC telemetry is implausible."""
+    contract.validate()
+    values = (
+        feedback.voltage_input,
+        feedback.temperature_pcb,
+        feedback.current_motor,
+        feedback.current_input,
+        feedback.speed,
+        feedback.duty_cycle,
+    )
+    if not all(math.isfinite(value) for value in values):
+        return 'VESC feedback contains NaN or Inf'
+    if feedback.fault_code != 0:
+        return f'VESC fault code is {feedback.fault_code}'
+    if not contract.voltage_min <= feedback.voltage_input <= contract.voltage_max:
+        return f'VESC input voltage is implausible: {feedback.voltage_input:.3f}V'
+    if not (
+        contract.temperature_min
+        <= feedback.temperature_pcb
+        <= contract.temperature_max
+    ):
+        return (
+            'VESC PCB temperature is implausible: '
+            f'{feedback.temperature_pcb:.3f}C'
+        )
+    if abs(feedback.current_motor) > contract.current_abs_max:
+        return f'VESC motor current is implausible: {feedback.current_motor:.3f}A'
+    if abs(feedback.current_input) > contract.current_abs_max:
+        return f'VESC input current is implausible: {feedback.current_input:.3f}A'
+    if abs(feedback.speed) > contract.erpm_abs_max:
+        return f'VESC speed is implausible: {feedback.speed:.3f} ERPM'
+    if abs(feedback.duty_cycle) > contract.duty_abs_max:
+        return f'VESC duty cycle is implausible: {feedback.duty_cycle:.3f}'
+    return None
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:

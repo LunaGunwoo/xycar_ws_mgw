@@ -11,6 +11,13 @@ native_motor_gateway:
     feedback_timeout_sec: 0.25
     feedback_startup_grace_sec: 1.0
     require_vesc_feedback: true
+    feedback_voltage_min: 5.0
+    feedback_voltage_max: 60.0
+    feedback_temperature_min: -40.0
+    feedback_temperature_max: 200.0
+    feedback_current_abs_max: 200.0
+    feedback_erpm_abs_max: 100000.0
+    feedback_duty_abs_max: 1.1
     metrics_period_sec: 2.0
     stop_publish_count: 5
     angle_min: -50.0

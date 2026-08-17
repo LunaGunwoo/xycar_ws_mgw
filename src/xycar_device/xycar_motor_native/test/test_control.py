@@ -7,6 +7,9 @@ from xycar_motor_native.control import (
     MotorCommand,
     NativeMotorContract,
     NativeMotorMapper,
+    VescFeedback,
+    VescFeedbackContract,
+    vesc_feedback_error,
 )
 
 
@@ -97,3 +100,39 @@ def test_watchdog_stops_within_timeout_plus_one_30hz_check_period():
     age = watchdog.stale_age(first_check_after_deadline)
     assert age is not None
     assert age <= watchdog.timeout_sec + watchdog.check_period_sec
+
+
+def test_valid_vesc_fw218_feedback_is_accepted():
+    feedback = VescFeedback(
+        voltage_input=9.6,
+        temperature_pcb=31.5,
+        current_motor=-12.34,
+        current_input=4.56,
+        speed=12345.0,
+        duty_cycle=-0.125,
+        fault_code=0,
+    )
+    assert vesc_feedback_error(feedback, VescFeedbackContract()) is None
+
+
+@pytest.mark.parametrize(
+    ('feedback', 'expected'),
+    (
+        (
+            VescFeedback(0.0, 0.0, 173017.68, 173017.68, -131072.0, 0.0, 43),
+            'fault code',
+        ),
+        (
+            VescFeedback(0.0, 20.0, 0.0, 0.0, 0.0, 0.0, 0),
+            'voltage',
+        ),
+        (
+            VescFeedback(9.6, 20.0, math.inf, 0.0, 0.0, 0.0, 0),
+            'NaN or Inf',
+        ),
+    ),
+)
+def test_malformed_or_faulted_vesc_feedback_is_rejected(feedback, expected):
+    reason = vesc_feedback_error(feedback, VescFeedbackContract())
+    assert reason is not None
+    assert expected in reason

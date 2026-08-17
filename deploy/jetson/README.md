@@ -34,13 +34,17 @@ cd /home/xytron/xycar_ws_mgw
 
 새 history native motor package는 공식 F1TENTH VESC ROS 2 source를 ignored
 dependency overlay에 준비한 뒤 함께 빌드한다. script는 exact commit과 clean
-checkout, upstream license를 검증하고 기존 dirty/different checkout을 덮어쓰지
-않는다.
+checkout, upstream license를 검증한 후 차량의 firmware 2.18 values layout
+호환 patch를 적용한다. patch 결과는 파일별 SHA-256으로 검증하며 기존의 다른
+dirty/different checkout을 덮어쓰지 않는다.
 
 차량 VESC firmware 2.18에 맞춰 source는 공식 ROS 2 commit
-`c47fccbbd10fb66db3faaaa6e469f2eedba2586f`로 고정한다. 이후 firmware 5.2
-protocol과 IMU polling이 포함된 Humble HEAD는 2.18 장치에서 checksum/out-of-sync를
-발생시키므로 검증 없이 올리지 않는다.
+`c47fccbbd10fb66db3faaaa6e469f2eedba2586f`로 고정하고,
+`patches/f1tenth-vesc-fw218-values.patch`로 working ROS 1 driver와 동일한 six-MOS
+legacy values offsets를 복원한다. 원본 commit의 onboard-car offsets는 이 차량에서
+0 V와 비정상 current/RPM/fault를 만들며, 이후 firmware 5.2 protocol과 IMU polling이
+포함된 Humble HEAD도 2.18 장치에서 checksum/out-of-sync를 발생시키므로 사용하지
+않는다.
 
 ```bash
 ./deploy/jetson/prepare_native_vesc_source.sh

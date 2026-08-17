@@ -21,6 +21,9 @@ from xycar_motor_native.control import (
     MotorCommand,
     NativeMotorContract,
     NativeMotorMapper,
+    VescFeedback,
+    VescFeedbackContract,
+    vesc_feedback_error,
 )
 
 
@@ -39,6 +42,7 @@ class NativeMotorGateway(Node):
         super().__init__('native_motor_gateway')
         self._declare_parameters()
         self._read_parameters()
+        self._feedback_contract = self._vesc_feedback_contract()
         self._validate_parameters()
         self._mapper = NativeMotorMapper(self._motor_contract())
         self._command_watchdog = CommandFreshnessWatchdog(
@@ -148,6 +152,9 @@ class NativeMotorGateway(Node):
         self.declare_parameter('feedback_timeout_sec', 0.25)
         self.declare_parameter('feedback_startup_grace_sec', 1.0)
         self.declare_parameter('require_vesc_feedback', True)
+        feedback_defaults = VescFeedbackContract()
+        for name, value in feedback_defaults.__dict__.items():
+            self.declare_parameter(f'feedback_{name}', value)
         self.declare_parameter('metrics_period_sec', 2.0)
         self.declare_parameter('stop_publish_count', 5)
         for name, value in defaults.__dict__.items():
@@ -188,6 +195,15 @@ class NativeMotorGateway(Node):
             }
         )
 
+    def _vesc_feedback_contract(self) -> VescFeedbackContract:
+        defaults = VescFeedbackContract()
+        return VescFeedbackContract(
+            **{
+                name: float(self.get_parameter(f'feedback_{name}').value)
+                for name in defaults.__dict__
+            }
+        )
+
     def _validate_parameters(self) -> None:
         topics = (
             self.command_topic,
@@ -214,6 +230,7 @@ class NativeMotorGateway(Node):
                 raise ValueError(f'{name} must be finite and positive')
         if self.stop_publish_count < 1:
             raise ValueError('stop_publish_count must be positive')
+        self._feedback_contract.validate()
 
     def _on_command(self, message: XycarMotor) -> None:
         now = time.monotonic()
@@ -273,8 +290,25 @@ class NativeMotorGateway(Node):
             self._last_nonzero = not self._stopped
             self._stop_reason = None if self._last_nonzero else 'source stop'
 
-    def _on_feedback(self, _message: VescStateStamped) -> None:
+    def _on_feedback(self, message: VescStateStamped) -> None:
+        state = message.state
+        reason = vesc_feedback_error(
+            VescFeedback(
+                voltage_input=float(state.voltage_input),
+                temperature_pcb=float(state.temperature_pcb),
+                current_motor=float(state.current_motor),
+                current_input=float(state.current_input),
+                speed=float(state.speed),
+                duty_cycle=float(state.duty_cycle),
+                fault_code=int(state.fault_code),
+            ),
+            self._feedback_contract,
+        )
         with self._lock:
+            if reason is not None:
+                self._last_feedback_monotonic = None
+                self._trip_locked(reason)
+                return
             self._last_feedback_monotonic = time.monotonic()
 
     def _on_watchdog(self) -> None:

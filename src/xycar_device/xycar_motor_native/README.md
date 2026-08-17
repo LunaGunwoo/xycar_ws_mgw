@@ -6,8 +6,8 @@ gateway다. 기존 `/xycar_motor` stateless 경로는 변경하지 않는다.
 ## Build
 
 차량 source 기준으로 고정된 F1TENTH VESC ROS 2 source를 준비하고 필요한 package만
-빌드한다. 준비 script는 `_deps/`의 기존 checkout이 다른 commit이거나 dirty하면
-덮어쓰지 않고 중단한다.
+빌드한다. 준비 script는 `_deps/`의 기존 checkout이 다른 commit이거나 예상한
+firmware 2.18 patch 이외의 변경이 있으면 덮어쓰지 않고 중단한다.
 
 ```bash
 cd /home/xytron/xycar_ws_mgw
@@ -20,9 +20,10 @@ source install/setup.bash
 ```
 
 Upstream은 `f1tenth/vesc` ROS 2 commit
-`c47fccbbd10fb66db3faaaa6e469f2eedba2586f`로 고정한다. 이 commit은 차량의
-VESC firmware 2.18과 같은 legacy values protocol을 사용하며, firmware 5.2용
-packet layout과 IMU polling이 추가되기 전 버전이다. BSD-3-Clause license 사본은
+`c47fccbbd10fb66db3faaaa6e469f2eedba2586f`로 고정한다. firmware 5.2용 packet
+layout과 IMU polling이 추가되기 전 버전이며, tracked compatibility patch가 차량의
+VESC firmware 2.18 six-MOS values offsets를 복원한다. 준비 script는 patch 결과의
+SHA-256까지 검사한다. BSD-3-Clause license 사본은
 `deploy/jetson/F1TENTH_VESC_LICENSE`에 보존한다.
 
 ## Topics
@@ -35,7 +36,9 @@ packet layout과 IMU polling이 추가되기 전 버전이다. BSD-3-Clause lice
 - feedback `/xycar_native/sensors/core`: VESC state
 
 정상 command는 callback에서 한 번만 즉시 전달한다. 30 Hz timer는 command를
-재발행하지 않고 stale·feedback·graph 상태만 검사한다. source header stamp가 0,
+재발행하지 않고 stale·feedback·graph 상태만 검사한다. feedback의 voltage,
+temperature, current, ERPM, duty가 설정 범위를 벗어나거나 VESC fault가 0이 아니면
+즉시 정지하고 zero re-arm 전까지 OFF를 유지한다. source header stamp가 0,
 중복 또는 역순이거나 command가 NaN/Inf이면 즉시 정지한다.
 fault는 ready false로 latch되고, 환경이 안전해진 뒤 새 source stamp의 zero command를
 받아야 native gateway가 다시 ready가 된다. 상위 policy/collector도 별도 A/Y 또는
