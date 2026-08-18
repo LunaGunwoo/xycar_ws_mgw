@@ -8,13 +8,12 @@ import signal
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import rclpy
-import yaml
 from cv_bridge import CvBridge, CvBridgeError
 from rclpy.node import Node
 from rclpy.parameter import Parameter
@@ -25,6 +24,7 @@ from std_msgs.msg import Bool, Float32MultiArray
 from xycar_data.session_writer import AsyncSessionWriter, CameraSample
 
 from xycar_ai_drive.artifact import PolicyArtifact, load_policy_artifact
+from xycar_ai_drive.collection_profile import validate_collection_profile
 from xycar_ai_drive.control import (
     STOP_COMMAND,
     DriveCommand,
@@ -408,7 +408,7 @@ class GuidedPolicyCollectorNode(Node):
         ):
             if not getattr(self, name):
                 raise ValueError(f'{name} must not be empty')
-        _validate_collection_profile(self.collection_profile_path)
+        validate_collection_profile(self.collection_profile_path)
         require_steering_contract_name(self.steering_contract)
         axis_indices = (
             self.steering_axis,
@@ -1139,49 +1139,6 @@ class GuidedPolicyCollectorNode(Node):
         self.writer.shutdown()
         self._poll_writer_results()
         self.publish_stop_burst()
-
-
-def _validate_collection_profile(configured_path: str) -> None:
-    if not configured_path:
-        raise ValueError('collection_profile_path must not be empty')
-    path = Path(configured_path)
-    if not path.is_absolute() or not path.is_file():
-        raise ValueError(
-            'collection_profile_path must be an existing absolute file'
-        )
-    try:
-        payload = yaml.safe_load(path.read_text(encoding='utf-8'))
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
-        raise ValueError(
-            f'collection profile must be valid UTF-8 YAML: {path}'
-        ) from exc
-    if not isinstance(payload, Mapping):
-        raise ValueError('collection profile root must be a mapping')
-    node_config = payload.get('guided_policy_collector')
-    if not isinstance(node_config, Mapping):
-        raise ValueError(
-            'collection profile must configure guided_policy_collector'
-        )
-    parameters = node_config.get('ros__parameters')
-    if not isinstance(parameters, Mapping):
-        raise ValueError(
-            'guided_policy_collector.ros__parameters must be a mapping'
-        )
-    if 'residual_gain' in parameters:
-        raise ValueError(
-            'legacy residual_gain is not supported; replace it with '
-            'max_steering_angle'
-        )
-    if 'max_steering_angle' not in parameters:
-        raise ValueError(
-            'collection profile must explicitly set max_steering_angle'
-        )
-    if 'steering_takeover_button' not in parameters:
-        raise ValueError(
-            'collection profile must explicitly set '
-            'steering_takeover_button'
-        )
-    require_steering_contract_name(parameters.get('steering_contract'))
 
 
 def _collection_profile_metadata(configured_path: str) -> dict[str, object]:

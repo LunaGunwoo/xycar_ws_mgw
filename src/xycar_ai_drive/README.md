@@ -138,7 +138,9 @@ JPEG 품질 95로 저장하며 `recording_image_format`과
 기존 `residual_gain` 또는 steering 계약이 없는 profile은 호환 실행하지 않는다.
 새 versioned profile에는 `max_steering_angle: 100.0`,
 `steering_takeover_button: 10`, `steering_contract: normalized_percent_v1`이 모두
-있어야 한다.
+있어야 한다. Jetson과 일반 Guided launch는 이 외부 profile 계약을 camera,
+gamepad 또는 CUDA wrapper를 시작하기 전에 검사하고, 누락되면 실행 전체를
+거부한다.
 
 아래 명령은 camera, gamepad와 motor publisher를 시작하므로 매 실행 직전 사용자
 승인이 필요하다. 바퀴 지지 또는 안전 주행 공간, motor 전원 차단 수단, Y와
@@ -146,6 +148,7 @@ JPEG 품질 95로 저장하며 `recording_image_format`과
 
 ```bash
 ssh xytron@xycar-gpu
+set -euo pipefail
 cd /home/xytron/xycar_ws_mgw
 source /opt/ros/humble/setup.bash
 source install/setup.bash
@@ -155,6 +158,7 @@ GENERATION=<next-generation>
 COLLECTION_ID=<generation-and-collection-id>
 PROFILE=/home/xytron/.config/xycar/guided_collections/generation_${GENERATION}/${COLLECTION_ID}.yaml
 test -f "${PROFILE}"
+grep -Fqx '    steering_takeover_button: 10' "${PROFILE}"
 ros2 launch xycar_ai_drive jetson_guided_collection.launch.py \
   params_file:="${PROFILE}" \
   artifact_id:=<schema-v1-stateless-artifact-id> \

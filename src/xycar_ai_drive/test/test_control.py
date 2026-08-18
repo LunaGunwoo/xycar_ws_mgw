@@ -19,6 +19,7 @@ from xycar_ai_drive.artifact import (
     RoadWarpParameters,
     load_policy_artifact,
 )
+from xycar_ai_drive.collection_profile import validate_collection_profile
 from xycar_ai_drive.control import (
     DriveCommand,
     ToggleAction,
@@ -33,7 +34,6 @@ from xycar_ai_drive.guided_policy_collector import (
     GuidedPrediction,
     _collection_profile_metadata,
     _validate_control_indices,
-    _validate_collection_profile,
     fuse_guided_command,
     trigger_depth,
 )
@@ -275,7 +275,7 @@ def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
         '    steering_contract: normalized_percent_v1\n',
         encoding='utf-8',
     )
-    _validate_collection_profile(str(profile))
+    validate_collection_profile(str(profile))
     assert GuidedPolicyCollectorNode._initial_history(
         SimpleNamespace(artifact=SimpleNamespace(history=None))
     ) is None
@@ -285,7 +285,7 @@ def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
         profile.read_bytes()
     ).hexdigest()
     with pytest.raises(ValueError, match='existing absolute file'):
-        _validate_collection_profile(str(tmp_path / 'missing.yaml'))
+        validate_collection_profile(str(tmp_path / 'missing.yaml'))
     legacy_profile = tmp_path / 'legacy.yaml'
     legacy_profile.write_text(
         'guided_policy_collector:\n'
@@ -294,7 +294,7 @@ def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
         encoding='utf-8',
     )
     with pytest.raises(ValueError, match='legacy residual_gain'):
-        _validate_collection_profile(str(legacy_profile))
+        validate_collection_profile(str(legacy_profile))
     missing_angle_profile = tmp_path / 'missing_angle.yaml'
     missing_angle_profile.write_text(
         'guided_policy_collector:\n'
@@ -304,7 +304,7 @@ def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
         encoding='utf-8',
     )
     with pytest.raises(ValueError, match='explicitly set max_steering_angle'):
-        _validate_collection_profile(str(missing_angle_profile))
+        validate_collection_profile(str(missing_angle_profile))
     missing_takeover_profile = tmp_path / 'missing_takeover.yaml'
     missing_takeover_profile.write_text(
         'guided_policy_collector:\n'
@@ -317,7 +317,7 @@ def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
         ValueError,
         match='explicitly set steering_takeover_button',
     ):
-        _validate_collection_profile(str(missing_takeover_profile))
+        validate_collection_profile(str(missing_takeover_profile))
 
     writer = AsyncSessionWriter(
         tmp_path / 'sessions',
@@ -410,7 +410,7 @@ def test_stateless_external_collection_templates_and_launch_contract():
         / 'guided_policy_collection_normalized_v1.yaml',
     )
     for path in profile_paths:
-        _validate_collection_profile(str(path))
+        validate_collection_profile(str(path))
     profiles = [
         yaml.safe_load(path.read_text(encoding='utf-8'))[
             'guided_policy_collector'
@@ -451,6 +451,19 @@ def test_stateless_external_collection_templates_and_launch_contract():
     assert profile['recording_jpeg_quality'] == 95
     assert "['params_file:=', params_file]" in launch_text
     assert 'OpaqueFunction(function=_require_params_file)' in launch_text
+    assert 'validate_collection_profile(str(configured))' in launch_text
+    assert launch_text.index('OpaqueFunction(function=_require_params_file)') < (
+        launch_text.index('ExecuteProcess(')
+    )
+    assert 'OpaqueFunction(function=_require_params_file)' in (
+        generic_launch_text
+    )
+    assert 'validate_collection_profile(str(configured))' in (
+        generic_launch_text
+    )
+    assert generic_launch_text.index(
+        'OpaqueFunction(function=_require_params_file)'
+    ) < generic_launch_text.index('IncludeLaunchDescription(')
     for metadata_group in (
         "'steering_contract':",
         "'steering_mode':",

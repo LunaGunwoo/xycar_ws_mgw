@@ -11,6 +11,7 @@ from launch.actions import (
     SetEnvironmentVariable,
 )
 from launch.substitutions import LaunchConfiguration
+from xycar_ai_drive.collection_profile import validate_collection_profile
 
 
 def generate_launch_description():
@@ -89,4 +90,8 @@ def _require_params_file(context):
         raise RuntimeError(
             f'params_file must be an existing absolute YAML file: {configured}'
         )
+    try:
+        validate_collection_profile(str(configured))
+    except ValueError as exc:
+        raise RuntimeError(f'invalid params_file {configured}: {exc}') from exc
     return []
