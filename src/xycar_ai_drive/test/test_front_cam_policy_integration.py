@@ -149,6 +149,7 @@ def ros_harness(monkeypatch):
         Parameter('prediction_topic', value=PREDICTION_TOPIC),
         Parameter('enabled_topic', value=ENABLED_TOPIC),
         Parameter('publish_rate_hz', value=20.0),
+        Parameter('a_release_grace_sec', value=0.12),
         Parameter('joy_timeout_sec', value=0.15),
         Parameter('inference_timeout_sec', value=0.15),
         Parameter('graph_check_period_sec', value=0.03),
@@ -211,7 +212,9 @@ def ros_harness(monkeypatch):
     rclpy.shutdown()
 
 
-def test_a_toggle_publish_rate_and_fault_rearming(ros_harness):
+def test_a_hold_publish_rate_false_pulse_filter_and_fault_rearming(
+    ros_harness,
+):
     harness = ros_harness
     policy = harness['policy']
     commands = harness['commands']
@@ -229,40 +232,39 @@ def test_a_toggle_publish_rate_and_fault_rearming(ros_harness):
 
     harness['joy_publisher'].publish(_joy(True))
     _spin_for(harness, 0.20, a=True)
-    assert policy._toggle.enabled
+    assert policy._drive_gate.enabled
     assert policy._policy.reset_count == 1
     moving = [command for command in commands if command[1] > 0.0]
     assert len(moving) >= 2
     assert all(command == pytest.approx((-18.0, 25.0)) for command in moving)
 
     commands.clear()
-    _spin_for(harness, 0.15, a=False)
-    assert policy._toggle.enabled
+    _spin_for(harness, 0.05, a=False)
+    _spin_for(harness, 0.05, a=True)
+    assert policy._drive_gate.enabled
     assert any(command[1] == pytest.approx(25.0) for command in commands)
 
-    harness['joy_publisher'].publish(_joy(True))
-    _spin_for(harness, 0.10, a=True)
-    assert not policy._toggle.enabled
+    _spin_for(harness, 0.15, a=False)
+    assert not policy._drive_gate.enabled
     assert commands[-1] == pytest.approx((0.0, 0.0))
 
-    _spin_for(harness, 0.10, a=False)
     harness['joy_publisher'].publish(_joy(True))
     _spin_for(harness, 0.10, a=True)
-    assert policy._toggle.enabled
+    assert policy._drive_gate.enabled
 
     commands.clear()
     _spin_for(harness, 0.25, a=None)
-    assert not policy._toggle.enabled
+    assert not policy._drive_gate.enabled
     assert commands[-1] == pytest.approx((0.0, 0.0))
 
     commands.clear()
     _spin_for(harness, 0.15, a=True)
-    assert not policy._toggle.enabled
+    assert not policy._drive_gate.enabled
     assert all(command[1] == 0.0 for command in commands)
-    _spin_for(harness, 0.10, a=False)
+    _spin_for(harness, 0.15, a=False)
     harness['joy_publisher'].publish(_joy(True))
     _spin_for(harness, 0.10, a=True)
-    assert policy._toggle.enabled
+    assert policy._drive_gate.enabled
 
     competitor = harness['peer'].create_publisher(
         Float32MultiArray,
@@ -273,7 +275,7 @@ def test_a_toggle_publish_rate_and_fault_rearming(ros_harness):
         harness,
         lambda: (
             bool(policy._competitors)
-            and not policy._toggle.enabled
+            and not policy._drive_gate.enabled
             and bool(commands)
             and commands[-1] == (0.0, 0.0)
         ),
@@ -288,11 +290,11 @@ def test_a_toggle_publish_rate_and_fault_rearming(ros_harness):
         2.0,
         a=True,
     )
-    assert not policy._toggle.enabled
-    _spin_for(harness, 0.10, a=False)
+    assert not policy._drive_gate.enabled
+    _spin_for(harness, 0.15, a=False)
     harness['joy_publisher'].publish(_joy(True))
     _spin_for(harness, 0.10, a=True)
-    assert policy._toggle.enabled
+    assert policy._drive_gate.enabled
 
     commands.clear()
     policy.shutdown()

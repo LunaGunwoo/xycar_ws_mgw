@@ -22,6 +22,7 @@ from xycar_ai_drive.artifact import (
 from xycar_ai_drive.collection_profile import validate_collection_profile
 from xycar_ai_drive.control import (
     DriveCommand,
+    HoldDriveGate,
     ToggleAction,
     ToggleDriveGate,
     decode_class_ids,
@@ -58,6 +59,7 @@ def test_motor_relay_default_is_explicit_in_vehicle_config():
     config = yaml.safe_load(config_path.read_text(encoding='utf-8'))
     parameters = config['front_cam_policy']['ros__parameters']
     assert parameters['allowed_motor_relay_nodes'] == ['/ros_bridge']
+    assert parameters['a_release_grace_sec'] == pytest.approx(0.12)
 
 
 def test_a_button_toggle_requires_release_and_fault_rearming():
@@ -84,6 +86,116 @@ def test_a_button_toggle_requires_release_and_fault_rearming():
     assert gate.observe(pressed=True, can_enable=True) == ToggleAction.NONE
     assert gate.observe(pressed=False, can_enable=True) == ToggleAction.NONE
     assert gate.observe(pressed=True, can_enable=True) == ToggleAction.ENABLED
+
+
+def test_a_button_hold_masks_short_false_pulses_and_stops_on_release():
+    gate = HoldDriveGate(release_grace_sec=0.12)
+    assert (
+        gate.observe(
+            pressed=True,
+            can_enable=True,
+            now_monotonic=1.0,
+        )
+        == ToggleAction.ENABLED
+    )
+    assert gate.enabled
+
+    assert (
+        gate.observe(
+            pressed=False,
+            can_enable=True,
+            now_monotonic=1.05,
+        )
+        == ToggleAction.NONE
+    )
+    assert gate.enabled
+    assert (
+        gate.observe(
+            pressed=True,
+            can_enable=True,
+            now_monotonic=1.09,
+        )
+        == ToggleAction.NONE
+    )
+    assert (
+        gate.observe(
+            pressed=False,
+            can_enable=True,
+            now_monotonic=1.20,
+        )
+        == ToggleAction.NONE
+    )
+    assert gate.enabled
+    assert (
+        gate.observe(
+            pressed=False,
+            can_enable=True,
+            now_monotonic=1.22,
+        )
+        == ToggleAction.DISABLED
+    )
+    assert not gate.enabled
+
+
+def test_a_button_hold_requires_release_after_rejection_or_fault():
+    gate = HoldDriveGate(release_grace_sec=0.12)
+    assert (
+        gate.observe(
+            pressed=True,
+            can_enable=False,
+            now_monotonic=1.0,
+        )
+        == ToggleAction.REJECTED
+    )
+    assert (
+        gate.observe(
+            pressed=True,
+            can_enable=True,
+            now_monotonic=1.05,
+        )
+        == ToggleAction.NONE
+    )
+    gate.observe(
+        pressed=False,
+        can_enable=True,
+        now_monotonic=1.18,
+    )
+    assert (
+        gate.observe(
+            pressed=True,
+            can_enable=True,
+            now_monotonic=1.19,
+        )
+        == ToggleAction.ENABLED
+    )
+    assert gate.fault()
+    assert (
+        gate.observe(
+            pressed=True,
+            can_enable=True,
+            now_monotonic=1.20,
+        )
+        == ToggleAction.NONE
+    )
+    gate.observe(
+        pressed=False,
+        can_enable=True,
+        now_monotonic=1.33,
+    )
+    assert (
+        gate.observe(
+            pressed=True,
+            can_enable=True,
+            now_monotonic=1.34,
+        )
+        == ToggleAction.ENABLED
+    )
+
+
+@pytest.mark.parametrize('release_grace_sec', [0.0, -0.1, float('nan')])
+def test_a_button_hold_rejects_invalid_release_grace(release_grace_sec):
+    with pytest.raises(ValueError, match='finite and positive'):
+        HoldDriveGate(release_grace_sec=release_grace_sec)
 
 
 def test_class_decode_blocks_reverse_without_positive_speed_cap():

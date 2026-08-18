@@ -67,6 +67,66 @@ class ToggleDriveGate:
         return was_enabled
 
 
+@dataclass
+class HoldDriveGate:
+    """Drive only while a button is held, tolerating short false pulses."""
+
+    release_grace_sec: float
+    enabled: bool = False
+    last_pressed_monotonic: float | None = None
+    blocked_until_release: bool = False
+
+    def __post_init__(self) -> None:
+        if (
+            not math.isfinite(self.release_grace_sec)
+            or self.release_grace_sec <= 0.0
+        ):
+            raise ValueError('release_grace_sec must be finite and positive')
+
+    def observe(
+        self,
+        *,
+        pressed: bool,
+        can_enable: bool,
+        now_monotonic: float,
+    ) -> ToggleAction:
+        if not math.isfinite(now_monotonic):
+            raise ValueError('now_monotonic must be finite')
+        if pressed:
+            self.last_pressed_monotonic = now_monotonic
+
+        age = (
+            None
+            if self.last_pressed_monotonic is None
+            else now_monotonic - self.last_pressed_monotonic
+        )
+        held = pressed or (
+            age is not None
+            and 0.0 <= age <= self.release_grace_sec
+        )
+        if not held:
+            self.last_pressed_monotonic = None
+            self.blocked_until_release = False
+            if self.enabled:
+                self.enabled = False
+                return ToggleAction.DISABLED
+            return ToggleAction.NONE
+
+        if self.enabled or self.blocked_until_release:
+            return ToggleAction.NONE
+        if can_enable:
+            self.enabled = True
+            return ToggleAction.ENABLED
+        self.blocked_until_release = True
+        return ToggleAction.REJECTED
+
+    def fault(self) -> bool:
+        was_enabled = self.enabled
+        self.enabled = False
+        self.blocked_until_release = True
+        return was_enabled
+
+
 def decode_class_ids(angle_class_id: int, speed_class_id: int) -> DriveCommand:
     for label, class_id in (
         ('angle', angle_class_id),

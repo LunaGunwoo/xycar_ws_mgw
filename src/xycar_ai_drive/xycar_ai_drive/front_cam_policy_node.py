@@ -1,4 +1,4 @@
-"""Run front-camera policy inference with an A-button motion toggle."""
+"""Run front-camera policy inference with an A-button motion hold gate."""
 
 from __future__ import annotations
 
@@ -22,9 +22,9 @@ from xycar_ai_drive.artifact import PolicyArtifact
 from xycar_ai_drive.control import (
     STOP_COMMAND,
     DriveCommand,
+    HoldDriveGate,
     PolicyPrediction,
     ToggleAction,
-    ToggleDriveGate,
     command_class_ids,
     is_fresh,
 )
@@ -81,7 +81,7 @@ def _is_paired_unnamed_relay(endpoint, subscriptions) -> bool:
 
 
 class FrontCamPolicyNode(Node):
-    """Infer continuously and publish motor commands only when A toggles on."""
+    """Infer continuously and publish motor commands only while A is held."""
 
     def __init__(
         self,
@@ -99,7 +99,7 @@ class FrontCamPolicyNode(Node):
         self.bridge = CvBridge()
         self._lock = threading.RLock()
         self._frame_condition = threading.Condition(self._lock)
-        self._toggle = ToggleDriveGate()
+        self._drive_gate = HoldDriveGate(self.a_release_grace_sec)
         self._latest_frame: tuple[int, np.ndarray, float] | None = None
         self._frame_sequence = 0
         self._prediction: PolicyPrediction | None = None
@@ -172,8 +172,8 @@ class FrontCamPolicyNode(Node):
         )
         self._refresh_graph(time.monotonic())
         self.get_logger().warning(
-            'Front-camera policy started with motion OFF. Release A once, '
-            'then press A to toggle motion ON; press A again to stop.'
+            'Front-camera policy started with motion OFF. Hold A to allow '
+            'AI motion; release A to stop.'
         )
         self.get_logger().info(
             f'artifact={self.artifact_dir}, camera={self.camera_topic}, '
@@ -182,6 +182,7 @@ class FrontCamPolicyNode(Node):
             f'inference_backend={self.inference_backend}, '
             f'inference_device={self.inference_device}, '
             f'A=buttons[{self.a_button_index}], '
+            f'A_release_grace={self.a_release_grace_sec:g} s, '
             f'allow_motion={self.allow_motion}'
         )
 
@@ -200,6 +201,7 @@ class FrontCamPolicyNode(Node):
         )
         self.declare_parameter('enabled_topic', '/front_cam_policy/enabled')
         self.declare_parameter('a_button_index', 0)
+        self.declare_parameter('a_release_grace_sec', 0.12)
         self.declare_parameter('allow_motion', True)
         self.declare_parameter('publish_rate_hz', 20.0)
         self.declare_parameter('joy_timeout_sec', 0.25)
@@ -232,6 +234,9 @@ class FrontCamPolicyNode(Node):
         )
         self.enabled_topic = str(self.get_parameter('enabled_topic').value)
         self.a_button_index = int(self.get_parameter('a_button_index').value)
+        self.a_release_grace_sec = float(
+            self.get_parameter('a_release_grace_sec').value
+        )
         self.allow_motion = bool(self.get_parameter('allow_motion').value)
         self.publish_rate_hz = float(
             self.get_parameter('publish_rate_hz').value
@@ -287,6 +292,7 @@ class FrontCamPolicyNode(Node):
                 )
         for label, value in (
             ('publish_rate_hz', self.publish_rate_hz),
+            ('a_release_grace_sec', self.a_release_grace_sec),
             ('joy_timeout_sec', self.joy_timeout_sec),
             ('inference_timeout_sec', self.inference_timeout_sec),
             ('inference_rpc_timeout_sec', self.inference_rpc_timeout_sec),
@@ -355,9 +361,10 @@ class FrontCamPolicyNode(Node):
         with self._lock:
             self._joy_valid = True
             self._last_joy_monotonic = now
-            action = self._toggle.observe(
+            action = self._drive_gate.observe(
                 pressed=pressed,
                 can_enable=self._can_enable_locked(now),
+                now_monotonic=now,
             )
             if action == ToggleAction.ENABLED:
                 self._policy.reset_history()
@@ -371,17 +378,16 @@ class FrontCamPolicyNode(Node):
                 self._awaiting_post_reset_prediction = False
                 self._history_reset_monotonic = None
         if action == ToggleAction.ENABLED:
-            self.get_logger().warning('AI motion toggled ON by A button.')
+            self.get_logger().warning('AI motion enabled while A is held.')
         elif action == ToggleAction.DISABLED:
             self._publish_stop()
             self._publish_enabled(False)
-            self.get_logger().warning('AI motion toggled OFF by A button.')
+            self.get_logger().warning('AI motion disabled after A release.')
         elif action == ToggleAction.REJECTED:
             self._publish_stop()
             self.get_logger().warning(
-                'A toggle rejected because motion prerequisites are not '
-                'ready; '
-                'release and press A again.',
+                'A hold rejected because motion prerequisites are not ready; '
+                'release A, then hold it again.',
                 throttle_duration_sec=1.0,
             )
 
@@ -491,7 +497,7 @@ class FrontCamPolicyNode(Node):
             self._refresh_graph(now)
         with self._lock:
             reason = self._unsafe_reason_locked(now)
-            if reason is None and self._toggle.enabled:
+            if reason is None and self._drive_gate.enabled:
                 prediction = self._prediction
                 if prediction is not None:
                     self._stop_reason = None
@@ -588,7 +594,7 @@ class FrontCamPolicyNode(Node):
 
     def _force_off(self, reason: str) -> None:
         with self._lock:
-            was_enabled = self._toggle.fault()
+            was_enabled = self._drive_gate.fault()
             changed_reason = reason != self._stop_reason
             self._stop_reason = reason
             self._awaiting_post_reset_prediction = False
@@ -622,7 +628,7 @@ class FrontCamPolicyNode(Node):
         self._shutdown_started = True
         with self._frame_condition:
             self._worker_stop = True
-            self._toggle.fault()
+            self._drive_gate.fault()
             self._frame_condition.notify_all()
         self.publish_stop_burst()
         self._publish_enabled(False)

@@ -14,15 +14,17 @@ adapter가 `×0.4`로 변환한 driver command `-40..40`만
 
 ## 동작 계약
 
-- 시작 상태는 항상 OFF다. 시작 후 A를 한 번 놓은 다음 누르면 ON, 다시 누르면
-  OFF가 되는 상승 edge toggle이다. A를 계속 누르고 있는 것은 추가 toggle이 아니다.
+- 시작 상태는 항상 OFF다. A를 누르는 동안에만 DRIVE ON이고 놓으면 DRIVE OFF다.
+  실측된 controller의 빠른 `1/0` 반복 입력이 주행을 끊지 않도록 마지막 A press 뒤
+  `a_release_grace_sec: 0.12` 이내의 짧은 false pulse는 무시한다. 실제 release가
+  계속되면 grace가 지난 첫 제어 주기에 OFF가 된다.
 - 추론은 OFF 상태에서도 최신 camera frame으로 계속 수행한다. ON 상태에서만 최신
   유효 예측을 motor command로 사용하고, OFF 상태에서는 `[0, 0]`을 발행한다.
 - AR artifact는 `(angle=0, speed=25)` class 네 쌍으로 history를 시작하고 성공한
   schema v2에서는 argmax 예측, schema v3에서는 실제 motor에 발행된 명령만
   queue에 추가한다. 추론됐지만 발행되지 않은 명령은 v3 history에 넣지 않는다.
   추론 실패 또는 성공한 추론 사이가 0.25초 이상 벌어지면 초기 history로 reset한다.
-- A 버튼으로 ON이 되는 순간에도 AR history와 저장된 예측을 reset한다. reset 뒤
+- A hold로 ON이 되는 순간에도 AR history와 저장된 예측을 reset한다. reset 뒤
   새 camera frame의 첫 예측이 완료될 때까지 motor output은 `[0, 0]`을 유지한다.
 - 새 증분 수집 기본은 schema v1 stateless artifact다. AR schema v2/v3 경로는
   rollback 호환성만 유지하며 새 split이나 기본 실행 예시에 사용하지 않는다.
@@ -38,12 +40,12 @@ adapter가 `×0.4`로 변환한 driver command `-40..40`만
   participant GID를 가진 unnamed publisher/subscriber 쌍만 bridge로 인정한다.
   이름 없는 publisher 하나만 있거나 participant가 다른 경우와 `gamepad_teleop`을
   포함한 그 밖의 publisher는 계속 fail-closed로 주행을 차단한다.
-- 기본 launch의 `allow_motion:=true`는 A toggle 후 실제로 움직일 수 있다.
+- 기본 launch의 `allow_motion:=true`는 A를 누르는 동안 실제로 움직일 수 있다.
   `allow_motion:=false`는 nonzero command를 차단하는 점검용 gate지만 node 자체가
   motor publisher이므로 실행 전 승인 규칙은 그대로 적용된다.
 
 상태 확인용 `/front_cam_policy/prediction`은 `[angle, speed, inference_ms]`,
-`/front_cam_policy/enabled`는 현재 toggle 상태를 발행한다. 이 debug topic을
+`/front_cam_policy/enabled`는 현재 A hold drive gate 상태를 발행한다. 이 debug topic을
 실제 motor command의 대체 계약으로 사용하지 않는다.
 
 ## Model artifact
@@ -206,6 +208,7 @@ artifact는 manifest에 정규화 source 사다리꼴, BEV 크기와 destination
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 /home/xytron/.local/bin/uv run --locked xycar-export-policy \
   --checkpoint artifacts/runs/front_cam_policy/<stateless-run>/best.pt \
+  --promotion-report artifacts/runs/front_cam_policy/<stateless-run>/promotion_gate.json \
   --artifact-id <schema-v1-stateless-artifact-id> \
   --require-schema-version 1
 
@@ -215,6 +218,9 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw
 ```
 
 `deploy_model.sh`는 versioned artifact만 배포하며 ROS node를 실행하지 않는다.
+G1 이상에서 `--promotion-report`는 선택 사항이며 `passed`, `failed` 또는 report를
+생략한 `not_evaluated` 상태가 manifest에 기록된다. offline 결과는 export와 배포를
+차단하지 않으므로 실차 시험 전에 해당 상태와 실패 항목을 직접 확인한다.
 
 ## Build와 테스트
 
@@ -238,7 +244,7 @@ benchmark에서 전처리 포함 steady-state p95는 11.802 ms였다. 이는 20 
 
 아래 명령들은 camera device와 motor publisher를 시작할 수 있으므로 매 실행 직전
 사용자 승인이 필요하다. 승인 후에도 바퀴를 지면에서 분리하거나 안전 공간을
-확보하고, `Ctrl+C`와 게임패드 A 재입력으로 정지할 수 있는지 먼저 확인한다.
+확보하고, `Ctrl+C`와 게임패드 A release로 정지할 수 있는지 먼저 확인한다.
 동시에 `gamepad_teleop`, 다른 drive node 또는 motor publisher를 실행하지 않는다.
 
 camera와 game controller까지 함께 시작하는 기본 실행:

@@ -17,6 +17,9 @@ front_cam_policy:
 
     # Remote Gamepad A button, verified through game_controller_node.
     a_button_index: 0
+    # The controller emits short false pulses while A is physically held.
+    # Keep motion enabled through those pulses, but stop after stable release.
+    a_release_grace_sec: 0.12
     allow_motion: true
 
     # Inference runs on every available latest frame. Motor commands and
