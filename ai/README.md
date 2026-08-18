@@ -369,6 +369,40 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
   --image datasets/teleop/<session-id>/Images/<image-file>
 ```
 
+### Jetson 실시간 camera 튜닝
+
+실제 장착 시점의 영상을 기준으로 맞출 때는 활성 차량 `xycar-gpu`의 ROS package에
+포함된 `live_warp_tuner.launch.py`를 사용한다. 이 launch는 motor publisher나
+gamepad를 시작하지 않지만 기본값 `use_camera:=true`가 실제 camera device를
+여므로 매 실행 직전 사용자 승인이 필요하다. GUI 조작과 실행 명령은
+`src/xycar_ai_drive/README.md`를 따른다. `S`로 저장되는 차량 파일은 tracked source가
+아닌 다음 경로다.
+
+```text
+/home/xytron/.config/xycar/front_cam_policy_preprocess.yaml
+```
+
+튜닝을 마치면 개발 Laptop에서 임시 파일로 받아 차이를 확인한 뒤에만 학습 YAML에
+반영한다. 아래 명령은 차량 checkout을 변경하지 않는다.
+
+```bash
+cd /home/xytron/xycar_ws/apps/xycar_ws_mgw
+scp xytron@xycar-gpu:/home/xytron/.config/xycar/front_cam_policy_preprocess.yaml \
+  /tmp/xycar-front_cam_policy_preprocess.yaml
+diff -u ai/config/front_cam_policy_preprocess.yaml \
+  /tmp/xycar-front_cam_policy_preprocess.yaml
+cp /tmp/xycar-front_cam_policy_preprocess.yaml \
+  ai/config/front_cam_policy_preprocess.yaml
+cd ai
+/home/xytron/.local/bin/uv run --locked xycar-train \
+  --config config/front_cam_policy_train_small_warp.yaml \
+  --validate-only
+```
+
+`diff`가 0이 아닌 종료 코드를 반환하는 것은 parameter 변경이 보였다는 뜻이며
+그 자체가 복사 실패는 아니다. 학습을 시작한 뒤에는 기존 오프라인 절차와 같이
+warp YAML을 바꾸지 않는다.
+
 warp parameter를 저장한 뒤에는 학습 중 바꾸지 않는다. checkpoint에는 parameter
 전체와 SHA-256이 들어가며 YAML이 달라진 상태에서는 resume을 거부한다. warp
 checkpoint를 export하면 같은 parameter가 artifact manifest에 들어가고 차량

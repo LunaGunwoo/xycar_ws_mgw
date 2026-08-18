@@ -43,6 +43,11 @@ from xycar_ai_drive.policy_runtime import (
     TorchScriptPolicy,
     preprocess_rgb_frame,
 )
+from xycar_ai_drive.road_warp import (
+    load_road_warp_config,
+    save_road_warp_config,
+    warp_road_image,
+)
 from xycar_ai_drive.steering_contract import (
     NORMALIZED_STEERING_CONTRACT,
     parse_steering_contract,
@@ -905,6 +910,68 @@ def test_road_warp_artifact_and_runtime_preprocessing(tmp_path):
     _write_checksums(artifact)
     with pytest.raises(ArtifactContractError, match='sha256 mismatch'):
         load_policy_artifact(artifact)
+
+
+def test_live_warp_tuning_yaml_round_trip_and_runtime_geometry(tmp_path):
+    config = RoadWarpParameters(
+        top_y=0.0,
+        bottom_y=1.0,
+        top_left_x=0.0,
+        top_right_x=1.0,
+        bottom_left_x=0.0,
+        bottom_right_x=1.0,
+        bev_width=80,
+        bev_height=60,
+        dst_left_x=0.0,
+        dst_right_x=1.0,
+    )
+    output_path = tmp_path / 'nested' / 'warp.yaml'
+    assert save_road_warp_config(output_path, config) == output_path.resolve()
+    assert load_road_warp_config(output_path) == config
+
+    payload = yaml.safe_load(output_path.read_text(encoding='utf-8'))
+    assert payload['schema_version'] == 1
+    assert tuple(payload['warp']) == (
+        'top_y',
+        'bottom_y',
+        'top_left_x',
+        'top_right_x',
+        'bottom_left_x',
+        'bottom_right_x',
+        'bev_width',
+        'bev_height',
+        'dst_left_x',
+        'dst_right_x',
+    )
+    frame = np.arange(60 * 80 * 3, dtype=np.uint8).reshape(60, 80, 3)
+    assert np.array_equal(warp_road_image(frame, config), frame)
+
+
+def test_live_warp_tuning_yaml_rejects_invalid_geometry(tmp_path):
+    output_path = tmp_path / 'warp.yaml'
+    output_path.write_text(
+        yaml.safe_dump(
+            {
+                'schema_version': 1,
+                'warp': {
+                    'top_y': 0.99,
+                    'bottom_y': 1.0,
+                    'top_left_x': 0.34,
+                    'top_right_x': 0.66,
+                    'bottom_left_x': 0.0,
+                    'bottom_right_x': 1.0,
+                    'bev_width': 224,
+                    'bev_height': 200,
+                    'dst_left_x': 0.0,
+                    'dst_right_x': 1.0,
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding='utf-8',
+    )
+    with pytest.raises(ValueError, match='at least 0.02 below'):
+        load_road_warp_config(output_path)
 
 
 def _write_checksums(artifact):

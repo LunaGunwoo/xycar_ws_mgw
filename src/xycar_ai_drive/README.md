@@ -69,6 +69,60 @@ schema v3는 같은 tensor shape를 사용하지만 history source를 실제 실
 강제한다. CPU thread 8개로 model을 load하고 3회 warm-up한다. artifact 생성과 배포는 개발
 Laptop의 MGW root에서 수행한다.
 
+## Jetson 실시간 road-warp 튜너
+
+`live_warp_tuner`는 `/image_raw`를 sensor QoS로 구독해 현재 원본 영상의 source
+사다리꼴과 perspective BEV 결과를 나란히 보여 준다. 별도 control 창의 trackbar를
+움직이면 즉시 두 preview에 반영된다. 비율 parameter는 GUI에서 `x1000` 정수로
+표시되므로 예를 들어 `top_y x1000=500`은 YAML의 `top_y: 0.5`다.
+`bev_width`와 `bev_height`는 pixel 정수 그대로 표시한다.
+
+- `Space`: 현재 frame 일시정지/실시간 영상 복귀
+- `S`: 현재 유효 parameter를 YAML로 저장
+- `R`: 마지막 저장값으로 preview 초기화
+- `Q` 또는 `Esc`: 종료
+
+이 노드는 Joy를 구독하거나 motor topic을 publish하지 않는다. 다만 아래 기본
+launch는 실제 camera device를 여므로 **매 실행 직전 사용자 승인이 필요하다.**
+Jetson의 local GNOME desktop 또는 `docs/jetson_operations.md`에 설명한 RDP 공유
+화면의 terminal에서 실행한다. 다른 process가 camera를 사용하지 않는지도 먼저
+확인한다.
+
+```bash
+cd /home/xytron/xycar_ws_mgw
+source /opt/ros/humble/setup.bash
+source /home/xytron/xycar_ws_mgw/install/setup.bash
+export ROS_DOMAIN_ID=7
+export ROS_NAMESPACE=xycar
+ros2 launch xycar_ai_drive live_warp_tuner.launch.py use_camera:=true
+```
+
+이미 `/image_raw` publisher가 실행 중일 때만 device 중복 접근을 피하도록
+`use_camera:=false`를 쓴다.
+
+```bash
+ros2 launch xycar_ai_drive live_warp_tuner.launch.py use_camera:=false
+```
+
+기존 publisher를 재사용하면서 launch 없이 tuner node만 실행할 수도 있다. 이
+명령 자체는 camera driver를 시작하지 않는다.
+
+```bash
+ros2 run xycar_ai_drive live_warp_tuner --ros-args \
+  -p camera_topic:=/image_raw \
+  -p initial_config_path:=/home/xytron/xycar_ws_mgw/ai/config/front_cam_policy_preprocess.yaml \
+  -p output_config_path:=/home/xytron/.config/xycar/front_cam_policy_preprocess.yaml
+```
+
+초기값은 checkout의 read-only 학습 설정
+`/home/xytron/xycar_ws_mgw/ai/config/front_cam_policy_preprocess.yaml`에서 읽는다.
+차량 checkout을 수정하지 않도록 `S`의 기본 출력은
+`/home/xytron/.config/xycar/front_cam_policy_preprocess.yaml`이다. 출력이 이미
+있으면 다음 실행에서는 그 값을 이어서 연다. 다른 topic이나 경로가 필요하면
+`camera_topic:=...`, `initial_config_path:=...`, `output_config_path:=...` launch
+인자로 명시한다. 저장한 값을 학습 source에 반영하는 절차는 `ai/README.md`를
+따른다.
+
 ## 사람 보정 데이터 수집
 
 `guided_policy_collector`는 모델의 angle/speed 두 head를 한 번에 추론한다. RB를

@@ -12,6 +12,7 @@ import numpy as np
 
 from xycar_ai_drive.artifact import RoadWarpParameters, load_policy_artifact
 from xycar_ai_drive.control import DriveCommand, decode_class_ids
+from xycar_ai_drive.road_warp import warp_road_image
 
 
 class PolicyRuntimeError(RuntimeError):
@@ -297,37 +298,7 @@ def _warp_road_image(
     rgb_frame: np.ndarray,
     config: RoadWarpParameters,
 ) -> np.ndarray:
-    height, width = rgb_frame.shape[:2]
-    max_x = float(width - 1)
-    max_y = float(height - 1)
-    source = np.asarray(
-        [
-            [config.bottom_left_x * max_x, config.bottom_y * max_y],
-            [config.top_left_x * max_x, config.top_y * max_y],
-            [config.top_right_x * max_x, config.top_y * max_y],
-            [config.bottom_right_x * max_x, config.bottom_y * max_y],
-        ],
-        dtype=np.float32,
-    )
-    output_max_x = float(config.bev_width - 1)
-    output_max_y = float(config.bev_height - 1)
-    left = config.dst_left_x * output_max_x
-    right = config.dst_right_x * output_max_x
-    destination = np.asarray(
-        [
-            [left, output_max_y],
-            [left, 0.0],
-            [right, 0.0],
-            [right, output_max_y],
-        ],
-        dtype=np.float32,
-    )
-    transform = cv2.getPerspectiveTransform(source, destination)
-    return cv2.warpPerspective(
-        rgb_frame,
-        transform,
-        (config.bev_width, config.bev_height),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(0, 0, 0),
-    )
+    try:
+        return warp_road_image(rgb_frame, config)
+    except ValueError as exc:
+        raise PolicyRuntimeError(f'invalid road warp: {exc}') from exc

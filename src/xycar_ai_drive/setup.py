@@ -58,6 +58,10 @@ setup(
                 'competition_replay = '
                 'xycar_ai_drive.competition_replay:main'
             ),
+            (
+                'live_warp_tuner = '
+                'xycar_ai_drive.live_warp_tuner:main'
+            ),
         ],
     },
 )
