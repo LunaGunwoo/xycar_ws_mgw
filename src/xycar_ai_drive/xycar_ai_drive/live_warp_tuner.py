@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-import threading
 import time
+import tkinter as tk
+from dataclasses import fields
 from pathlib import Path
+from tkinter import messagebox, ttk
 
-import cv2
 import numpy as np
 import rclpy
 from cv_bridge import CvBridge
+from PIL import Image as PilImage
+from PIL import ImageTk
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
@@ -19,6 +22,7 @@ from xycar_ai_drive.road_warp import (
     draw_road_warp_overlay,
     load_road_warp_config,
     road_warp_from_mapping,
+    road_warp_values,
     save_road_warp_config,
     warp_road_image,
 )
@@ -30,29 +34,24 @@ DEFAULT_INITIAL_CONFIG = (
 DEFAULT_OUTPUT_CONFIG = (
     '/home/xytron/.config/xycar/front_cam_policy_preprocess.yaml'
 )
-PREVIEW_WINDOW = 'Xycar live road-warp preview'
-CONTROL_WINDOW = 'Xycar road-warp controls'
-PANEL_WIDTH = 640
-PANEL_HEIGHT = 480
-HEADER_HEIGHT = 92
-
-# Trackbar value = position / scale. Integer dimensions use scale 1.
-TRACKBAR_SPECS: dict[str, tuple[float, float, int]] = {
-    'top_y': (0.0, 1.0, 1000),
-    'bottom_y': (0.0, 1.0, 1000),
-    'top_left_x': (0.0, 1.0, 1000),
-    'top_right_x': (0.0, 1.0, 1000),
-    'bottom_left_x': (0.0, 1.0, 1000),
-    'bottom_right_x': (0.0, 1.0, 1000),
-    'bev_width': (80.0, 1920.0, 1),
-    'bev_height': (60.0, 1080.0, 1),
-    'dst_left_x': (0.0, 0.49, 1000),
-    'dst_right_x': (0.51, 1.0, 1000),
+FLOAT_PARAMETERS = {
+    'top_y': (0.0, 1.0, 0.001),
+    'bottom_y': (0.0, 1.0, 0.001),
+    'top_left_x': (0.0, 1.0, 0.001),
+    'top_right_x': (0.0, 1.0, 0.001),
+    'bottom_left_x': (0.0, 1.0, 0.001),
+    'bottom_right_x': (0.0, 1.0, 0.001),
+    'dst_left_x': (0.0, 0.49, 0.001),
+    'dst_right_x': (0.51, 1.0, 0.001),
+}
+INTEGER_PARAMETERS = {
+    'bev_width': (80, 1920, 1),
+    'bev_height': (60, 1080, 1),
 }
 
 
 class LiveWarpTunerNode(Node):
-    """ROS subscriber with an OpenCV GUI and explicit config saving."""
+    """Subscribe to the camera without creating Joy or motor endpoints."""
 
     def __init__(self) -> None:
         super().__init__('live_warp_tuner')
@@ -73,20 +72,16 @@ class LiveWarpTunerNode(Node):
             raise ValueError('initial_config_path must not be empty')
         if not output_path_text:
             raise ValueError('output_config_path must not be empty')
+
         initial_path = Path(initial_path_text).expanduser()
         self.output_path = Path(output_path_text).expanduser()
-
         load_path = self.output_path if self.output_path.is_file() else initial_path
-        self._saved = load_road_warp_config(load_path)
+        self.initial_config = load_road_warp_config(load_path)
+        self.loaded_config_path = load_path
+        self.latest_frame: np.ndarray | None = None
+        self.latest_frame_monotonic: float | None = None
+        self.latest_sequence = 0
         self._bridge = CvBridge()
-        self._frame_lock = threading.Lock()
-        self._latest_frame: np.ndarray | None = None
-        self._latest_frame_monotonic: float | None = None
-        self._frozen_frame: np.ndarray | None = None
-        self._last_error = ''
-        self._running = True
-
-        self._create_windows(self._saved)
         self.camera_subscription = self.create_subscription(
             Image,
             self.camera_topic,
@@ -98,37 +93,6 @@ class LiveWarpTunerNode(Node):
             f'camera={self.camera_topic}, initial={load_path}, '
             f'output={self.output_path}'
         )
-
-    @property
-    def running(self) -> bool:
-        return self._running
-
-    def _create_windows(self, config: RoadWarpParameters) -> None:
-        cv2.namedWindow(PREVIEW_WINDOW, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(
-            PREVIEW_WINDOW,
-            PANEL_WIDTH * 2,
-            PANEL_HEIGHT + HEADER_HEIGHT,
-        )
-        cv2.namedWindow(CONTROL_WINDOW, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(CONTROL_WINDOW, 520, 680)
-        for name, (minimum, maximum, scale) in TRACKBAR_SPECS.items():
-            label = _trackbar_label(name, scale)
-            value = float(getattr(config, name))
-            position = int(round(value * scale))
-            limit = int(round(maximum * scale))
-            cv2.createTrackbar(
-                label,
-                CONTROL_WINDOW,
-                position,
-                limit,
-                lambda _value: None,
-            )
-            cv2.setTrackbarMin(
-                label,
-                CONTROL_WINDOW,
-                int(round(minimum * scale)),
-            )
 
     def _on_camera(self, message: Image) -> None:
         try:
@@ -146,209 +110,288 @@ class LiveWarpTunerNode(Node):
         except Exception as exc:
             self.get_logger().warning(f'camera conversion failed: {exc}')
             return
-        with self._frame_lock:
-            self._latest_frame = frame
-            self._latest_frame_monotonic = time.monotonic()
+        self.latest_frame = frame
+        self.latest_frame_monotonic = time.monotonic()
+        self.latest_sequence += 1
 
-    def render_once(self) -> None:
-        frame, frame_age = self._display_frame()
-        if frame is None:
-            canvas = np.zeros(
-                (PANEL_HEIGHT + HEADER_HEIGHT, PANEL_WIDTH * 2, 3),
-                dtype=np.uint8,
-            )
-            _put_line(
-                canvas,
-                f'Waiting for camera frames on {self.camera_topic}',
-                34,
-                (0, 200, 255),
-            )
-            _put_line(
-                canvas,
-                'S save | R reset | Space pause/live | Q/Esc quit',
-                68,
-                (220, 220, 220),
-            )
-            cv2.imshow(PREVIEW_WINDOW, canvas)
-            return
 
+class LiveWarpTunerApplication:
+    """Existing offline tuner layout backed by the latest ROS camera frame."""
+
+    def __init__(self, node: LiveWarpTunerNode) -> None:
+        self.node = node
+        self.saved = node.initial_config
+        self.pending_values = road_warp_values(self.saved)
+        self.frozen_frame: np.ndarray | None = None
+        self.closed = False
+        self.root = tk.Tk()
+        self.root.title('Xycar front-camera road warp tuner (LIVE)')
+        self.root.geometry('1420x860')
+        self.root.minsize(1100, 720)
+        self.root.protocol('WM_DELETE_WINDOW', self.close)
+        self.variables: dict[str, tk.DoubleVar | tk.IntVar] = {}
+        self.dimension_inputs: dict[str, tk.StringVar] = {}
+        self._original_photo: ImageTk.PhotoImage | None = None
+        self._warped_photo: ImageTk.PhotoImage | None = None
+        self._last_preview_signature: tuple[object, ...] | None = None
+        self._build_layout()
+        self._bind_keys()
+        self._sync_controls_from_state()
+        self._schedule_update()
+
+    def run(self) -> None:
+        self.root.mainloop()
+
+    def _build_layout(self) -> None:
+        outer = ttk.Frame(self.root, padding=12)
+        outer.pack(fill=tk.BOTH, expand=True)
+        preview = ttk.Frame(outer)
+        preview.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        controls = ttk.Frame(outer, padding=(16, 0, 0, 0), width=420)
+        controls.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.original_title = ttk.Label(preview, text='LIVE original + road ROI')
+        self.original_title.pack(anchor=tk.W)
+        self.original_label = ttk.Label(preview, anchor=tk.CENTER)
+        self.original_label.pack(fill=tk.BOTH, expand=True, pady=(4, 12))
+        ttk.Label(
+            preview,
+            text='Warped road output (training then resizes this to 224x224)',
+        ).pack(anchor=tk.W)
+        self.warped_label = ttk.Label(preview, anchor=tk.CENTER)
+        self.warped_label.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+
+        ttk.Label(
+            controls,
+            text='Perspective warp parameters',
+            font=('TkDefaultFont', 14, 'bold'),
+        ).pack(anchor=tk.W, pady=(0, 4))
+        ttk.Label(
+            controls,
+            text=(
+                'Live preview changes are not written until Save YAML '
+                'is pressed.'
+            ),
+            wraplength=390,
+        ).pack(anchor=tk.W, pady=(0, 8))
+
+        parameter_frame = ttk.Frame(controls)
+        parameter_frame.pack(fill=tk.X)
+        for field in fields(RoadWarpParameters):
+            name = field.name
+            row = ttk.Frame(parameter_frame)
+            row.pack(fill=tk.X, pady=2)
+            ttk.Label(row, text=name, width=18).pack(side=tk.LEFT)
+            if name in INTEGER_PARAMETERS:
+                minimum, maximum, resolution = INTEGER_PARAMETERS[name]
+                variable: tk.DoubleVar | tk.IntVar = tk.IntVar()
+            else:
+                minimum, maximum, resolution = FLOAT_PARAMETERS[name]
+                variable = tk.DoubleVar()
+            self.variables[name] = variable
+            scale = tk.Scale(
+                row,
+                from_=minimum,
+                to=maximum,
+                resolution=resolution,
+                orient=tk.HORIZONTAL,
+                showvalue=True,
+                variable=variable,
+                command=lambda _value, field_name=name: (
+                    self._parameter_changed(field_name)
+                ),
+                length=185 if name in INTEGER_PARAMETERS else 235,
+            )
+            scale.pack(side=tk.RIGHT, fill=tk.X, expand=True)
+            if name in INTEGER_PARAMETERS:
+                dimension_input = tk.StringVar()
+                self.dimension_inputs[name] = dimension_input
+                entry = ttk.Entry(row, textvariable=dimension_input, width=6)
+                entry.pack(side=tk.RIGHT, padx=(4, 0))
+                entry.bind(
+                    '<Return>',
+                    lambda _event, field_name=name: (
+                        self._dimension_changed(field_name)
+                    ),
+                )
+
+        action_row = ttk.Frame(controls)
+        action_row.pack(fill=tk.X, pady=(12, 4))
+        ttk.Button(action_row, text='Save YAML', command=self.save).pack(
+            side=tk.LEFT,
+            expand=True,
+            fill=tk.X,
+        )
+        ttk.Button(action_row, text='Reset', command=self.reset).pack(
+            side=tk.LEFT,
+            expand=True,
+            fill=tk.X,
+            padx=(8, 0),
+        )
+        ttk.Button(
+            controls,
+            text='Pause current frame',
+            command=self.toggle_pause,
+        ).pack(fill=tk.X, pady=4)
+        ttk.Button(controls, text='Quit', command=self.close).pack(
+            fill=tk.X,
+            pady=(0, 8),
+        )
+        self.status = ttk.Label(controls, wraplength=390, justify=tk.LEFT)
+        self.status.pack(anchor=tk.W, fill=tk.X)
+        ttk.Label(
+            controls,
+            text='Keys: S save | R reset | Space pause/live | Q/Esc quit',
+            wraplength=390,
+        ).pack(anchor=tk.W, side=tk.BOTTOM, pady=(12, 0))
+
+    def _bind_keys(self) -> None:
+        self.root.bind('<Escape>', lambda _event: self.close())
+        self.root.bind('q', lambda _event: self.close())
+        self.root.bind('s', lambda _event: self.save())
+        self.root.bind('r', lambda _event: self.reset())
+        self.root.bind('<space>', lambda _event: self.toggle_pause())
+
+    def _sync_controls_from_state(self) -> None:
+        for name, value in self.pending_values.items():
+            self.variables[name].set(value)
+            if name in self.dimension_inputs:
+                self.dimension_inputs[name].set(str(value))
+
+    def _parameter_changed(self, field_name: str) -> None:
+        variable = self.variables[field_name]
+        value: float | int
+        if field_name in INTEGER_PARAMETERS:
+            value = int(variable.get())
+        else:
+            value = float(variable.get())
+        self.pending_values[field_name] = value
+        if field_name in self.dimension_inputs:
+            self.dimension_inputs[field_name].set(str(value))
+        self._last_preview_signature = None
+        self.refresh_preview()
+
+    def _dimension_changed(self, field_name: str) -> None:
+        input_variable = self.dimension_inputs[field_name]
+        minimum, maximum, _resolution = INTEGER_PARAMETERS[field_name]
         try:
-            config = self._pending_config()
+            value = int(input_variable.get().strip())
+        except ValueError:
+            value = -1
+        if not minimum <= value <= maximum:
+            messagebox.showerror(
+                'Invalid warp dimension',
+                f'{field_name} must be a whole number from {minimum} to '
+                f'{maximum}.',
+            )
+            input_variable.set(str(self.pending_values[field_name]))
+            return
+        self.variables[field_name].set(value)
+        self.pending_values[field_name] = value
+        self._last_preview_signature = None
+        self.refresh_preview()
+
+    def _schedule_update(self) -> None:
+        if self.closed:
+            return
+        rclpy.spin_once(self.node, timeout_sec=0.0)
+        self.refresh_preview()
+        self.root.after(15, self._schedule_update)
+
+    def refresh_preview(self) -> None:
+        live_frame = self.node.latest_frame
+        frame = self.frozen_frame if self.frozen_frame is not None else live_frame
+        if frame is None:
+            self.status.configure(
+                text=f'Waiting for camera frames on {self.node.camera_topic}'
+            )
+            return
+        signature = (
+            self.node.latest_sequence if self.frozen_frame is None else 'paused',
+            tuple(self.pending_values.items()),
+            int(self._frame_age() * 10),
+        )
+        if signature == self._last_preview_signature:
+            return
+        try:
+            config = road_warp_from_mapping(self.pending_values)
             overlay = draw_road_warp_overlay(frame, config)
             warped = warp_road_image(frame, config)
-            self._last_error = ''
-        except ValueError as exc:
-            config = None
-            overlay = frame.copy()
-            warped = np.zeros((PANEL_HEIGHT, PANEL_WIDTH, 3), dtype=np.uint8)
-            self._last_error = str(exc)
+            self._original_photo = _photo_for_panel(overlay, (760, 390))
+            self._warped_photo = _photo_for_panel(warped, (760, 330))
+            self.original_label.configure(image=self._original_photo)
+            self.warped_label.configure(image=self._warped_photo)
+            mode = 'PAUSED' if self.frozen_frame is not None else 'LIVE'
+            state = 'UNSAVED preview' if config != self.saved else 'saved'
+            age = self._frame_age()
+            freshness = f'{age:.2f}s old'
+            if age > 1.0:
+                freshness = f'STALE ({freshness})'
+            self.status.configure(
+                text=(
+                    f'{mode} | {state} | frame {freshness}\n'
+                    f'Camera: {self.node.camera_topic}\n'
+                    f'Output: {self.node.output_path}'
+                )
+            )
+            self._last_preview_signature = signature
+        except (TypeError, ValueError) as exc:
+            self.status.configure(text=f'Invalid preview: {exc}')
 
-        left = _fit_panel(overlay)
-        right = _fit_panel(warped)
-        canvas = np.zeros(
-            (PANEL_HEIGHT + HEADER_HEIGHT, PANEL_WIDTH * 2, 3),
-            dtype=np.uint8,
-        )
-        canvas[HEADER_HEIGHT:, :PANEL_WIDTH] = left
-        canvas[HEADER_HEIGHT:, PANEL_WIDTH:] = right
-        cv2.line(
-            canvas,
-            (PANEL_WIDTH, HEADER_HEIGHT),
-            (PANEL_WIDTH, canvas.shape[0]),
-            (90, 90, 90),
-            1,
-        )
-        mode = 'PAUSED' if self._frozen_frame is not None else 'LIVE'
-        changed = config is None or config != self._saved
-        save_state = 'UNSAVED' if changed else 'saved'
-        freshness = f'frame age {frame_age:.2f}s'
-        if frame_age > 1.0:
-            freshness = f'STALE {freshness}'
-        _put_line(
-            canvas,
-            f'{mode} | {save_state} | {freshness}',
-            28,
-            (0, 220, 255) if changed else (120, 230, 120),
-        )
-        _put_line(
-            canvas,
-            'S save | R reset | Space pause/live | Q/Esc quit',
-            58,
-            (220, 220, 220),
-        )
-        detail = self._last_error or f'Output: {self.output_path}'
-        _put_line(
-            canvas,
-            detail,
-            84,
-            (80, 80, 255) if self._last_error else (170, 170, 170),
-            scale=0.48,
-        )
-        _put_line(canvas, 'Original + source ROI', HEADER_HEIGHT + 25)
-        _put_line(
-            canvas,
-            'Warped BEV preview',
-            HEADER_HEIGHT + 25,
-            x=PANEL_WIDTH + 14,
-        )
-        cv2.imshow(PREVIEW_WINDOW, canvas)
+    def _frame_age(self) -> float:
+        received = self.node.latest_frame_monotonic
+        if received is None:
+            return 0.0
+        return max(0.0, time.monotonic() - received)
 
-    def handle_gui_events(self) -> None:
-        key = cv2.waitKey(1) & 0xFF
-        if key in (27, ord('q'), ord('Q')):
-            self._running = False
-        elif key in (ord('s'), ord('S')):
-            self._save()
-        elif key in (ord('r'), ord('R')):
-            self._reset()
-        elif key == ord(' '):
-            self._toggle_pause()
+    def save(self) -> None:
         try:
-            visible = cv2.getWindowProperty(
-                PREVIEW_WINDOW,
-                cv2.WND_PROP_VISIBLE,
-            )
-        except cv2.error:
-            visible = 0.0
-        if visible < 1.0:
-            self._running = False
-
-    def _display_frame(self) -> tuple[np.ndarray | None, float]:
-        with self._frame_lock:
-            latest = self._latest_frame
-            received = self._latest_frame_monotonic
-        selected = self._frozen_frame if self._frozen_frame is not None else latest
-        if selected is None or received is None:
-            return None, 0.0
-        return selected, max(0.0, time.monotonic() - received)
-
-    def _pending_config(self) -> RoadWarpParameters:
-        values: dict[str, float | int] = {}
-        for name, (_minimum, _maximum, scale) in TRACKBAR_SPECS.items():
-            position = cv2.getTrackbarPos(
-                _trackbar_label(name, scale),
-                CONTROL_WINDOW,
-            )
-            value = position / scale
-            values[name] = int(round(value)) if scale == 1 else float(value)
-        return road_warp_from_mapping(values)
-
-    def _save(self) -> None:
-        try:
-            config = self._pending_config()
-            saved_path = save_road_warp_config(self.output_path, config)
-        except (OSError, ValueError) as exc:
-            self._last_error = f'Save failed: {exc}'
-            self.get_logger().error(self._last_error)
+            config = road_warp_from_mapping(self.pending_values)
+            saved_path = save_road_warp_config(self.node.output_path, config)
+        except (OSError, TypeError, ValueError) as exc:
+            messagebox.showerror('Could not save warp YAML', str(exc))
             return
-        self._saved = config
-        self._last_error = ''
-        self.get_logger().info(f'Saved road warp config: {saved_path}')
+        self.saved = config
+        self.pending_values = road_warp_values(config)
+        self._last_preview_signature = None
+        self.node.get_logger().info(f'Saved road warp config: {saved_path}')
+        self.refresh_preview()
 
-    def _reset(self) -> None:
-        for name, (_minimum, _maximum, scale) in TRACKBAR_SPECS.items():
-            value = float(getattr(self._saved, name))
-            position = int(round(value * scale))
-            cv2.setTrackbarPos(
-                _trackbar_label(name, scale),
-                CONTROL_WINDOW,
-                position,
-            )
-        self._last_error = ''
-        self.get_logger().info('Reset preview to the last saved values')
+    def reset(self) -> None:
+        self.pending_values = road_warp_values(self.saved)
+        self._sync_controls_from_state()
+        self._last_preview_signature = None
+        self.refresh_preview()
+        self.node.get_logger().info('Reset preview to the last saved values')
 
-    def _toggle_pause(self) -> None:
-        if self._frozen_frame is not None:
-            self._frozen_frame = None
-            self.get_logger().info('Live preview resumed')
+    def toggle_pause(self) -> None:
+        if self.frozen_frame is not None:
+            self.frozen_frame = None
+            self.original_title.configure(text='LIVE original + road ROI')
+            self.node.get_logger().info('Live preview resumed')
+        elif self.node.latest_frame is not None:
+            self.frozen_frame = self.node.latest_frame.copy()
+            self.original_title.configure(text='PAUSED original + road ROI')
+            self.node.get_logger().info('Preview paused on the current frame')
+        self._last_preview_signature = None
+        self.refresh_preview()
+
+    def close(self) -> None:
+        if self.closed:
             return
-        with self._frame_lock:
-            if self._latest_frame is not None:
-                self._frozen_frame = self._latest_frame.copy()
-        if self._frozen_frame is not None:
-            self.get_logger().info('Preview paused on the current frame')
+        self.closed = True
+        self.root.destroy()
 
 
-def _fit_panel(image: np.ndarray) -> np.ndarray:
-    height, width = image.shape[:2]
-    scale = min(PANEL_WIDTH / width, PANEL_HEIGHT / height)
-    resized_width = max(1, int(round(width * scale)))
-    resized_height = max(1, int(round(height * scale)))
-    resized = cv2.resize(
-        image,
-        (resized_width, resized_height),
-        interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR,
-    )
-    panel = np.zeros((PANEL_HEIGHT, PANEL_WIDTH, 3), dtype=np.uint8)
-    x = (PANEL_WIDTH - resized_width) // 2
-    y = (PANEL_HEIGHT - resized_height) // 2
-    panel[y:y + resized_height, x:x + resized_width] = resized
-    return panel
-
-
-def _trackbar_label(name: str, scale: int) -> str:
-    return f'{name} x{scale}' if scale != 1 else name
-
-
-def _put_line(
-    image: np.ndarray,
-    text: str,
-    y: int,
-    color: tuple[int, int, int] = (255, 255, 255),
-    *,
-    x: int = 14,
-    scale: float = 0.62,
-) -> None:
-    cv2.putText(
-        image,
-        text,
-        (x, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        scale,
-        color,
-        1,
-        cv2.LINE_AA,
-    )
+def _photo_for_panel(
+    bgr_image: np.ndarray,
+    bounds: tuple[int, int],
+) -> ImageTk.PhotoImage:
+    rgb_image = np.ascontiguousarray(bgr_image[:, :, ::-1])
+    image = PilImage.fromarray(rgb_image)
+    resampling = getattr(PilImage, 'Resampling', PilImage)
+    image.thumbnail(bounds, resampling.LANCZOS)
+    return ImageTk.PhotoImage(image)
 
 
 def main(args: list[str] | None = None) -> int:
@@ -356,14 +399,11 @@ def main(args: list[str] | None = None) -> int:
     node: LiveWarpTunerNode | None = None
     try:
         node = LiveWarpTunerNode()
-        while rclpy.ok() and node.running:
-            rclpy.spin_once(node, timeout_sec=0.01)
-            node.render_once()
-            node.handle_gui_events()
+        application = LiveWarpTunerApplication(node)
+        application.run()
     except KeyboardInterrupt:
         pass
     finally:
-        cv2.destroyAllWindows()
         if node is not None:
             node.destroy_node()
         if rclpy.ok():

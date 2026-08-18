@@ -37,8 +37,11 @@ packages=(
     patch
     python3-colcon-common-extensions
     python3-opencv
+    python3-pil
+    python3-pil.imagetk
     python3-rosdep
     python3-serial
+    python3-tk
     python3-torch
     python3-vcstool
     python3-wxgtk4.0

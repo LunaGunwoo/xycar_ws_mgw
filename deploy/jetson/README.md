@@ -47,6 +47,8 @@ package를 교체하지 않는다. module은 `/lib/modules/.../updates/xycar/`�
 재부팅 때 자동 load된다. 검증된 kernel release와 다르면 설치를 중단한다.
 같은 script가 설치하는 camera udev 규칙은 USB 장치의 V4L2 index 0 capture node만
 `/dev/videoCAM`에 연결하며 index 1 보조 node는 제외한다.
+실시간 warp tuner의 기존 GUI layout을 위해 `python3-tk`, `python3-pil`과
+`python3-pil.imagetk`도 host dependency로 설치한다.
 
 GC300이 연결된 상태에서 `/dev/input/js0`와 ROS Joy 메시지는 다음처럼 확인한다.
 실제 USB gamepad 접근이므로 하네스의 매 실행 전 승인 규칙을 적용한다.

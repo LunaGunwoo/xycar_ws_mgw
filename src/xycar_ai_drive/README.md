@@ -72,10 +72,10 @@ Laptop의 MGW root에서 수행한다.
 ## Jetson 실시간 road-warp 튜너
 
 `live_warp_tuner`는 `/image_raw`를 sensor QoS로 구독해 현재 원본 영상의 source
-사다리꼴과 perspective BEV 결과를 나란히 보여 준다. 별도 control 창의 trackbar를
-움직이면 즉시 두 preview에 반영된다. 비율 parameter는 GUI에서 `x1000` 정수로
-표시되므로 예를 들어 `top_y x1000=500`은 YAML의 `top_y: 0.5`다.
-`bev_width`와 `bev_height`는 pixel 정수 그대로 표시한다.
+사다리꼴과 perspective BEV 결과를 보여 준다. 기존 오프라인 warp tuner와 동일한
+Tkinter layout을 사용해 왼쪽에는 원본 ROI와 warped preview, 오른쪽에는 각
+parameter 이름, 실제 실수값 slider와 `bev_width`/`bev_height` 정수 입력칸을
+표시한다. slider를 움직이면 현재 camera frame의 두 preview에 즉시 반영된다.
 
 - `Space`: 현재 frame 일시정지/실시간 영상 복귀
 - `S`: 현재 유효 parameter를 YAML로 저장
