@@ -51,6 +51,7 @@ PolicyFactory = Callable[..., object]
 @dataclass(frozen=True)
 class GuideInput:
     steering_axis: float = 0.0
+    steering_takeover: bool = False
     lt_depth: float = 0.0
     rt_depth: float = 0.0
 
@@ -117,9 +118,7 @@ def fuse_guided_command(
         ),
     )
     selected_angle = (
-        model.angle
-        if guide.steering_axis == 0.0
-        else controller_angle
+        controller_angle if guide.steering_takeover else model.angle
     )
     angle = max(-100.0, min(100.0, selected_angle))
     residual = angle - model.angle
@@ -129,7 +128,7 @@ def fuse_guided_command(
     )
     speed = max(0.0, min(speed_cap, model.speed + speed_delta))
     correction = (
-        guide.steering_axis != 0.0
+        guide.steering_takeover
         or guide.lt_depth > correction_deadzone
         or guide.rt_depth > correction_deadzone
     )
@@ -152,6 +151,16 @@ def trigger_depth(raw: float, mode: str) -> float:
     if mode == 'signed':
         return (1.0 - raw) / 2.0
     raise ValueError('trigger_axis_mode must be negative, positive, or signed')
+
+
+def _validate_control_indices(
+    axis_indices: Sequence[int],
+    button_indices: Sequence[int],
+) -> None:
+    if any(index < 0 for index in (*axis_indices, *button_indices)):
+        raise ValueError('axis and button indices must be non-negative')
+    if len(set(button_indices)) != len(button_indices):
+        raise ValueError('A/B/X/Y/RB button indices must be distinct')
 
 
 class GuidedPolicyCollectorNode(Node):
@@ -263,8 +272,8 @@ class GuidedPolicyCollectorNode(Node):
         self._refresh_graph(time.monotonic())
         self.get_logger().warning(
             'Guided collector started DRIVE OFF. Release and press Y to '
-            'toggle motion; A starts, B saves, and X stops motion and '
-            'deletes the session.'
+            'toggle motion; hold RB for human steering, A starts, B saves, '
+            'and X stops motion and deletes the session.'
         )
 
     def _declare_parameters(self) -> None:
@@ -297,6 +306,7 @@ class GuidedPolicyCollectorNode(Node):
         self.declare_parameter('record_stop_button', 1)
         self.declare_parameter('record_discard_button', 2)
         self.declare_parameter('drive_toggle_button', 3)
+        self.declare_parameter('steering_takeover_button', 10)
         self.declare_parameter('allow_motion', True)
         self.declare_parameter('publish_rate_hz', 20.0)
         self.declare_parameter('joy_timeout_sec', 0.25)
@@ -357,6 +367,7 @@ class GuidedPolicyCollectorNode(Node):
             'record_stop_button',
             'record_discard_button',
             'drive_toggle_button',
+            'steering_takeover_button',
             'stop_publish_count',
             'torch_num_threads',
             'warmup_count',
@@ -399,25 +410,19 @@ class GuidedPolicyCollectorNode(Node):
                 raise ValueError(f'{name} must not be empty')
         _validate_collection_profile(self.collection_profile_path)
         require_steering_contract_name(self.steering_contract)
-        indices = (
+        axis_indices = (
             self.steering_axis,
             self.lt_axis,
             self.rt_axis,
-            self.record_start_button,
-            self.record_stop_button,
-            self.record_discard_button,
-            self.drive_toggle_button,
         )
-        if any(index < 0 for index in indices):
-            raise ValueError('axis and button indices must be non-negative')
-        buttons = {
+        button_indices = (
             self.record_start_button,
             self.record_stop_button,
             self.record_discard_button,
             self.drive_toggle_button,
-        }
-        if len(buttons) != 4:
-            raise ValueError('A/B/X/Y button indices must be distinct')
+            self.steering_takeover_button,
+        )
+        _validate_control_indices(axis_indices, button_indices)
         if self.trigger_axis_mode not in {'negative', 'positive', 'signed'}:
             raise ValueError('unsupported trigger_axis_mode')
         positive_values = (
@@ -507,6 +512,7 @@ class GuidedPolicyCollectorNode(Node):
             self.record_stop_button,
             self.record_discard_button,
             self.drive_toggle_button,
+            self.steering_takeover_button,
         )
         if (
             len(message.axes) <= required_axis
@@ -514,12 +520,14 @@ class GuidedPolicyCollectorNode(Node):
         ):
             self._force_off('Joy axis or button array is too short')
             return
+        buttons = [bool(value) for value in message.buttons]
         try:
             steering = float(message.axes[self.steering_axis])
             if not math.isfinite(steering):
                 raise ValueError('steering axis must be finite')
             guide = GuideInput(
                 steering_axis=max(-1.0, min(1.0, steering)),
+                steering_takeover=buttons[self.steering_takeover_button],
                 lt_depth=trigger_depth(
                     float(message.axes[self.lt_axis]),
                     self.trigger_axis_mode,
@@ -533,7 +541,6 @@ class GuidedPolicyCollectorNode(Node):
             self._force_off(f'invalid Joy input: {exc}')
             return
 
-        buttons = [bool(value) for value in message.buttons]
         with self._lock:
             previous = self._last_buttons
 
@@ -763,7 +770,7 @@ class GuidedPolicyCollectorNode(Node):
 
     def _can_enable_locked(self, now: float) -> bool:
         guide_is_neutral = (
-            abs(self._guide.steering_axis) <= self.correction_deadzone
+            not self._guide.steering_takeover
             and self._guide.lt_depth <= self.correction_deadzone
             and self._guide.rt_depth <= self.correction_deadzone
         )
@@ -849,7 +856,8 @@ class GuidedPolicyCollectorNode(Node):
             },
             'guided_control': {
                 'steering_mode': (
-                    'model_when_neutral_controller_absolute_when_active'
+                    'model_unless_takeover_button_'
+                    'controller_absolute_when_held'
                 ),
                 'max_steering_angle': self.max_steering_angle,
                 'invert_steering': self.invert_steering,
@@ -869,6 +877,9 @@ class GuidedPolicyCollectorNode(Node):
                 'record_stop_button': self.record_stop_button,
                 'record_discard_button': self.record_discard_button,
                 'drive_toggle_button': self.drive_toggle_button,
+                'steering_takeover_button': (
+                    self.steering_takeover_button
+                ),
             },
             'collection_profile': dict(self.collection_profile_metadata),
             'runtime_safety': {
@@ -1164,6 +1175,11 @@ def _validate_collection_profile(configured_path: str) -> None:
     if 'max_steering_angle' not in parameters:
         raise ValueError(
             'collection profile must explicitly set max_steering_angle'
+        )
+    if 'steering_takeover_button' not in parameters:
+        raise ValueError(
+            'collection profile must explicitly set '
+            'steering_takeover_button'
         )
     require_steering_contract_name(parameters.get('steering_contract'))
 

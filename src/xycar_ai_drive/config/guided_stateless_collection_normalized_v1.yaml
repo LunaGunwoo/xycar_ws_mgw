@@ -29,6 +29,7 @@ guided_policy_collector:
     record_stop_button: 1
     record_discard_button: 2
     drive_toggle_button: 3
+    steering_takeover_button: 10
     allow_motion: false
     publish_rate_hz: 20.0
     joy_timeout_sec: 0.25

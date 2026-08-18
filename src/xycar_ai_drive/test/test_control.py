@@ -6,11 +6,13 @@ import json
 import csv
 from collections import deque
 from pathlib import Path
+from threading import RLock
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import yaml
+from sensor_msgs.msg import Joy
 from xycar_data.session_writer import AsyncSessionWriter
 from xycar_ai_drive.artifact import (
     ArtifactContractError,
@@ -30,6 +32,7 @@ from xycar_ai_drive.guided_policy_collector import (
     GuidedPolicyCollectorNode,
     GuidedPrediction,
     _collection_profile_metadata,
+    _validate_control_indices,
     _validate_collection_profile,
     fuse_guided_command,
     trigger_depth,
@@ -95,10 +98,14 @@ def test_class_decode_blocks_reverse_without_positive_speed_cap():
         decode_class_ids(100, 201)
 
 
-def test_guided_command_hands_active_steering_to_controller():
+def test_guided_command_uses_rb_takeover_and_preserves_speed_trim():
     fused = fuse_guided_command(
         DriveCommand(angle=20.0, speed=6.0),
-        GuideInput(steering_axis=0.5, lt_depth=0.0, rt_depth=1.0),
+        GuideInput(
+            steering_axis=0.5,
+            steering_takeover=True,
+            rt_depth=1.0,
+        ),
         max_steering_angle=100.0,
         invert_steering=True,
         rt_speed_increment=2.0,
@@ -113,7 +120,11 @@ def test_guided_command_hands_active_steering_to_controller():
 
     clamped = fuse_guided_command(
         DriveCommand(angle=-90.0, speed=1.0),
-        GuideInput(steering_axis=2.0, lt_depth=1.0, rt_depth=0.0),
+        GuideInput(
+            steering_axis=2.0,
+            steering_takeover=True,
+            lt_depth=1.0,
+        ),
         max_steering_angle=100.0,
         invert_steering=False,
         rt_speed_increment=2.0,
@@ -150,9 +161,9 @@ def test_guided_command_hands_active_steering_to_controller():
     )
     assert model_out_of_range.executed.angle == 100.0
 
-    tiny_override = fuse_guided_command(
+    ignored_stick_with_speed_trim = fuse_guided_command(
         DriveCommand(angle=80.0, speed=6.0),
-        GuideInput(steering_axis=0.001),
+        GuideInput(steering_axis=0.75, rt_depth=1.0),
         max_steering_angle=100.0,
         invert_steering=True,
         rt_speed_increment=2.0,
@@ -160,11 +171,98 @@ def test_guided_command_hands_active_steering_to_controller():
         speed_cap=30.0,
         correction_deadzone=0.05,
     )
-    assert tiny_override.executed.angle == pytest.approx(-0.1)
-    assert tiny_override.steering_residual == pytest.approx(-80.1)
-    assert tiny_override.human_correction
+    assert ignored_stick_with_speed_trim.executed == DriveCommand(
+        angle=80.0,
+        speed=8.0,
+    )
+    assert ignored_stick_with_speed_trim.steering_residual == 0.0
+    assert ignored_stick_with_speed_trim.speed_delta == 2.0
+    assert ignored_stick_with_speed_trim.human_correction
+
+    ignored_stick = fuse_guided_command(
+        DriveCommand(angle=80.0, speed=6.0),
+        GuideInput(steering_axis=-1.0),
+        max_steering_angle=100.0,
+        invert_steering=True,
+        rt_speed_increment=2.0,
+        lt_speed_decrement=5.0,
+        speed_cap=30.0,
+        correction_deadzone=0.05,
+    )
+    assert ignored_stick.executed == DriveCommand(angle=80.0, speed=6.0)
+    assert ignored_stick.steering_residual == 0.0
+    assert not ignored_stick.human_correction
+
+    neutral_takeover = fuse_guided_command(
+        DriveCommand(angle=80.0, speed=6.0),
+        GuideInput(steering_takeover=True),
+        max_steering_angle=100.0,
+        invert_steering=True,
+        rt_speed_increment=2.0,
+        lt_speed_decrement=5.0,
+        speed_cap=30.0,
+        correction_deadzone=0.05,
+    )
+    assert neutral_takeover.executed == DriveCommand(angle=0.0, speed=6.0)
+    assert neutral_takeover.steering_residual == -80.0
+    assert neutral_takeover.human_correction
     assert trigger_depth(-1.0, 'negative') == 1.0
     assert trigger_depth(1.0, 'signed') == 0.0
+
+
+def test_guided_drive_rearm_ignores_stick_but_requires_released_rb():
+    fake = SimpleNamespace(
+        _guide=GuideInput(steering_axis=1.0),
+        correction_deadzone=0.05,
+        allow_motion=True,
+        _unsafe_reason_locked=lambda _now: None,
+    )
+    assert GuidedPolicyCollectorNode._can_enable_locked(fake, 1.0)
+
+    fake._guide = GuideInput(
+        steering_axis=1.0,
+        steering_takeover=True,
+    )
+    assert not GuidedPolicyCollectorNode._can_enable_locked(fake, 1.0)
+
+    fake._guide = GuideInput(steering_axis=1.0, rt_depth=0.1)
+    assert not GuidedPolicyCollectorNode._can_enable_locked(fake, 1.0)
+
+
+def test_guided_control_indices_and_joy_length_include_rb():
+    _validate_control_indices((0, 4, 5), (0, 1, 2, 3, 10))
+    with pytest.raises(ValueError, match='A/B/X/Y/RB'):
+        _validate_control_indices((0, 4, 5), (0, 1, 2, 3, 3))
+
+    failures = []
+    fake = SimpleNamespace(
+        steering_axis=0,
+        lt_axis=4,
+        rt_axis=5,
+        record_start_button=0,
+        record_stop_button=1,
+        record_discard_button=2,
+        drive_toggle_button=3,
+        steering_takeover_button=10,
+        _force_off=failures.append,
+    )
+    message = Joy(axes=[0.0] * 6, buttons=[0] * 10)
+    GuidedPolicyCollectorNode._on_joy(fake, message)
+    assert failures == ['Joy axis or button array is too short']
+
+    fake._lock = RLock()
+    fake._last_buttons = []
+    fake._drive_gate = ToggleDriveGate()
+    fake._can_enable_locked = lambda _now: False
+    fake.trigger_axis_mode = 'negative'
+    valid_message = Joy(axes=[0.75, 0.0, 0.0, 0.0, 0.0, 0.0])
+    valid_message.buttons = [0] * 11
+    valid_message.buttons[10] = 1
+    GuidedPolicyCollectorNode._on_joy(fake, valid_message)
+    assert fake._guide == GuideInput(
+        steering_axis=0.75,
+        steering_takeover=True,
+    )
 
 
 def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
@@ -173,6 +271,7 @@ def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
         'guided_policy_collector:\n'
         '  ros__parameters:\n'
         '    max_steering_angle: 100.0\n'
+        '    steering_takeover_button: 10\n'
         '    steering_contract: normalized_percent_v1\n',
         encoding='utf-8',
     )
@@ -206,6 +305,19 @@ def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
     )
     with pytest.raises(ValueError, match='explicitly set max_steering_angle'):
         _validate_collection_profile(str(missing_angle_profile))
+    missing_takeover_profile = tmp_path / 'missing_takeover.yaml'
+    missing_takeover_profile.write_text(
+        'guided_policy_collector:\n'
+        '  ros__parameters:\n'
+        '    max_steering_angle: 100.0\n'
+        '    steering_contract: normalized_percent_v1\n',
+        encoding='utf-8',
+    )
+    with pytest.raises(
+        ValueError,
+        match='explicitly set steering_takeover_button',
+    ):
+        _validate_collection_profile(str(missing_takeover_profile))
 
     writer = AsyncSessionWriter(
         tmp_path / 'sessions',
@@ -236,7 +348,11 @@ def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
         stamp_nanosec=2,
         received_wall_time_ns=3,
     )
-    guide = GuideInput(steering_axis=0.5, rt_depth=1.0)
+    guide = GuideInput(
+        steering_axis=0.5,
+        steering_takeover=True,
+        rt_depth=1.0,
+    )
     fused = FusedCommand(
         executed=DriveCommand(angle=-50.0, speed=8.0),
         steering_residual=-70.0,
@@ -325,6 +441,7 @@ def test_stateless_external_collection_templates_and_launch_contract():
             configured_profile['steering_contract']
             == 'normalized_percent_v1'
         )
+        assert configured_profile['steering_takeover_button'] == 10
         assert 'residual_gain' not in configured_profile
     assert profile['rt_speed_increment'] == 2.0
     assert profile['lt_speed_decrement'] == 5.0
@@ -337,6 +454,7 @@ def test_stateless_external_collection_templates_and_launch_contract():
     for metadata_group in (
         "'steering_contract':",
         "'steering_mode':",
+        "'steering_takeover_button':",
         "'collection_profile':",
         "'runtime_safety':",
         "'inference_runtime':",

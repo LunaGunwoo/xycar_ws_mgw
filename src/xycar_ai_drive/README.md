@@ -69,15 +69,15 @@ Laptop의 MGW root에서 수행한다.
 
 ## 사람 보정 데이터 수집
 
-`guided_policy_collector`는 모델의 angle/speed 두 head를 한 번에 추론한다. 왼쪽
-stick이 중립이면 모델 angle을 사용하고, stick을 움직이는 동안에는 모델 angle을
-버리고 Controller의 절대 조향을 사용한다. speed는 모델 예측과 사람의 RT/LT
-보정을 합쳐 하나의 motor publisher로 발행한다.
+`guided_policy_collector`는 모델의 angle/speed 두 head를 한 번에 추론한다. RB를
+놓으면 왼쪽 stick 위치와 무관하게 모델 angle을 사용하고, RB를 누르는 동안에만
+Controller의 왼쪽 stick 절대 조향을 사용한다. speed는 RB 상태와 무관하게 모델
+예측과 사람의 RT/LT 보정을 합쳐 하나의 motor publisher로 발행한다.
 
 ```text
 executed_angle = (
-  model_angle                                      if left_stick == 0
-  clamp(signed_left_stick * max_steering_angle)   otherwise
+  clamp(signed_left_stick * max_steering_angle)   if RB is held
+  model_angle                                      otherwise
 )
 executed_speed = clamp(
   model_speed
@@ -88,10 +88,11 @@ executed_speed = clamp(
 ```
 
 기본 Remote Gamepad에서는 조향 부호를 반전하고 `max_steering_angle=100`으로 전체
-조향 범위를 사용한다. `game_controller_node`의 deadzone을 거친 `steering_axis`가
-정확히 0일 때만 모델 조향을 유지한다. CSV label은 모델 원본이 아니라 실제 발행된
-`executed_angle/executed_speed`이며 model prediction, stick/trigger depth,
-`executed_angle - model_angle`, 사람 개입 여부와 inference latency도 함께 저장한다.
+조향 범위를 사용하며 `game_controller_node`의 RB `buttons[10]`을 hold takeover로
+쓴다. RB를 놓은 상태에서 들어오는 `steering_axis`는 조향에 적용하지 않는다. CSV
+label은 모델 원본이 아니라 실제 발행된 `executed_angle/executed_speed`이며 model
+prediction, stick/trigger depth, `executed_angle - model_angle`, 실제 적용된 사람
+개입 여부와 inference latency도 함께 저장한다.
 새 CSV field는 추가하지 않으며 학습 label은 계속 `angle`과 `speed`다.
 angle/speed는 공통 ViT backbone과 별도 출력 head를 공유하므로 한 번의 수집과
 학습에서 동시에 다룬다.
@@ -102,9 +103,11 @@ angle/speed는 공통 ViT backbone과 별도 출력 head를 공유하므로 한 
 `+5/-5`를 적용하면 첫 round의 실행 범위는 대체로 10~20이지만 30까지는 계속
 허용된다.
 
-- Y: DRIVE ON/OFF. 시작은 OFF이며 stick과 trigger를 중립으로 놓고 release 후
-  눌러야 ON이 된다. 녹화 중 다시 누르면 즉시 zero command와 DRIVE OFF로
-  전환한다.
+- Y: DRIVE ON/OFF. 시작은 OFF이며 RB와 trigger를 놓고 Y를 release 후 눌러야
+  ON이 된다. RB를 놓았다면 왼쪽 stick 위치는 ON 조건에 영향을 주지 않는다.
+  녹화 중 다시 누르면 즉시 zero command와 DRIVE OFF로 전환한다.
+- RB: 누르는 동안만 왼쪽 stick 절대 조향으로 takeover한다. 놓으면 다음 control
+  tick부터 모델 조향으로 돌아간다. RT/LT 속도 보정은 두 모드에서 모두 동작한다.
 - A: 양수 speed 주행 중 새 session 녹화 시작.
 - B: 주행을 유지하면서 현재 session 정상 저장.
 - X: 즉시 zero command와 DRIVE OFF로 전환하면서 현재 session 전체 삭제.
@@ -121,7 +124,7 @@ angle/speed는 공통 ViT backbone과 별도 출력 head를 공유하므로 한 
 사람과 모델이 합성한 전진 명령의 상한이다. 두 값은 launch 인자로 지정한다.
 외부 base profile
 `/home/xytron/.config/xycar/guided_stateless_collection_normalized_v1.yaml`에는
-`max_steering_angle`, trigger 증감, deadzone, 버튼, timeout과
+`max_steering_angle`, `steering_takeover_button`, trigger 증감, deadzone, 버튼, timeout과
 기본 저장 root를 둔다. 실제 수집은 이 파일을 collection ID별 외부 profile로
 복사하면서 `recording_root_dir`만
 `/home/xytron/xycar_data/stateless_guided/generation_<N>/<collection-id>`로 바꿔
@@ -133,8 +136,9 @@ JPEG 품질 95로 저장하며 `recording_image_format`과
 `recording_jpeg_quality`를 외부 profile에서 조정할 수 있다.
 
 기존 `residual_gain` 또는 steering 계약이 없는 profile은 호환 실행하지 않는다.
-새 versioned profile에는 `max_steering_angle: 100.0`과
-`steering_contract: normalized_percent_v1`이 모두 있어야 한다.
+새 versioned profile에는 `max_steering_angle: 100.0`,
+`steering_takeover_button: 10`, `steering_contract: normalized_percent_v1`이 모두
+있어야 한다.
 
 아래 명령은 camera, gamepad와 motor publisher를 시작하므로 매 실행 직전 사용자
 승인이 필요하다. 바퀴 지지 또는 안전 주행 공간, motor 전원 차단 수단, Y와
