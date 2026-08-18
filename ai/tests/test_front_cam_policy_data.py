@@ -14,6 +14,7 @@ from torchvision import transforms
 from xycar_ai.config import DataConfig, DataSourceConfig
 from xycar_ai.front_cam_policy_data import (
     FrontCamPolicyDataset,
+    FrontCamPolicySequenceDataset,
     PolicyDatasetError,
     PolicySample,
     attach_executed_command_history,
@@ -30,6 +31,53 @@ from xycar_ai.front_cam_policy_data import (
     smooth_training_angle_targets,
     validate_session_initial_classes,
 )
+
+
+def test_sequence_dataset_keeps_clips_session_local_and_uses_one_flip(
+    tmp_path: Path,
+):
+    data_root = tmp_path / "datasets" / "teleop"
+    names = [
+        "20260810_130735_027_session",
+        "20260810_130818_255_session",
+        "20260810_130857_726_session",
+    ]
+    write_session(
+        data_root,
+        names[0],
+        labels=[(0.0, 25.0), (10.0, 25.0), (20.0, 25.0)],
+    )
+    for name in names[1:]:
+        write_session(data_root, name, labels=[(30.0, 25.0), (40.0, 25.0)])
+    manifest = write_split_manifest(
+        tmp_path / "config" / "split.yaml",
+        train=[names[0]],
+        val=[names[1]],
+        test=[names[2]],
+    )
+    sessions = build_policy_data_splits(
+        _data_config(data_root, manifest)
+    ).train_sessions
+
+    dataset = FrontCamPolicySequenceDataset(
+        sessions,
+        sequence_length=2,
+        transform=transforms.ToTensor(),
+        horizontal_flip_probability=1.0,
+        sequence_reverse_probability=1.0,
+    )
+
+    assert len(dataset) == 2
+    first = dataset[0]
+    assert first["session_id"] == names[0]
+    assert first["sequence_reversed"] is True
+    assert first["angle"].tolist() == [-10, 0]
+    assert first["horizontal_flipped"].tolist() == [True, True]
+    assert first["valid_mask"].tolist() == [True, True]
+    final = dataset[1]
+    assert final["session_id"] == names[0]
+    assert final["angle"].tolist() == [-20, -20]
+    assert final["valid_mask"].tolist() == [True, False]
 
 
 def test_gamepad_speed_filter_and_fixed_split(tmp_path: Path):

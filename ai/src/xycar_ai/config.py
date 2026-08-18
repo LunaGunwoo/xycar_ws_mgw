@@ -104,6 +104,8 @@ class TrainingConfig:
     device: str
     amp: bool
     deterministic: bool
+    sequence_length: int = 0
+    sequence_reverse_probability: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -230,7 +232,11 @@ def load_train_config(path: str | Path) -> TrainConfig:
             "deterministic",
         },
         "training",
-        optional={"early_stopping_patience"},
+        optional={
+            "early_stopping_patience",
+            "sequence_length",
+            "sequence_reverse_probability",
+        },
     )
     _expect_keys(
         loss_payload,
@@ -437,6 +443,16 @@ def load_train_config(path: str | Path) -> TrainConfig:
             device=_string(training_payload, "device"),
             amp=_boolean(training_payload, "amp"),
             deterministic=_boolean(training_payload, "deterministic"),
+            sequence_length=(
+                _integer(training_payload, "sequence_length")
+                if "sequence_length" in training_payload
+                else 0
+            ),
+            sequence_reverse_probability=(
+                _number(training_payload, "sequence_reverse_probability")
+                if "sequence_reverse_probability" in training_payload
+                else 0.0
+            ),
         ),
         loss=LossConfig(
             angle_label_smoothing=_number(loss_payload, "angle_label_smoothing"),
@@ -666,6 +682,42 @@ def _validate(config: TrainConfig) -> None:
         raise ValueError("training.batch_size must be > 0")
     if training.grad_clip < 0:
         raise ValueError("training.grad_clip must be >= 0")
+    if training.sequence_length < 0:
+        raise ValueError("training.sequence_length must be >= 0")
+    if not 0 <= training.sequence_reverse_probability <= 1:
+        raise ValueError(
+            "training.sequence_reverse_probability must be in [0, 1]"
+        )
+    if training.sequence_length:
+        if config.model.architecture != "ar_control_tokens":
+            raise ValueError(
+                "sequence rollout training requires ar_control_tokens"
+            )
+        if config.model.history_update != "externally_executed_commands":
+            raise ValueError(
+                "sequence rollout artifacts require externally executed history"
+            )
+        if training.sequence_length <= config.model.history_frames:
+            raise ValueError(
+                "training.sequence_length must exceed model.history_frames"
+            )
+        if training.batch_size < training.sequence_length:
+            raise ValueError(
+                "training.batch_size must be at least sequence_length"
+            )
+        if config.data.ema_sampling and (
+            config.data.sources
+            or config.data.current_generation != config.data.legacy_generation
+            or config.data.generation_decay != 1.0
+        ):
+            raise ValueError(
+                "sequence rollout training does not support multi-generation "
+                "EMA sampling"
+            )
+    elif training.sequence_reverse_probability:
+        raise ValueError(
+            "sequence_reverse_probability requires sequence_length"
+        )
     if scheduler.warmup_epochs < 0 or scheduler.warmup_epochs > training.epochs:
         raise ValueError("scheduler.warmup_epochs must be in [0, training.epochs]")
     loss = config.loss

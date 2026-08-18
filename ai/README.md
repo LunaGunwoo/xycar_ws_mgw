@@ -474,6 +474,20 @@ session의 첫 target을 반복하며 horizontal flip은 현재 angle과 history
 target이 들어간다. validation/test와 runtime은 정답을 사용하지 않고 session마다
 `(angle=0, speed=25)` 네 쌍으로 시작해 직전 argmax 예측을 순차적으로 넣는다.
 
+선택적 self-predicted sequence rollout은 기존 AR YAML을 자동으로 바꾸지 않으며
+`training.sequence_length` 기본값 `0`에서 비활성이다. 별도 실험 config에서
+`model.history_update: externally_executed_commands`와 history frame 수보다 큰
+`training.sequence_length`를 함께 지정하면 session 경계를 넘지 않는 비중첩 clip을
+만든다. 각 clip은 canonical `(angle=0, speed=25)` history에서 시작하고 현재
+model의 detached argmax를 다음 frame history로 사용한다. angle class는 `0..200`,
+후진을 금지하는 speed class는 `100..200`으로 제한한다. 마지막 짧은 clip의 padding은
+loss와 history update에서 제외하며 horizontal flip은 clip 전체에 한 번만
+결정한다. `training.sequence_reverse_probability`는 기본 `0.0`이고 설정할 때만
+clip 순서를 뒤집는다. 이 mode는 다세대 EMA sampling과 함께 사용할 수 없고
+`training.batch_size >= training.sequence_length`를 요구한다. checkpoint와 artifact
+history 계약에는 sequence 길이, reverse 확률, self-predicted train source와 label
+history leakage가 없다는 사실을 기록한다.
+
 두 출력은 201개 control value embedding weight를 공용 output projection으로
 사용하고 task별 bias만 분리한다. `shared_type`은 여기에 angle/speed type embedding을
 추가한다. loss는 기존 예선 및 stateless 모델과 같은 다음 식이다.

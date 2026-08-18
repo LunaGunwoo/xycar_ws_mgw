@@ -20,11 +20,55 @@ from xycar_ai.train_front_cam_policy import (
     initialize_model_weights,
     load_configured_road_warp,
     main,
+    rollout_predicted_histories,
     source_weighted_metric,
     validation_selection_score,
     validate_incremental_initialization,
     validate_resume_payload,
 )
+
+
+class _DeterministicRolloutPolicy(torch.nn.Module):
+    history_frames = 4
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.call_count = 0
+
+    def forward(self, images, history_class_ids):
+        batch_size = images.shape[0]
+        angle_logits = torch.full((batch_size, 201), -10.0)
+        speed_logits = torch.full((batch_size, 201), -10.0)
+        angle_logits[:, 110 + self.call_count] = 10.0
+        speed_logits[:, 50] = 10.0
+        self.call_count += 1
+        return {
+            "angle_logits": angle_logits,
+            "speed_logits": speed_logits,
+        }
+
+
+def test_sequence_rollout_reuses_detached_clamped_predictions():
+    model = _DeterministicRolloutPolicy()
+    model.train()
+    images = torch.zeros((1, 3, 3, 8, 8))
+    valid_mask = torch.tensor([[True, True, False]])
+    initial = torch.tensor([[[100, 125]] * 4], dtype=torch.long)
+
+    prompts, final_history = rollout_predicted_histories(
+        model=model,
+        images=images,
+        valid_mask=valid_mask,
+        initial_history=initial,
+        amp_enabled=False,
+    )
+
+    assert model.training
+    assert not prompts.requires_grad
+    assert prompts[0, 0].tolist() == [[100, 125]] * 4
+    assert prompts[0, 1, -1].tolist() == [110, 100]
+    assert prompts[0, 2, -1].tolist() == [111, 100]
+    assert final_history[0, -1].tolist() == [111, 100]
 
 
 def test_ab_configs_only_change_flip_and_run_name():
@@ -663,6 +707,32 @@ def test_config_rejects_noncanonical_ar_initial_history(tmp_path: Path):
         load_train_config(config_path)
 
 
+def test_sequence_rollout_config_records_self_prediction_contract(tmp_path: Path):
+    config_path = _write_config(
+        tmp_path,
+        tmp_path / "config" / "split.yaml",
+        epochs=1,
+        autoregressive=True,
+    )
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["model"]["history_update"] = "externally_executed_commands"
+    payload["training"]["batch_size"] = 8
+    payload["training"]["sequence_length"] = 8
+    payload["training"]["sequence_reverse_probability"] = 0.5
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    config = load_train_config(config_path)
+    history = build_label_contract(config)["history"]
+
+    assert config.training.sequence_length == 8
+    assert history["update"] == "externally_executed_commands"
+    assert history["train_source"] == "self_predicted_argmax_sequence_rollout"
+    assert history["known_train_label_leakage"] is False
+    assert history["sequence_reverse_probability"] == 0.5
+    assert history["clip_history_initialization"] == "canonical_initial_command"
+    assert history["edge_padding"] == "masked_repeat_last_frame"
+
+
 def test_one_epoch_training_and_resume(tmp_path: Path):
     data_root = tmp_path / "datasets" / "teleop"
     names = [
@@ -829,6 +899,55 @@ def test_ar_probe_resume_preserves_scheduler_and_uses_rollout_evaluation(
     assert final_checkpoint["epoch"] == 2
     assert final_checkpoint["scheduler_state"]["last_epoch"] == 2
     assert (run_dir / "test_metrics.json").is_file()
+
+
+def test_one_epoch_sequence_rollout_training_uses_predicted_prompts(
+    tmp_path: Path,
+):
+    data_root = tmp_path / "datasets" / "teleop"
+    names = [
+        "20260803_150534_000_session",
+        "20260810_130735_027_session",
+        "20260810_130818_255_session",
+    ]
+    labels = [(0.0, 25.0), (10.0, 25.0), (20.0, 25.0), (0.0, 25.0), (-10.0, 25.0)]
+    for name in names:
+        write_session(data_root, name, labels=labels)
+    split_path = write_split_manifest(
+        tmp_path / "config" / "split.yaml",
+        train=[names[0]],
+        val=[names[1]],
+        test=[names[2]],
+    )
+    config_path = _write_config(
+        tmp_path,
+        split_path,
+        epochs=1,
+        flip_probability=0.0,
+        autoregressive=True,
+    )
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["model"]["history_update"] = "externally_executed_commands"
+    payload["training"]["batch_size"] = 5
+    payload["training"]["sequence_length"] = 5
+    payload["training"]["sequence_reverse_probability"] = 0.0
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    assert main(["--config", str(config_path)]) == 0
+
+    run_dir = tmp_path / "artifacts" / "runs" / "smoke"
+    checkpoint = torch.load(
+        run_dir / "best.pt", map_location="cpu", weights_only=True
+    )
+    history = checkpoint["label_contract"]["history"]
+    assert history["train_source"] == "self_predicted_argmax_sequence_rollout"
+    assert history["evaluation_source"] == "predicted_argmax_rollout"
+    with (run_dir / "metrics.csv").open(
+        "r", encoding="utf-8", newline=""
+    ) as metrics_file:
+        row = next(iter(csv.DictReader(metrics_file)))
+    assert row["train_sequence_clip_count"] == "1.0"
+    assert row["train_sample_count"] == "5.0"
 
 
 def _write_config(

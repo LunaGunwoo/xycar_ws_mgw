@@ -25,6 +25,7 @@ from xycar_ai.front_cam_policy_data import (
     COMMAND_MIN,
     NUM_COMMAND_CLASSES,
     FrontCamPolicyDataset,
+    FrontCamPolicySequenceDataset,
     PolicyDataSplits,
     PolicySample,
     PolicySession,
@@ -76,12 +77,16 @@ def main(argv: Iterable[str] | None = None) -> int:
         config.model.architecture == AR_CONTROL_TOKEN_ARCHITECTURE
         and config.model.history_update == "externally_executed_commands"
     )
-    if external_history:
+    sequence_rollout = config.training.sequence_length > 0
+    if external_history and not sequence_rollout:
         splits = attach_executed_command_history(
             splits,
             config.model.history_frames,
         )
-    elif config.model.architecture == AR_CONTROL_TOKEN_ARCHITECTURE:
+    elif (
+        config.model.architecture == AR_CONTROL_TOKEN_ARCHITECTURE
+        and not external_history
+    ):
         validate_session_initial_classes(
             splits,
             angle_class_id=config.model.history_initial_angle + 100,
@@ -157,6 +162,17 @@ def main(argv: Iterable[str] | None = None) -> int:
         model_data_config=model.model_data_config,
         device=device,
         road_warp=road_warp,
+    )
+    sequence_loader = (
+        make_sequence_loader(
+            sessions=splits.train_sessions,
+            config=config,
+            model_data_config=model.model_data_config,
+            device=device,
+            road_warp=road_warp,
+        )
+        if sequence_rollout
+        else None
     )
 
     train_samples = splits.train_samples
@@ -241,20 +257,36 @@ def main(argv: Iterable[str] | None = None) -> int:
     if initialization is not None:
         source_state["initialization"] = initialization
     for epoch in range(start_epoch, config.training.epochs + 1):
-        train_metrics = run_epoch(
-            model=model,
-            loader=loaders["train"],
-            split_name="train",
-            device=device,
-            angle_criterion=angle_criterion,
-            speed_criterion=speed_criterion,
-            optimizer=optimizer,
-            scaler=scaler,
-            amp_enabled=amp_enabled,
-            grad_clip=config.training.grad_clip,
-            speed_loss_weight=config.loss.speed_loss_weight,
-            emd_loss_weight=config.loss.emd_loss_weight,
-        )
+        if sequence_loader is not None:
+            if not isinstance(model, AutoregressiveControlTokenViTPolicy):
+                raise TypeError("sequence rollout requires an AR policy")
+            train_metrics = run_sequence_rollout_epoch(
+                model=model,
+                loader=sequence_loader,
+                split_name="train",
+                config=config,
+                device=device,
+                angle_criterion=angle_criterion,
+                speed_criterion=speed_criterion,
+                optimizer=optimizer,
+                scaler=scaler,
+                amp_enabled=amp_enabled,
+            )
+        else:
+            train_metrics = run_epoch(
+                model=model,
+                loader=loaders["train"],
+                split_name="train",
+                device=device,
+                angle_criterion=angle_criterion,
+                speed_criterion=speed_criterion,
+                optimizer=optimizer,
+                scaler=scaler,
+                amp_enabled=amp_enabled,
+                grad_clip=config.training.grad_clip,
+                speed_loss_weight=config.loss.speed_loss_weight,
+                emd_loss_weight=config.loss.emd_loss_weight,
+            )
         val_metrics = evaluate_policy(
             model=model,
             loader=loaders["val"],
@@ -447,7 +479,28 @@ def build_label_contract(config: TrainConfig) -> dict[str, object]:
                 config.model.history_initial_speed + 100,
             ],
         }
-        if config.model.history_update == "externally_executed_commands":
+        if config.training.sequence_length:
+            history_contract.update(
+                {
+                    "update": "externally_executed_commands",
+                    "train_source": "self_predicted_argmax_sequence_rollout",
+                    "train_prediction_execution": {
+                        "angle_class_clamp": [0, 200],
+                        "speed_class_clamp": [100, 200],
+                        "gradient": "detached_before_history_update",
+                    },
+                    "sequence_length": config.training.sequence_length,
+                    "sequence_boundaries": "session_local_non_overlapping_clips",
+                    "sequence_reverse_probability": (
+                        config.training.sequence_reverse_probability
+                    ),
+                    "evaluation_source": "predicted_argmax_rollout",
+                    "clip_history_initialization": "canonical_initial_command",
+                    "edge_padding": "masked_repeat_last_frame",
+                    "known_train_label_leakage": False,
+                }
+            )
+        elif config.model.history_update == "externally_executed_commands":
             history_contract.update(
                 {
                     "update": "externally_executed_commands",
@@ -567,6 +620,48 @@ def make_loaders(
     return loaders
 
 
+def make_sequence_loader(
+    *,
+    sessions: Sequence[PolicySession],
+    config: TrainConfig,
+    model_data_config: Mapping[str, object],
+    device: torch.device,
+    road_warp: RoadWarpConfig | None = None,
+) -> DataLoader:
+    sequence_length = config.training.sequence_length
+    if sequence_length <= 0:
+        raise ValueError("sequence_length must be configured")
+    dataset = FrontCamPolicySequenceDataset(
+        sessions,
+        sequence_length=sequence_length,
+        transform=make_policy_transform(
+            train=True,
+            image_size=config.model.image_size,
+            model_data_config=model_data_config,
+            augmentation=config.augmentation,
+        ),
+        horizontal_flip_probability=(
+            config.augmentation.horizontal_flip_probability
+        ),
+        sequence_reverse_probability=(
+            config.training.sequence_reverse_probability
+        ),
+        road_warp=road_warp,
+    )
+    generator = torch.Generator()
+    generator.manual_seed(config.training.seed + 3)
+    return DataLoader(
+        dataset,
+        batch_size=max(1, config.training.batch_size // sequence_length),
+        shuffle=True,
+        num_workers=config.data.num_workers,
+        pin_memory=device.type == "cuda",
+        persistent_workers=config.data.num_workers > 0,
+        generator=generator,
+        worker_init_fn=seed_worker,
+    )
+
+
 def evaluate_policy(
     *,
     model: TaskTokenViTPolicy | AutoregressiveControlTokenViTPolicy,
@@ -584,7 +679,10 @@ def evaluate_policy(
 ) -> dict[str, float]:
     if (
         isinstance(model, AutoregressiveControlTokenViTPolicy)
-        and config.model.history_update == "predicted_argmax"
+        and (
+            config.model.history_update == "predicted_argmax"
+            or config.training.sequence_length > 0
+        )
     ):
         return run_rollout_evaluation(
             model=model,
@@ -694,13 +792,7 @@ def run_rollout_evaluation(
                     speed_loss=speed_loss.detach(),
                     emd_loss=emd_loss.detach(),
                 )
-                predicted_pair = torch.stack(
-                    (
-                        outputs["angle_logits"].argmax(dim=1),
-                        outputs["speed_logits"].argmax(dim=1),
-                    ),
-                    dim=1,
-                )
+                predicted_pair = predicted_executed_class_pair(outputs)
                 history = torch.cat(
                     (history[:, 1:], predicted_pair.unsqueeze(1)),
                     dim=1,
@@ -713,6 +805,168 @@ def run_rollout_evaluation(
                 )
     progress.close()
     return accumulator.compute()
+
+
+def predicted_executed_class_pair(
+    outputs: Mapping[str, torch.Tensor],
+) -> torch.Tensor:
+    """Decode the class pair that the no-reverse runtime can publish."""
+    angle_class = outputs["angle_logits"].argmax(dim=1).clamp(0, 200)
+    speed_class = outputs["speed_logits"].argmax(dim=1).clamp(100, 200)
+    return torch.stack((angle_class, speed_class), dim=1).detach()
+
+
+def rollout_predicted_histories(
+    *,
+    model: AutoregressiveControlTokenViTPolicy,
+    images: torch.Tensor,
+    valid_mask: torch.Tensor,
+    initial_history: torch.Tensor,
+    amp_enabled: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Collect detached self-predicted prompts for one session-local clip."""
+    if images.ndim != 5:
+        raise ValueError("sequence images must have shape [B,T,C,H,W]")
+    if valid_mask.shape != images.shape[:2]:
+        raise ValueError("valid_mask must have shape [B,T]")
+    expected_history_shape = (images.shape[0], model.history_frames, 2)
+    if initial_history.shape != expected_history_shape:
+        raise ValueError(
+            f"initial_history must have shape {expected_history_shape}"
+        )
+    history = initial_history.clone()
+    prompts: list[torch.Tensor] = []
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.inference_mode():
+            for frame_index in range(images.shape[1]):
+                prompts.append(history.clone())
+                with torch.autocast(
+                    device_type=images.device.type,
+                    enabled=amp_enabled,
+                ):
+                    outputs = model(images[:, frame_index], history)
+                predicted_pair = predicted_executed_class_pair(outputs)
+                updated = torch.cat(
+                    (history[:, 1:], predicted_pair.unsqueeze(1)), dim=1
+                )
+                active = valid_mask[:, frame_index].reshape(-1, 1, 1)
+                history = torch.where(active, updated, history)
+    finally:
+        model.train(was_training)
+    return torch.stack(prompts, dim=1), history
+
+
+def run_sequence_rollout_epoch(
+    *,
+    model: AutoregressiveControlTokenViTPolicy,
+    loader: DataLoader,
+    split_name: str,
+    config: TrainConfig,
+    device: torch.device,
+    angle_criterion: nn.Module,
+    speed_criterion: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler,
+    amp_enabled: bool,
+) -> dict[str, float]:
+    """Train on histories generated by the current model over ordered clips."""
+    model.train()
+    accumulator = ClassificationMetricAccumulator(split_name)
+    reversed_clips = 0
+    clip_count = 0
+    progress = tqdm(loader, desc=split_name, leave=False)
+    initial_pair = torch.tensor(
+        [
+            config.model.history_initial_angle + 100,
+            config.model.history_initial_speed + 100,
+        ],
+        dtype=torch.long,
+        device=device,
+    )
+    for batch in progress:
+        images = batch["image_tensor"].to(device=device, non_blocking=True)
+        valid_mask = batch["valid_mask"].to(device=device, non_blocking=True)
+        batch_size = images.shape[0]
+        initial_history = initial_pair.reshape(1, 1, 2).expand(
+            batch_size, config.model.history_frames, 2
+        )
+        history_prompts, _ = rollout_predicted_histories(
+            model=model,
+            images=images,
+            valid_mask=valid_mask,
+            initial_history=initial_history,
+            amp_enabled=amp_enabled,
+        )
+        flat_images = images[valid_mask]
+        flat_history = history_prompts[valid_mask]
+        angle_class = batch["angle_class_id"].to(
+            device=device, non_blocking=True
+        )[valid_mask]
+        speed_class = batch["speed_class_id"].to(
+            device=device, non_blocking=True
+        )[valid_mask]
+        metric_batch = {
+            key: value.to(device=device, non_blocking=True)[valid_mask]
+            for key, value in batch.items()
+            if key
+            in {
+                "angle",
+                "speed",
+                "angle_class_id",
+                "speed_class_id",
+                "horizontal_flipped",
+                "generation",
+            }
+        }
+
+        optimizer.zero_grad(set_to_none=True)
+        with torch.autocast(device_type=device.type, enabled=amp_enabled):
+            outputs = model(flat_images, flat_history)
+            angle_loss = angle_criterion(outputs["angle_logits"], angle_class)
+            speed_loss = speed_criterion(outputs["speed_logits"], speed_class)
+            angle_emd = ordinal_emd_loss(outputs["angle_logits"], angle_class)
+            speed_emd = ordinal_emd_loss(outputs["speed_logits"], speed_class)
+            total_loss, emd_loss = combine_policy_losses(
+                angle_loss=angle_loss,
+                speed_loss=speed_loss,
+                angle_emd_loss=angle_emd,
+                speed_emd_loss=speed_emd,
+                speed_loss_weight=config.loss.speed_loss_weight,
+                emd_loss_weight=config.loss.emd_loss_weight,
+            )
+        scaler.scale(total_loss).backward()
+        if config.training.grad_clip > 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), config.training.grad_clip
+            )
+        scaler.step(optimizer)
+        scaler.update()
+
+        accumulator.update(
+            outputs={key: value.detach() for key, value in outputs.items()},
+            batch=metric_batch,
+            total_loss=total_loss.detach(),
+            angle_loss=angle_loss.detach(),
+            speed_loss=speed_loss.detach(),
+            emd_loss=emd_loss.detach(),
+        )
+        reversed_batch = batch["sequence_reversed"]
+        reversed_clips += int(reversed_batch.sum())
+        clip_count += int(reversed_batch.numel())
+        current = accumulator.compute()
+        progress.set_postfix(
+            loss=f"{current[f'{split_name}_loss']:.3f}",
+            angle_mae=f"{current[f'{split_name}_angle_mae']:.2f}",
+        )
+    metrics = accumulator.compute()
+    metrics[f"{split_name}_sequence_clip_count"] = float(clip_count)
+    metrics[f"{split_name}_sequence_reverse_rate"] = (
+        reversed_clips / max(clip_count, 1)
+    )
+    return metrics
 
 
 def run_epoch(

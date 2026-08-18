@@ -735,6 +735,91 @@ class FrontCamPolicyDataset(Dataset):
         return item
 
 
+class FrontCamPolicySequenceDataset(Dataset):
+    """Materialize session-local clips for self-predicted history rollout.
+
+    A clip never crosses a session boundary. Horizontal mirroring is sampled
+    once per clip so every command and history item keeps the same steering
+    sign. The final short clip is edge-padded and accompanied by a validity
+    mask; padded frames never contribute a target or history update.
+    """
+
+    def __init__(
+        self,
+        sessions: Sequence[PolicySession],
+        *,
+        sequence_length: int,
+        transform: object,
+        horizontal_flip_probability: float = 0.0,
+        sequence_reverse_probability: float = 0.0,
+        road_warp: RoadWarpConfig | None = None,
+    ) -> None:
+        if sequence_length <= 0:
+            raise ValueError("sequence_length must be positive")
+        if not 0 <= horizontal_flip_probability <= 1:
+            raise ValueError("horizontal_flip_probability must be in [0, 1]")
+        if not 0 <= sequence_reverse_probability <= 1:
+            raise ValueError("sequence_reverse_probability must be in [0, 1]")
+        clips: list[tuple[PolicySample, ...]] = []
+        for session in sessions:
+            clips.extend(
+                session.samples[start : start + sequence_length]
+                for start in range(0, len(session.samples), sequence_length)
+            )
+        if not clips:
+            raise PolicyDatasetError("sequence dataset has no clips")
+        self.clips = tuple(clips)
+        self.sequence_length = int(sequence_length)
+        self.transform = transform
+        self.horizontal_flip_probability = float(horizontal_flip_probability)
+        self.sequence_reverse_probability = float(sequence_reverse_probability)
+        self.road_warp = road_warp
+
+    def __len__(self) -> int:
+        return len(self.clips)
+
+    def __getitem__(self, index: int) -> dict[str, object]:
+        samples = self.clips[index]
+        horizontal_flipped = bool(
+            torch.rand(()).item() < self.horizontal_flip_probability
+        )
+        sequence_reversed = bool(
+            torch.rand(()).item() < self.sequence_reverse_probability
+        )
+        ordered = tuple(reversed(samples)) if sequence_reversed else samples
+        frame_dataset = FrontCamPolicyDataset(
+            ordered,
+            transform=self.transform,
+            horizontal_flip_probability=float(horizontal_flipped),
+            road_warp=self.road_warp,
+        )
+        items = [frame_dataset[item_index] for item_index in range(len(ordered))]
+        valid_length = len(items)
+        items.extend([items[-1]] * (self.sequence_length - valid_length))
+        return {
+            "image_tensor": torch.stack(
+                [item["image_tensor"] for item in items]
+            ),
+            "angle": torch.tensor([item["angle"] for item in items]),
+            "speed": torch.tensor([item["speed"] for item in items]),
+            "angle_class_id": torch.tensor(
+                [item["angle_class_id"] for item in items], dtype=torch.long
+            ),
+            "speed_class_id": torch.tensor(
+                [item["speed_class_id"] for item in items], dtype=torch.long
+            ),
+            "horizontal_flipped": torch.tensor(
+                [item["horizontal_flipped"] for item in items], dtype=torch.bool
+            ),
+            "generation": torch.tensor(
+                [item["generation"] for item in items], dtype=torch.long
+            ),
+            "valid_mask": torch.arange(self.sequence_length) < valid_length,
+            "sequence_reversed": sequence_reversed,
+            "session_id": ordered[0].session_id,
+        }
+
+
 def compute_sqrt_inverse_frequency_weights(
     samples: Sequence[PolicySample],
     *,
