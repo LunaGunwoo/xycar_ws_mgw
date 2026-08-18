@@ -178,7 +178,7 @@ def test_export_validation_rejects_unsafe_id_and_tampering(tmp_path: Path):
         verify_artifact(artifact)
 
 
-def test_guided_export_requires_matching_passed_promotion_report(
+def test_guided_export_records_advisory_promotion_status(
     monkeypatch, tmp_path: Path
 ):
     monkeypatch.setattr(export_module, "TaskTokenViTPolicy", _TinyPolicy)
@@ -209,14 +209,59 @@ def test_guided_export_requires_matching_passed_promotion_report(
         checkpoint_path,
     )
 
-    with pytest.raises(PolicyExportError, match="requires --promotion-report"):
-        export_checkpoint(
-            checkpoint_path=checkpoint_path,
-            artifact_id="guided-without-gate",
-            output_root=tmp_path / "models",
-        )
+    artifact_without_report = export_checkpoint(
+        checkpoint_path=checkpoint_path,
+        artifact_id="guided-without-gate",
+        output_root=tmp_path / "models",
+    )
+    manifest_without_report = yaml.safe_load(
+        (artifact_without_report / "manifest.yaml").read_text()
+    )
+    assert manifest_without_report["promotion"] == {
+        "offline_gate": "not_evaluated",
+        "generation": 1,
+        "candidate_checkpoint_sha256": export_module.sha256_file(
+            checkpoint_path
+        ),
+    }
 
     report_path = tmp_path / "promotion_gate.json"
+    report_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "status": "failed",
+                "generation": 1,
+                "parent": {"sha256": "parent-hash"},
+                "candidate": {
+                    "sha256": export_module.sha256_file(checkpoint_path)
+                },
+                "checks": {
+                    "guided_angle_mae_improved": False,
+                    "candidate_initialized_from_parent": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    failed_artifact = export_checkpoint(
+        checkpoint_path=checkpoint_path,
+        artifact_id="guided-with-failed-gate",
+        output_root=tmp_path / "models",
+        promotion_report_path=report_path,
+    )
+    failed_manifest = yaml.safe_load(
+        (failed_artifact / "manifest.yaml").read_text()
+    )
+    assert failed_manifest["promotion"]["offline_gate"] == "failed"
+    assert failed_manifest["promotion"]["generation"] == 1
+    assert failed_manifest["promotion"]["parent_checkpoint_sha256"] == (
+        "parent-hash"
+    )
+    assert failed_manifest["promotion"]["failed_checks"] == [
+        "guided_angle_mae_improved"
+    ]
+
     report_path.write_text(
         yaml.safe_dump(
             {
@@ -232,16 +277,30 @@ def test_guided_export_requires_matching_passed_promotion_report(
         ),
         encoding="utf-8",
     )
-    artifact = export_checkpoint(
+    passed_artifact = export_checkpoint(
         checkpoint_path=checkpoint_path,
-        artifact_id="guided-with-gate",
+        artifact_id="guided-with-passed-gate",
         output_root=tmp_path / "models",
         promotion_report_path=report_path,
     )
-    manifest = yaml.safe_load((artifact / "manifest.yaml").read_text())
-    assert manifest["promotion"]["offline_gate"] == "passed"
-    assert manifest["promotion"]["generation"] == 1
-    assert manifest["promotion"]["parent_checkpoint_sha256"] == "parent-hash"
+    passed_manifest = yaml.safe_load(
+        (passed_artifact / "manifest.yaml").read_text()
+    )
+    assert passed_manifest["promotion"]["offline_gate"] == "passed"
+    assert passed_manifest["promotion"]["failed_checks"] == []
+
+    mismatched_report = yaml.safe_load(report_path.read_text())
+    mismatched_report["candidate"]["sha256"] = "wrong-hash"
+    report_path.write_text(
+        yaml.safe_dump(mismatched_report), encoding="utf-8"
+    )
+    with pytest.raises(PolicyExportError, match="candidate hash differs"):
+        export_checkpoint(
+            checkpoint_path=checkpoint_path,
+            artifact_id="guided-with-mismatched-gate",
+            output_root=tmp_path / "models",
+            promotion_report_path=report_path,
+        )
 
 
 def test_export_ar_checkpoint_writes_v3_external_history_contract(

@@ -82,7 +82,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--promotion-report",
         default="",
-        help="Required passing promotion_gate.json for Guided generation 1+.",
+        help=(
+            "Optional promotion_gate.json. Its passed/failed status is "
+            "validated and recorded in the artifact but does not block export."
+        ),
     )
     return parser
 
@@ -443,10 +446,13 @@ def _validated_promotion_report(
         raise PolicyExportError("checkpoint current_generation must be an integer")
     if generation_value <= 0:
         return None
+    checkpoint_sha256 = sha256_file(checkpoint_path)
     if report_path is None:
-        raise PolicyExportError(
-            "Guided generation 1+ export requires --promotion-report"
-        )
+        return {
+            "offline_gate": "not_evaluated",
+            "generation": generation_value,
+            "candidate_checkpoint_sha256": checkpoint_sha256,
+        }
     report_path = report_path.expanduser().resolve()
     if not report_path.is_file() or report_path.is_symlink():
         raise PolicyExportError("promotion report is missing or unsafe")
@@ -458,28 +464,38 @@ def _validated_promotion_report(
         raise PolicyExportError("promotion report must be a mapping")
     candidate = report.get("candidate")
     checks = report.get("checks")
+    status = report.get("status")
     if (
         report.get("schema_version") != 1
-        or report.get("status") != "passed"
+        or status not in {"passed", "failed"}
         or report.get("generation") != generation_value
         or not isinstance(candidate, Mapping)
         or not isinstance(checks, Mapping)
         or not checks
-        or not all(value is True for value in checks.values())
+        or not all(isinstance(value, bool) for value in checks.values())
     ):
-        raise PolicyExportError("promotion report has not passed every gate")
-    checkpoint_sha256 = sha256_file(checkpoint_path)
+        raise PolicyExportError("promotion report contract is invalid")
+    checks_passed = all(value is True for value in checks.values())
+    if (status == "passed") != checks_passed:
+        raise PolicyExportError("promotion report status disagrees with checks")
     if candidate.get("sha256") != checkpoint_sha256:
         raise PolicyExportError("promotion report candidate hash differs from checkpoint")
     parent = report.get("parent")
-    if not isinstance(parent, Mapping) or not isinstance(parent.get("sha256"), str):
+    if (
+        not isinstance(parent, Mapping)
+        or not isinstance(parent.get("sha256"), str)
+        or not parent["sha256"]
+    ):
         raise PolicyExportError("promotion report parent hash is missing")
     return {
-        "offline_gate": "passed",
+        "offline_gate": status,
         "generation": generation_value,
         "report_sha256": sha256_file(report_path),
         "parent_checkpoint_sha256": parent["sha256"],
         "candidate_checkpoint_sha256": checkpoint_sha256,
+        "failed_checks": sorted(
+            str(name) for name, value in checks.items() if value is False
+        ),
     }
 
 

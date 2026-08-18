@@ -594,10 +594,13 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
   --candidate artifacts/runs/front_cam_policy/<current-run>/best.pt
 ```
 
-성공하면 candidate run에 `promotion_gate.json`을 atomic하게 기록한다. G1 이상
-export는 이 report가 모든 gate를 통과했고 candidate SHA-256과 일치할 때만
-허용한다. manifest에는 report, parent와 candidate hash가 들어간다. G0 export는
-promotion report가 필요 없다.
+비교 결과는 성공과 실패 모두 candidate run의 `promotion_gate.json`에 atomic하게
+기록하며, 실패 시 command는 non-zero로 종료한다. G1 이상 export에서 이 report는
+선택 사항이다. report를 주면 exporter가 generation과 candidate SHA-256 및 내부
+status/check의 일관성을 검증한 뒤 manifest에 `passed` 또는 `failed`, 실패 항목과
+parent/candidate hash를 기록한다. report를 생략하면 `not_evaluated`로 기록한다.
+offline 결과는 artifact 생성·배포를 차단하지 않으며 실제 제한 주행 판단 자료로
+사용한다. G0 export에는 promotion metadata를 추가하지 않는다.
 
 ```bash
 /home/xytron/.local/bin/uv run --locked xycar-export-policy \
@@ -607,9 +610,11 @@ promotion report가 필요 없다.
   --require-schema-version 1
 ```
 
-offline gate를 통과한 artifact도 별도 실행 승인을 받은 제한 실차 검증 전에는 다음
-Guided 세대 parent로 사용하지 않는다. G2 이상은 G1 config와 split을 새 이름으로
-복사하고 `current_generation`, `split_manifest`, `output.run_name`을 함께 올린다.
+offline 결과와 무관하게 새 artifact는 별도 실행 승인을 받은 제한 실차 검증 전에는
+다음 Guided 세대 parent로 사용하지 않는다. offline 실패 모델을 실차 평가할 때는
+manifest의 `promotion.offline_gate`와 `failed_checks`를 확인하고 그 상태를 시험 기록에
+남긴다. G2 이상은 G1 config와 split을 새 이름으로 복사하고 `current_generation`,
+`split_manifest`, `output.run_name`을 함께 올린다.
 
 차량 두 root를 Laptop으로 가져올 때는 하나의 directory로 합치지 않는다. Manual은
 직결 LAN exact mirror를 쓴다. Guided는 generation과 collection ID의 정확한 cohort만
@@ -726,7 +731,7 @@ artifacts/runs/front_cam_policy/<run-id>/
   probe_summary.json  # --stop-after-epoch probe에서만 생성
   test_metrics.json
   summary.json
-  promotion_gate.json  # G1+ parent/candidate offline 비교가 통과하면 생성
+  promotion_gate.json  # G1+ parent/candidate offline 비교 결과(성공 또는 실패)
 ```
 
 best checkpoint 선택식은 `val_angle_mae + 0.25 * val_speed_mae`다. A/B winner도
@@ -762,7 +767,9 @@ artifact ID는 덮어쓰지 않는다. stateless schema v1은 image `[1,3,224,22
 
 G1 이상 run은 아래 명령에 같은 run의
 `--promotion-report artifacts/runs/front_cam_policy/<stateless-run>/promotion_gate.json`
-을 추가한다.
+을 선택적으로 추가한다. 통과 report는 `passed`, 실패 report는 `failed`, 옵션을
+생략하면 `not_evaluated`가 artifact manifest에 기록되며 어느 경우도 export를
+차단하지 않는다.
 
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
