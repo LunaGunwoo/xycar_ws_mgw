@@ -19,16 +19,16 @@ ROAD_WARP_GEOMETRY = "perspective_road_warp_then_bicubic_resize"
 
 @dataclass(frozen=True)
 class RoadWarpConfig:
-    top_y: float = 0.605
-    bottom_y: float = 1.0
+    top_y: float = 0.5
+    bottom_y: float = 0.933
     top_left_x: float = 0.34
     top_right_x: float = 0.66
     bottom_left_x: float = 0.0
     bottom_right_x: float = 1.0
-    bev_width: int = 400
-    bev_height: int = 200
-    dst_left_x: float = 0.16
-    dst_right_x: float = 0.84
+    bev_width: int = 224
+    bev_height: int = 224
+    dst_left_x: float = 0.0
+    dst_right_x: float = 1.0
 
     def __post_init__(self) -> None:
         for name in (

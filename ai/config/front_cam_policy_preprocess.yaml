@@ -1,12 +1,12 @@
 schema_version: 1
 warp:
   top_y: 0.5
-  bottom_y: 1.0
+  bottom_y: 0.933
   top_left_x: 0.34
   top_right_x: 0.66
   bottom_left_x: 0.0
   bottom_right_x: 1.0
   bev_width: 224
-  bev_height: 200
+  bev_height: 224
   dst_left_x: 0.0
   dst_right_x: 1.0

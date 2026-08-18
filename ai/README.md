@@ -343,6 +343,25 @@ warp parameter는 `config/front_cam_policy_preprocess.yaml`에 저장한다. 모
 도로로 사용할 사다리꼴, `bev_width`/`bev_height`는 warp 출력 크기,
 `dst_left_x`/`dst_right_x`는 출력에서 도로 좌우 경계다.
 
+2026-08-18 이후 학습·export·runtime의 canonical road-warp는 아래 값으로 고정한다.
+새 모델은 반드시 이 tracked YAML을 사용하고 artifact manifest에 같은 parameter와
+SHA-256을 내장한다. GUI가 저장하는 차량의 untracked YAML은 비교용 candidate일
+뿐이며, 명시적으로 이 표와 tracked YAML을 함께 갱신하고 새 모델을 처음부터
+학습하기 전에는 배포 계약을 바꾸지 않는다.
+
+| parameter | fixed value |
+| --- | ---: |
+| `top_y` | `0.500` |
+| `bottom_y` | `0.933` |
+| `top_left_x` | `0.340` |
+| `top_right_x` | `0.660` |
+| `bottom_left_x` | `0.000` |
+| `bottom_right_x` | `1.000` |
+| `bev_width` | `224` |
+| `bev_height` | `224` |
+| `dst_left_x` | `0.000` |
+| `dst_right_x` | `1.000` |
+
 GUI는 ROS, camera device와 motor를 열지 않고 WSL ext4 dataset의 저장된 image만
 읽는다. 왼쪽에서 원본 ROI와 warped 결과를 확인하고 slider를 움직인다. 변경은
 preview에만 적용되며 **Save YAML** 버튼이나 `S`를 눌러야 파일에 기록된다.

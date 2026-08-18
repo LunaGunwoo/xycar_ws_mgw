@@ -114,14 +114,22 @@ ros2 run xycar_ai_drive live_warp_tuner --ros-args \
   -p output_config_path:=/home/xytron/.config/xycar/front_cam_policy_preprocess.yaml
 ```
 
-초기값은 checkout의 read-only 학습 설정
+매 실행의 초기값은 checkout의 read-only canonical 학습 설정
 `/home/xytron/xycar_ws_mgw/ai/config/front_cam_policy_preprocess.yaml`에서 읽는다.
 차량 checkout을 수정하지 않도록 `S`의 기본 출력은
 `/home/xytron/.config/xycar/front_cam_policy_preprocess.yaml`이다. 출력이 이미
-있으면 다음 실행에서는 그 값을 이어서 연다. 다른 topic이나 경로가 필요하면
+있어도 다음 실행은 canonical 학습 설정에서 다시 시작한다. 출력은 개발 PC에서
+검토하기 위한 candidate이며 runtime이나 다음 학습에 자동 반영되지 않는다. 다른
+topic이나 경로가 필요하면
 `camera_topic:=...`, `initial_config_path:=...`, `output_config_path:=...` launch
 인자로 명시한다. 저장한 값을 학습 source에 반영하는 절차는 `ai/README.md`를
 따른다.
+
+고정 canonical 값은 `top_y=0.500`, `bottom_y=0.933`,
+`top_left_x=0.340`, `top_right_x=0.660`, `bottom_left_x=0.000`,
+`bottom_right_x=1.000`, `bev_width=224`, `bev_height=224`,
+`dst_left_x=0.000`, `dst_right_x=1.000`이다. 실제 policy runtime은 GUI output이
+아니라 배포 artifact manifest에 내장된 동일한 road-warp 계약을 사용한다.
 
 ## 사람 보정 데이터 수집
 

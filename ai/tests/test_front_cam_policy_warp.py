@@ -17,6 +17,24 @@ from xycar_ai.front_cam_policy_warp import (
 from xycar_ai.front_cam_policy_warp_tuner import WarpTunerState
 
 
+def test_canonical_warp_defaults_match_tracked_yaml():
+    config_path = Path(__file__).parents[1] / "config" / "front_cam_policy_preprocess.yaml"
+
+    assert load_road_warp_config(config_path) == RoadWarpConfig(
+        top_y=0.5,
+        bottom_y=0.933,
+        top_left_x=0.34,
+        top_right_x=0.66,
+        bottom_left_x=0.0,
+        bottom_right_x=1.0,
+        bev_width=224,
+        bev_height=224,
+        dst_left_x=0.0,
+        dst_right_x=1.0,
+    )
+    assert load_road_warp_config(config_path) == RoadWarpConfig()
+
+
 def test_warp_yaml_round_trip_and_strict_validation(tmp_path: Path):
     path = tmp_path / "warp.yaml"
     expected = _identity_warp()

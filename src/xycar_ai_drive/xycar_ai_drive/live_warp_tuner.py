@@ -75,7 +75,10 @@ class LiveWarpTunerNode(Node):
 
         initial_path = Path(initial_path_text).expanduser()
         self.output_path = Path(output_path_text).expanduser()
-        load_path = self.output_path if self.output_path.is_file() else initial_path
+        # Every GUI session starts from the tracked canonical training config.
+        # The untracked output is a review candidate and must never silently
+        # replace the fixed training/runtime contract on the next launch.
+        load_path = initial_path
         self.initial_config = load_road_warp_config(load_path)
         self.loaded_config_path = load_path
         self.latest_frame: np.ndarray | None = None
