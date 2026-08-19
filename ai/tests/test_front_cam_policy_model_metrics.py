@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from xycar_ai.compact_control import COMPACT_CONTROL_ENCODING
 from xycar_ai.front_cam_policy_metrics import (
     ClassificationMetricAccumulator,
     combine_policy_losses,
@@ -93,6 +94,72 @@ def test_ar_control_token_vit_rejects_invalid_history():
         model(images, torch.zeros(1, 4, 2))
     with pytest.raises(ValueError, match=r"\[0,200\]"):
         model(images, torch.full((1, 4, 2), 201, dtype=torch.long))
+
+
+def test_compact_ar_uses_unknown_tokens_and_unequal_shared_outputs():
+    model = AutoregressiveControlTokenViTPolicy(
+        model_name="vit_tiny_patch16_224.augreg_in21k_ft_in1k",
+        pretrained=False,
+        image_size=32,
+        history_frames=4,
+        control_encoding=COMPACT_CONTROL_ENCODING,
+    ).eval()
+    images = torch.zeros(2, 3, 32, 32)
+    history = torch.tensor(
+        [
+            [[81, 82], [81, 82], [0, 40], [80, 70]],
+            [[81, 82], [40, 55], [41, 56], [39, 54]],
+        ],
+        dtype=torch.long,
+    )
+    with torch.no_grad():
+        features = model.forward_features(images, history)
+        outputs = model(images, history)
+    expected_angle = torch.nn.functional.linear(
+        features[:, -2],
+        model.control_token_embedding.weight[:81],
+        model.angle_output_bias,
+    )
+    expected_speed = torch.nn.functional.linear(
+        features[:, -1],
+        model.control_token_embedding.weight[40:71],
+        model.speed_output_bias,
+    )
+
+    assert tuple(outputs["angle_logits"].shape) == (2, 81)
+    assert tuple(outputs["speed_logits"].shape) == (2, 31)
+    assert torch.equal(outputs["angle_logits"], expected_angle)
+    assert torch.equal(outputs["speed_logits"], expected_speed)
+    with pytest.raises(ValueError, match="invalid token id"):
+        model(images[:1], torch.tensor([[[0, 39]] * 4], dtype=torch.long))
+
+
+def test_compact_metrics_decode_angle_back_to_normalized_units():
+    angle_logits = torch.full((2, 81), -1000.0)
+    speed_logits = torch.full((2, 31), -1000.0)
+    angle_logits[0, 0] = angle_logits[1, 80] = 1000.0
+    speed_logits[0, 0] = speed_logits[1, 30] = 1000.0
+    accumulator = ClassificationMetricAccumulator(
+        "test",
+        control_encoding=COMPACT_CONTROL_ENCODING,
+    )
+    accumulator.update(
+        outputs={"angle_logits": angle_logits, "speed_logits": speed_logits},
+        batch={
+            "angle": torch.tensor([-100.0, 100.0]),
+            "speed": torch.tensor([0.0, 30.0]),
+            "angle_class_id": torch.tensor([0, 80]),
+            "speed_class_id": torch.tensor([0, 30]),
+        },
+        total_loss=torch.tensor(0.0),
+        angle_loss=torch.tensor(0.0),
+        speed_loss=torch.tensor(0.0),
+        emd_loss=torch.tensor(0.0),
+    )
+    metrics = accumulator.compute()
+    assert metrics["test_angle_mae"] == 0.0
+    assert metrics["test_angle_driver_mae"] == 0.0
+    assert metrics["test_speed_mae"] == 0.0
 
 
 def test_ordinal_emd_tracks_class_distance_and_combines_losses():

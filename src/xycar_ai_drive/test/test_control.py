@@ -25,7 +25,9 @@ from xycar_ai_drive.control import (
     HoldDriveGate,
     ToggleAction,
     ToggleDriveGate,
+    command_history_token_ids,
     decode_class_ids,
+    decode_compact_output_ids,
     is_fresh,
 )
 from xycar_ai_drive.guided_policy_collector import (
@@ -213,6 +215,17 @@ def test_class_decode_blocks_reverse_without_positive_speed_cap():
         decode_class_ids(-1, 100)
     with pytest.raises(ValueError):
         decode_class_ids(100, 201)
+
+
+def test_compact_decode_and_executed_history_endpoint_mapping():
+    assert decode_compact_output_ids(0, 0) == DriveCommand(-100.0, 0.0)
+    assert decode_compact_output_ids(80, 30) == DriveCommand(100.0, 30.0)
+    assert command_history_token_ids(DriveCommand(-100.0, 0.0)) == (0, 40)
+    assert command_history_token_ids(DriveCommand(100.0, 30.0)) == (80, 70)
+    with pytest.raises(ValueError, match=r'\[0, 80\]'):
+        decode_compact_output_ids(81, 0)
+    with pytest.raises(ValueError, match=r'\[0, 30\]'):
+        decode_compact_output_ids(40, 31)
 
 
 def test_guided_command_uses_rb_takeover_and_preserves_speed_trim():
@@ -809,6 +822,136 @@ def test_v2_artifact_history_contract_and_runtime_queue(monkeypatch, tmp_path):
     with pytest.raises(PolicyRuntimeError, match='non-finite'):
         runtime.infer(frame)
     assert runtime.history_class_ids == ((100, 125),) * 4
+
+
+@pytest.mark.parametrize(
+    ('initialization', 'initial_ids', 'initial_command'),
+    [
+        ('learned_unknown_tokens', [81, 82], None),
+        ('canonical_initial_command', [40, 55], [0, 15]),
+    ],
+)
+def test_schema_v4_runtime_uses_compact_initial_and_external_tokens(
+    tmp_path,
+    initialization,
+    initial_ids,
+    initial_command,
+):
+    torch = pytest.importorskip('torch')
+
+    class CompactPolicy(torch.nn.Module):
+        def forward(self, images, history_token_ids):
+            batch_size = images.shape[0]
+            history_signal = history_token_ids[:, :1, :1].to(images.dtype) * 0
+            angle = torch.full(
+                (batch_size, 81), -10.0, dtype=images.dtype
+            ) + history_signal
+            speed = torch.full(
+                (batch_size, 31), -10.0, dtype=images.dtype
+            ) + history_signal
+            angle[:, 0] = 10.0
+            speed[:, 30] = 10.0
+            return angle, speed
+
+    artifact = tmp_path / 'fixture-compact-ar-policy'
+    artifact.mkdir()
+    sample_image = torch.zeros(1, 3, 4, 4)
+    sample_history = torch.tensor([[initial_ids] * 4], dtype=torch.long)
+    traced = torch.jit.trace(
+        CompactPolicy(),
+        (sample_image, sample_history),
+        strict=True,
+    )
+    traced.save(str(artifact / 'model.ts'))
+    manifest = {
+        'schema_version': 4,
+        'artifact_id': artifact.name,
+        'model': {
+            'format': 'torchscript',
+            'file': 'model.ts',
+            'architecture': 'ar_control_tokens',
+            'control_encoding': 'driver_compact_v1',
+            'input': {
+                'kind': 'tuple',
+                'order': ['images', 'history_token_ids'],
+                'images': {
+                    'color_space': 'RGB',
+                    'dtype': 'float32',
+                    'shape': [1, 3, 4, 4],
+                },
+                'history_token_ids': {
+                    'dtype': 'int64',
+                    'shape': [1, 4, 2],
+                },
+            },
+            'output': {
+                'kind': 'tuple',
+                'order': ['angle_logits', 'speed_logits'],
+                'shapes': [[1, 81], [1, 31]],
+            },
+        },
+        'preprocessing': {
+            'geometry': 'full_frame_bicubic_resize',
+            'image_size': 4,
+            'mean': [0.5, 0.5, 0.5],
+            'std': [0.5, 0.5, 0.5],
+        },
+        'label_contract': {
+            'control_encoding': 'driver_compact_v1',
+            'output_shapes': {
+                'angle_logits': [1, 81],
+                'speed_logits': [1, 31],
+            },
+            'angle': {'num_classes': 81, 'driver_range': [-40, 40]},
+            'speed': {'num_classes': 31, 'command_range': [0, 30]},
+            'shared_numeric_vocabulary': {
+                'numeric_range': [-40, 40],
+                'unknown_angle_token_id': 81,
+                'unknown_speed_token_id': 82,
+                'angle_query_token_id': 83,
+                'speed_query_token_id': 84,
+                'vocabulary_size': 85,
+            },
+        },
+        'history': {
+            'frames': 4,
+            'pair_order': ['angle_token_id', 'speed_token_id'],
+            'time_order': 'oldest_to_newest',
+            'initialization': initialization,
+            'initial_token_ids': initial_ids,
+            'actual_angle_token_range': [0, 80],
+            'actual_speed_token_range': [40, 70],
+            'update': 'externally_executed_commands',
+        },
+        'steering_contract': steering_contract_mapping(),
+    }
+    if initial_command is not None:
+        manifest['history']['initial_command'] = initial_command
+    (artifact / 'manifest.yaml').write_text(
+        yaml.safe_dump(manifest, sort_keys=False),
+        encoding='utf-8',
+    )
+    _write_checksums(artifact)
+
+    contract = load_policy_artifact(artifact)
+    assert contract.output_shapes == ((1, 81), (1, 31))
+    assert contract.history is not None
+    assert contract.history.initial_class_ids == tuple(initial_ids)
+    runtime = TorchScriptPolicy(
+        artifact_dir=str(artifact),
+        torch_num_threads=1,
+        warmup_count=0,
+    )
+    frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    prediction = runtime.infer(frame, [initial_ids] * 4)
+    assert prediction.command == DriveCommand(-100.0, 30.0)
+    prediction = runtime.infer(
+        frame,
+        [[0, 40], [20, 45], [40, 55], [80, 70]],
+    )
+    assert prediction.command == DriveCommand(-100.0, 30.0)
+    with pytest.raises(PolicyRuntimeError, match='executed history'):
+        runtime.infer(frame, [[81, 40]] * 4)
 
 
 def test_road_warp_artifact_and_runtime_preprocessing(tmp_path):

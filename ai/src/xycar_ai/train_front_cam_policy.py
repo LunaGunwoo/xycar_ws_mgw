@@ -19,6 +19,16 @@ from torch import nn
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
+from xycar_ai.compact_control import (
+    ANGLE_OUTPUT_CLASSES,
+    COMPACT_CONTROL_ENCODING,
+    LEGACY_CONTROL_ENCODING,
+    SPEED_OUTPUT_CLASSES,
+    angle_target_class_id,
+    executed_command_to_history_tokens,
+    speed_target_class_id,
+    unknown_history_pair,
+)
 from xycar_ai.config import TrainConfig, load_train_config
 from xycar_ai.front_cam_policy_data import (
     COMMAND_MAX,
@@ -29,7 +39,9 @@ from xycar_ai.front_cam_policy_data import (
     PolicyDataSplits,
     PolicySample,
     PolicySession,
+    attach_constant_control_history,
     attach_executed_command_history,
+    attach_unknown_control_history,
     attach_training_teacher_forced_history,
     build_policy_data_splits,
     compute_sqrt_inverse_frequency_weights,
@@ -78,14 +90,51 @@ def main(argv: Iterable[str] | None = None) -> int:
         and config.model.history_update == "externally_executed_commands"
     )
     sequence_rollout = config.training.sequence_length > 0
-    if external_history and not sequence_rollout:
+    unknown_frame_history = (
+        config.training.history_training_source == "learned_unknown_tokens"
+    )
+    canonical_frame_history = (
+        config.training.history_training_source == "canonical_initial_command"
+        and not sequence_rollout
+    )
+    teacher_forced_frame_history = (
+        config.training.history_training_source == "teacher_forced_executed_commands"
+    )
+    if unknown_frame_history:
+        splits = attach_unknown_control_history(
+            splits,
+            config.model.history_frames,
+        )
+    elif canonical_frame_history:
+        if config.model.control_encoding == COMPACT_CONTROL_ENCODING:
+            initial_pair = executed_command_to_history_tokens(
+                config.model.history_initial_angle,
+                config.model.history_initial_speed,
+            )
+        else:
+            initial_pair = (
+                config.model.history_initial_angle + 100,
+                config.model.history_initial_speed + 100,
+            )
+        splits = attach_constant_control_history(
+            splits,
+            config.model.history_frames,
+            initial_pair,
+        )
+    elif teacher_forced_frame_history or (external_history and not sequence_rollout):
         splits = attach_executed_command_history(
             splits,
             config.model.history_frames,
+            control_encoding=config.model.control_encoding,
+            initial_command=(
+                config.model.history_initial_angle,
+                config.model.history_initial_speed,
+            ),
         )
     elif (
         config.model.architecture == AR_CONTROL_TOKEN_ARCHITECTURE
         and not external_history
+        and not unknown_frame_history
     ):
         validate_session_initial_classes(
             splits,
@@ -143,6 +192,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         image_size=config.model.image_size,
         history_frames=config.model.history_frames,
         control_token_type_embedding=config.model.control_token_type_embedding,
+        control_encoding=config.model.control_encoding,
     ).to(device)
     initialization = initialize_model_weights(
         model=model,
@@ -163,18 +213,6 @@ def main(argv: Iterable[str] | None = None) -> int:
         device=device,
         road_warp=road_warp,
     )
-    sequence_loader = (
-        make_sequence_loader(
-            sessions=splits.train_sessions,
-            config=config,
-            model_data_config=model.model_data_config,
-            device=device,
-            road_warp=road_warp,
-        )
-        if sequence_rollout
-        else None
-    )
-
     train_samples = splits.train_samples
     angle_weights = class_weights(
         train_samples,
@@ -198,11 +236,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         weight=speed_weights,
         label_smoothing=config.loss.speed_label_smoothing,
     )
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.optimizer.learning_rate,
-        weight_decay=config.optimizer.weight_decay,
-    )
+    optimizer = build_optimizer(model, config)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
         lr_lambda=cosine_lr_factor(
@@ -257,9 +291,17 @@ def main(argv: Iterable[str] | None = None) -> int:
     if initialization is not None:
         source_state["initialization"] = initialization
     for epoch in range(start_epoch, config.training.epochs + 1):
-        if sequence_loader is not None:
+        if sequence_rollout:
             if not isinstance(model, AutoregressiveControlTokenViTPolicy):
                 raise TypeError("sequence rollout requires an AR policy")
+            sequence_loader = make_sequence_loader(
+                sessions=splits.train_sessions,
+                config=config,
+                model_data_config=model.model_data_config,
+                device=device,
+                road_warp=road_warp,
+                epoch=epoch,
+            )
             train_metrics = run_sequence_rollout_epoch(
                 model=model,
                 loader=sequence_loader,
@@ -440,6 +482,173 @@ def main(argv: Iterable[str] | None = None) -> int:
 
 
 def build_label_contract(config: TrainConfig) -> dict[str, object]:
+    if config.model.control_encoding == COMPACT_CONTROL_ENCODING:
+        canonical_initialization = (
+            config.training.history_training_source == "canonical_initial_command"
+        )
+        unknown_initialization = not canonical_initialization and bool(
+            config.training.sequence_length
+            or config.training.history_training_source == "learned_unknown_tokens"
+        )
+        compact_initial_pair = (
+            unknown_history_pair()
+            if unknown_initialization
+            else executed_command_to_history_tokens(
+                config.model.history_initial_angle,
+                config.model.history_initial_speed,
+            )
+        )
+        compact_initialization = (
+            "learned_unknown_tokens"
+            if unknown_initialization
+            else "canonical_initial_command"
+        )
+        contract: dict[str, object] = {
+            "schema_version": 2,
+            "control_encoding": COMPACT_CONTROL_ENCODING,
+            "output_keys": ["angle_logits", "speed_logits"],
+            "output_shapes": {
+                "angle_logits": [1, ANGLE_OUTPUT_CLASSES],
+                "speed_logits": [1, SPEED_OUTPUT_CLASSES],
+            },
+            "angle": {
+                "num_classes": ANGLE_OUTPUT_CLASSES,
+                "driver_range": [-40, 40],
+                "class_id_mapping": (
+                    "round(clamp(normalized_angle * 0.4, -40, 40)) + 40"
+                ),
+                "decode_driver_mapping": "class_id - 40",
+                "decode_normalized_mapping": "(class_id - 40) / 0.4",
+            },
+            "speed": {
+                "num_classes": SPEED_OUTPUT_CLASSES,
+                "command_range": [0, 30],
+                "class_id_mapping": "round(clamp(speed, 0, 30))",
+                "decode_mapping": "class_id",
+            },
+            "shared_numeric_vocabulary": {
+                "numeric_range": [-40, 40],
+                "numeric_token_mapping": "value + 40",
+                "numeric_token_ids": [0, 80],
+                "unknown_angle_token_id": 81,
+                "unknown_speed_token_id": 82,
+                "angle_query_token_id": 83,
+                "speed_query_token_id": 84,
+                "vocabulary_size": 85,
+            },
+            "train_angle_target": {
+                "method": "centered_mean",
+                "window_size": config.data.train_angle_mean_window,
+                "padding": "repeat_session_edge",
+                "applied_splits": ["train"],
+                "average_before_quantization": True,
+                "speed_target": "unchanged",
+            },
+            "horizontal_flip_mapping": {
+                "angle_raw": "-angle_raw",
+                "angle": "-angle",
+                "angle_class_id": "80 - angle_class_id",
+                "angle_history_token_id": "80 - token_id",
+                "unknown_angle_token_id": "unchanged",
+                "speed": "unchanged",
+                "speed_class_id": "unchanged",
+                "speed_history_token_id": "unchanged",
+            },
+        }
+        if config.model.architecture == AR_CONTROL_TOKEN_ARCHITECTURE:
+            history_contract: dict[str, object] = {
+                "frames": config.model.history_frames,
+                "shape": [config.model.history_frames, 2],
+                "input_name": "history_token_ids",
+                "pair_order": ["angle_token_id", "speed_token_id"],
+                "time_order": "oldest_to_newest",
+                "initialization": compact_initialization,
+                "initial_command": [
+                    config.model.history_initial_angle,
+                    config.model.history_initial_speed,
+                ],
+                "initial_token_ids": list(compact_initial_pair),
+                "actual_angle_token_range": [0, 80],
+                "actual_speed_token_range": [40, 70],
+                "update": "externally_executed_commands",
+                "known_train_label_leakage": False,
+            }
+            if config.training.sequence_length:
+                history_contract.update(
+                    {
+                        "train_source": "self_predicted_argmax_sequence_rollout",
+                        "train_prediction_execution": {
+                            "angle_output_class_clamp": [0, 80],
+                            "speed_output_class_clamp": [0, 30],
+                            "angle_history_token_mapping": "class_id",
+                            "speed_history_token_mapping": "class_id + 40",
+                            "gradient": "detached_before_history_update",
+                        },
+                        "sequence_length": config.training.sequence_length,
+                        "sequence_boundaries": (
+                            "session_start_reset_non_overlapping_compute_chunks_"
+                            "carry_predicted_history"
+                        ),
+                        "sequence_reverse_probability": 0.0,
+                        "evaluation_source": "predicted_argmax_rollout",
+                        "session_history_initialization": compact_initialization,
+                        "compute_chunk_resets_history": False,
+                        "augmentation_scope": "whole_session_per_epoch",
+                        "edge_padding": "masked_repeat_last_frame",
+                        "teacher_forcing": False,
+                        "scheduled_sampling": False,
+                    }
+                )
+            elif unknown_initialization:
+                history_contract.update(
+                    {
+                        "train_source": "learned_unknown_tokens",
+                        "evaluation_source": "learned_unknown_tokens",
+                        "frame_pretraining": True,
+                        "labels_used_as_history": False,
+                        "edge_padding": "not_applicable",
+                    }
+                )
+            elif canonical_initialization:
+                history_contract.update(
+                    {
+                        "train_source": "canonical_initial_command",
+                        "evaluation_source": "canonical_initial_command",
+                        "frame_pretraining": True,
+                        "labels_used_as_history": False,
+                        "edge_padding": "not_applicable",
+                    }
+                )
+            elif (
+                config.training.history_training_source
+                == "teacher_forced_executed_commands"
+            ):
+                history_contract.update(
+                    {
+                        "train_source": (
+                            "ground_truth_teacher_forcing_previous_executed_commands"
+                        ),
+                        "train_angle_source": "previous_raw_executed_command",
+                        "train_speed_source": "previous_raw_executed_command",
+                        "evaluation_source": "previous_actual_executed_commands",
+                        "edge_padding": "canonical_initial_command",
+                        "current_target_used_as_history": False,
+                        "future_target_used_as_history": False,
+                    }
+                )
+            else:
+                history_contract.update(
+                    {
+                        "train_source": "previous_actual_executed_commands",
+                        "evaluation_source": "previous_actual_executed_commands",
+                        "edge_padding": (
+                            "session_metadata_or_canonical_initial_command"
+                        ),
+                    }
+                )
+            contract["history"] = history_contract
+        return contract
+
     contract: dict[str, object] = {
         "schema_version": 1,
         "output_keys": ["angle_logits", "speed_logits"],
@@ -490,13 +699,30 @@ def build_label_contract(config: TrainConfig) -> dict[str, object]:
                         "gradient": "detached_before_history_update",
                     },
                     "sequence_length": config.training.sequence_length,
-                    "sequence_boundaries": "session_local_non_overlapping_clips",
+                    "sequence_boundaries": (
+                        "session_start_reset_non_overlapping_compute_chunks_"
+                        "carry_predicted_history"
+                    ),
                     "sequence_reverse_probability": (
                         config.training.sequence_reverse_probability
                     ),
                     "evaluation_source": "predicted_argmax_rollout",
-                    "clip_history_initialization": "canonical_initial_command",
+                    "session_history_initialization": ("canonical_initial_command"),
+                    "compute_chunk_resets_history": False,
+                    "augmentation_scope": "whole_session_per_epoch",
                     "edge_padding": "masked_repeat_last_frame",
+                    "known_train_label_leakage": False,
+                }
+            )
+        elif config.training.history_training_source == "canonical_initial_command":
+            history_contract.update(
+                {
+                    "update": "externally_executed_commands",
+                    "train_source": "canonical_initial_command",
+                    "evaluation_source": "canonical_initial_command",
+                    "frame_pretraining": True,
+                    "labels_used_as_history": False,
+                    "edge_padding": "not_applicable",
                     "known_train_label_leakage": False,
                 }
             )
@@ -585,6 +811,7 @@ def make_loaders(
                 config.augmentation.horizontal_flip_probability if training else 0.0
             ),
             road_warp=road_warp,
+            control_encoding=config.model.control_encoding,
         )
         generator = torch.Generator()
         generator.manual_seed(config.training.seed + offset)
@@ -627,6 +854,7 @@ def make_sequence_loader(
     model_data_config: Mapping[str, object],
     device: torch.device,
     road_warp: RoadWarpConfig | None = None,
+    epoch: int = 1,
 ) -> DataLoader:
     sequence_length = config.training.sequence_length
     if sequence_length <= 0:
@@ -635,28 +863,30 @@ def make_sequence_loader(
         sessions,
         sequence_length=sequence_length,
         transform=make_policy_transform(
-            train=True,
+            train=False,
             image_size=config.model.image_size,
             model_data_config=model_data_config,
             augmentation=config.augmentation,
         ),
-        horizontal_flip_probability=(
-            config.augmentation.horizontal_flip_probability
-        ),
-        sequence_reverse_probability=(
-            config.training.sequence_reverse_probability
-        ),
+        horizontal_flip_probability=(config.augmentation.horizontal_flip_probability),
+        sequence_reverse_probability=(config.training.sequence_reverse_probability),
         road_warp=road_warp,
+        control_encoding=config.model.control_encoding,
+        augmentation=config.augmentation,
+        augmentation_seed=config.training.seed + epoch * 100_003,
     )
     generator = torch.Generator()
-    generator.manual_seed(config.training.seed + 3)
+    generator.manual_seed(config.training.seed + epoch * 100_019)
+    max_batch_size = max(1, config.training.batch_size // sequence_length)
     return DataLoader(
         dataset,
-        batch_size=max(1, config.training.batch_size // sequence_length),
-        shuffle=True,
+        batch_sampler=dataset.session_ordered_batches(
+            max_batch_size=max_batch_size,
+            seed=config.training.seed + epoch * 100_043,
+        ),
         num_workers=config.data.num_workers,
         pin_memory=device.type == "cuda",
-        persistent_workers=config.data.num_workers > 0,
+        persistent_workers=False,
         generator=generator,
         worker_init_fn=seed_worker,
     )
@@ -677,12 +907,9 @@ def evaluate_policy(
     scaler: torch.amp.GradScaler,
     amp_enabled: bool,
 ) -> dict[str, float]:
-    if (
-        isinstance(model, AutoregressiveControlTokenViTPolicy)
-        and (
-            config.model.history_update == "predicted_argmax"
-            or config.training.sequence_length > 0
-        )
+    if isinstance(model, AutoregressiveControlTokenViTPolicy) and (
+        config.model.history_update == "predicted_argmax"
+        or config.training.sequence_length > 0
     ):
         return run_rollout_evaluation(
             model=model,
@@ -726,16 +953,30 @@ def run_rollout_evaluation(
     amp_enabled: bool,
 ) -> dict[str, float]:
     model.eval()
-    accumulator = ClassificationMetricAccumulator(split_name)
+    accumulator = ClassificationMetricAccumulator(
+        split_name,
+        control_encoding=config.model.control_encoding,
+    )
     progress = tqdm(
         total=sum(len(session.samples) for session in sessions),
         desc=split_name,
         leave=False,
     )
-    initial_pair = [
-        config.model.history_initial_angle + 100,
-        config.model.history_initial_speed + 100,
-    ]
+    initial_pair = (
+        list(
+            executed_command_to_history_tokens(
+                config.model.history_initial_angle,
+                config.model.history_initial_speed,
+            )
+            if config.training.history_training_source == "canonical_initial_command"
+            else unknown_history_pair()
+        )
+        if config.model.control_encoding == COMPACT_CONTROL_ENCODING
+        else [
+            config.model.history_initial_angle + 100,
+            config.model.history_initial_speed + 100,
+        ]
+    )
     transform = make_policy_transform(
         train=False,
         image_size=config.model.image_size,
@@ -754,6 +995,7 @@ def run_rollout_evaluation(
                 transform=transform,
                 horizontal_flip_probability=0.0,
                 road_warp=road_warp,
+                control_encoding=config.model.control_encoding,
             )
             for item in dataset:
                 images = (
@@ -792,7 +1034,10 @@ def run_rollout_evaluation(
                     speed_loss=speed_loss.detach(),
                     emd_loss=emd_loss.detach(),
                 )
-                predicted_pair = predicted_executed_class_pair(outputs)
+                predicted_pair = predicted_executed_class_pair(
+                    outputs,
+                    control_encoding=config.model.control_encoding,
+                )
                 history = torch.cat(
                     (history[:, 1:], predicted_pair.unsqueeze(1)),
                     dim=1,
@@ -809,8 +1054,17 @@ def run_rollout_evaluation(
 
 def predicted_executed_class_pair(
     outputs: Mapping[str, torch.Tensor],
+    *,
+    control_encoding: str = LEGACY_CONTROL_ENCODING,
 ) -> torch.Tensor:
     """Decode the class pair that the no-reverse runtime can publish."""
+    if control_encoding == COMPACT_CONTROL_ENCODING:
+        angle_class = outputs["angle_logits"].argmax(dim=1).clamp(0, 80)
+        speed_class = outputs["speed_logits"].argmax(dim=1).clamp(0, 30)
+        return torch.stack(
+            (angle_class, speed_class + 40),
+            dim=1,
+        ).detach()
     angle_class = outputs["angle_logits"].argmax(dim=1).clamp(0, 200)
     speed_class = outputs["speed_logits"].argmax(dim=1).clamp(100, 200)
     return torch.stack((angle_class, speed_class), dim=1).detach()
@@ -831,9 +1085,7 @@ def rollout_predicted_histories(
         raise ValueError("valid_mask must have shape [B,T]")
     expected_history_shape = (images.shape[0], model.history_frames, 2)
     if initial_history.shape != expected_history_shape:
-        raise ValueError(
-            f"initial_history must have shape {expected_history_shape}"
-        )
+        raise ValueError(f"initial_history must have shape {expected_history_shape}")
     history = initial_history.clone()
     prompts: list[torch.Tensor] = []
     was_training = model.training
@@ -847,7 +1099,14 @@ def rollout_predicted_histories(
                     enabled=amp_enabled,
                 ):
                     outputs = model(images[:, frame_index], history)
-                predicted_pair = predicted_executed_class_pair(outputs)
+                predicted_pair = predicted_executed_class_pair(
+                    outputs,
+                    control_encoding=getattr(
+                        model,
+                        "control_encoding",
+                        LEGACY_CONTROL_ENCODING,
+                    ),
+                )
                 updated = torch.cat(
                     (history[:, 1:], predicted_pair.unsqueeze(1)), dim=1
                 )
@@ -871,42 +1130,100 @@ def run_sequence_rollout_epoch(
     scaler: torch.amp.GradScaler,
     amp_enabled: bool,
 ) -> dict[str, float]:
-    """Train on histories generated by the current model over ordered clips."""
+    """Train on detached predictions carried across ordered session chunks."""
     model.train()
-    accumulator = ClassificationMetricAccumulator(split_name)
+    accumulator = ClassificationMetricAccumulator(
+        split_name,
+        control_encoding=config.model.control_encoding,
+    )
     reversed_clips = 0
     clip_count = 0
+    history_reset_count = 0
+    carried_chunk_count = 0
+    seen_sessions: set[str] = set()
+    active_histories: dict[str, torch.Tensor] = {}
     progress = tqdm(loader, desc=split_name, leave=False)
     initial_pair = torch.tensor(
-        [
-            config.model.history_initial_angle + 100,
-            config.model.history_initial_speed + 100,
-        ],
+        (
+            (
+                executed_command_to_history_tokens(
+                    config.model.history_initial_angle,
+                    config.model.history_initial_speed,
+                )
+                if config.training.history_training_source
+                == "canonical_initial_command"
+                else unknown_history_pair()
+            )
+            if config.model.control_encoding == COMPACT_CONTROL_ENCODING
+            else (
+                config.model.history_initial_angle + 100,
+                config.model.history_initial_speed + 100,
+            )
+        ),
         dtype=torch.long,
         device=device,
     )
     for batch in progress:
         images = batch["image_tensor"].to(device=device, non_blocking=True)
         valid_mask = batch["valid_mask"].to(device=device, non_blocking=True)
-        batch_size = images.shape[0]
-        initial_history = initial_pair.reshape(1, 1, 2).expand(
-            batch_size, config.model.history_frames, 2
-        )
-        history_prompts, _ = rollout_predicted_histories(
+        session_ids = [str(value) for value in batch["session_id"]]
+        if len(session_ids) != len(set(session_ids)):
+            raise ValueError("one sequence batch contains duplicate session IDs")
+        starts_session = batch["starts_session"].tolist()
+        ends_session = batch["ends_session"].tolist()
+        chunk_indices = batch["chunk_index"].tolist()
+        histories: list[torch.Tensor] = []
+        for session_id, starts, chunk_index in zip(
+            session_ids,
+            starts_session,
+            chunk_indices,
+            strict=True,
+        ):
+            if starts:
+                if chunk_index != 0 or session_id in seen_sessions:
+                    raise ValueError(
+                        f"invalid repeated sequence start for {session_id}"
+                    )
+                history = initial_pair.reshape(1, 2).expand(
+                    config.model.history_frames, 2
+                )
+                seen_sessions.add(session_id)
+                history_reset_count += 1
+            else:
+                history = active_histories.get(session_id)
+                if history is None:
+                    raise ValueError(
+                        f"missing carried sequence history for {session_id} "
+                        f"chunk {chunk_index}"
+                    )
+                carried_chunk_count += 1
+            histories.append(history)
+        initial_history = torch.stack(histories)
+        history_prompts, final_histories = rollout_predicted_histories(
             model=model,
             images=images,
             valid_mask=valid_mask,
             initial_history=initial_history,
             amp_enabled=amp_enabled,
         )
+        for session_id, ends, final_history in zip(
+            session_ids,
+            ends_session,
+            final_histories,
+            strict=True,
+        ):
+            if ends:
+                active_histories.pop(session_id, None)
+            else:
+                active_histories[session_id] = final_history.detach().clone()
         flat_images = images[valid_mask]
         flat_history = history_prompts[valid_mask]
-        angle_class = batch["angle_class_id"].to(
-            device=device, non_blocking=True
-        )[valid_mask]
-        speed_class = batch["speed_class_id"].to(
-            device=device, non_blocking=True
-        )[valid_mask]
+        angle_class = batch["angle_class_id"].to(device=device, non_blocking=True)[
+            valid_mask
+        ]
+        speed_class = batch["speed_class_id"].to(device=device, non_blocking=True)[
+            valid_mask
+        ]
         metric_batch = {
             key: value.to(device=device, non_blocking=True)[valid_mask]
             for key, value in batch.items()
@@ -962,10 +1279,16 @@ def run_sequence_rollout_epoch(
             angle_mae=f"{current[f'{split_name}_angle_mae']:.2f}",
         )
     metrics = accumulator.compute()
+    if active_histories:
+        raise ValueError(
+            "sequence epoch ended with unfinished sessions: "
+            + ", ".join(sorted(active_histories))
+        )
     metrics[f"{split_name}_sequence_clip_count"] = float(clip_count)
-    metrics[f"{split_name}_sequence_reverse_rate"] = (
-        reversed_clips / max(clip_count, 1)
-    )
+    metrics[f"{split_name}_sequence_session_count"] = float(len(seen_sessions))
+    metrics[f"{split_name}_sequence_history_reset_count"] = float(history_reset_count)
+    metrics[f"{split_name}_sequence_carried_chunk_count"] = float(carried_chunk_count)
+    metrics[f"{split_name}_sequence_reverse_rate"] = reversed_clips / max(clip_count, 1)
     return metrics
 
 
@@ -986,7 +1309,11 @@ def run_epoch(
 ) -> dict[str, float]:
     training = optimizer is not None
     model.train(training)
-    accumulator = ClassificationMetricAccumulator(split_name)
+    control_encoding = getattr(model, "control_encoding", LEGACY_CONTROL_ENCODING)
+    accumulator = ClassificationMetricAccumulator(
+        split_name,
+        control_encoding=control_encoding,
+    )
     progress = tqdm(loader, desc=split_name, leave=False)
     for batch in progress:
         images = batch["image_tensor"].to(device=device, non_blocking=True)
@@ -998,7 +1325,12 @@ def run_epoch(
         with torch.set_grad_enabled(training):
             with torch.autocast(device_type=device.type, enabled=amp_enabled):
                 if isinstance(model, AutoregressiveControlTokenViTPolicy):
-                    history_class_ids = batch["history_class_ids"].to(
+                    history_key = (
+                        "history_token_ids"
+                        if control_encoding == COMPACT_CONTROL_ENCODING
+                        else "history_class_ids"
+                    )
+                    history_class_ids = batch[history_key].to(
                         device=device,
                         non_blocking=True,
                     )
@@ -1063,9 +1395,27 @@ def class_weights(
         if config.data.ema_sampling
         else None
     )
+    compact = config.model.control_encoding == COMPACT_CONTROL_ENCODING
+    if compact:
+        class_ids = [
+            (
+                angle_target_class_id(sample.angle)
+                if field == "angle_class_id"
+                else speed_target_class_id(sample.speed)
+            )
+            for sample in samples
+        ]
+        num_classes = (
+            ANGLE_OUTPUT_CLASSES if field == "angle_class_id" else SPEED_OUTPUT_CLASSES
+        )
+    else:
+        class_ids = None
+        num_classes = NUM_COMMAND_CLASSES
     return compute_sqrt_inverse_frequency_weights(
         samples,
         field=field,
+        num_classes=num_classes,
+        class_ids=class_ids,
         min_weight=config.loss.min_class_weight,
         max_weight=config.loss.max_class_weight,
         mirror_probability=(
@@ -1086,9 +1436,7 @@ def validation_selection_score(
     if not config.data.ema_sampling:
         return selection_score(metrics)
     if config.data.source_sampling_masses:
-        samples = tuple(
-            sample for session in sessions for sample in session.samples
-        )
+        samples = tuple(sample for session in sessions for sample in session.samples)
         pair_masses = source_generation_sampling_masses(
             samples,
             current_generation=config.data.current_generation,
@@ -1098,13 +1446,9 @@ def validation_selection_score(
         return sum(
             mass
             * (
-                metrics[
-                    f"val_source_{source_id}_generation_{generation}_angle_mae"
-                ]
+                metrics[f"val_source_{source_id}_generation_{generation}_angle_mae"]
                 + 0.25
-                * metrics[
-                    f"val_source_{source_id}_generation_{generation}_speed_mae"
-                ]
+                * metrics[f"val_source_{source_id}_generation_{generation}_speed_mae"]
             )
             for (source_id, generation), mass in pair_masses.items()
         )
@@ -1232,6 +1576,7 @@ def initialize_model_weights(
         "architecture": config.model.architecture,
         "history_frames": config.model.history_frames,
         "control_token_type_embedding": config.model.control_token_type_embedding,
+        "control_encoding": config.model.control_encoding,
     }
     actual = {
         "architecture": (
@@ -1246,6 +1591,11 @@ def initialize_model_weights(
         ),
         "control_token_type_embedding": (
             checkpoint_model.get("control_token_type_embedding", False)
+            if isinstance(checkpoint_model, dict)
+            else None
+        ),
+        "control_encoding": (
+            checkpoint_model.get("control_encoding", LEGACY_CONTROL_ENCODING)
             if isinstance(checkpoint_model, dict)
             else None
         ),
@@ -1336,7 +1686,16 @@ def validate_resume_payload(
     if payload.get("model_name") != config.model.name:
         raise ValueError("resume checkpoint model_name differs from the config")
     label_contract = payload.get("label_contract")
-    if not isinstance(label_contract, dict) or label_contract.get("num_classes") != 201:
+    if not isinstance(label_contract, dict):
+        raise ValueError("resume checkpoint label contract is incompatible")
+    if config.model.control_encoding == COMPACT_CONTROL_ENCODING:
+        expected_shapes = {
+            "angle_logits": [1, ANGLE_OUTPUT_CLASSES],
+            "speed_logits": [1, SPEED_OUTPUT_CLASSES],
+        }
+        if label_contract.get("output_shapes") != expected_shapes:
+            raise ValueError("resume checkpoint compact output shapes are incompatible")
+    elif label_contract.get("num_classes") != NUM_COMMAND_CLASSES:
         raise ValueError("resume checkpoint label contract is incompatible")
     if expected_label_contract is not None and label_contract.get(
         "train_angle_target"
@@ -1365,6 +1724,7 @@ def validate_resume_payload(
         "architecture": config.model.architecture,
         "history_frames": config.model.history_frames,
         "control_token_type_embedding": (config.model.control_token_type_embedding),
+        "control_encoding": config.model.control_encoding,
         "history_initial_angle": config.model.history_initial_angle,
         "history_initial_speed": config.model.history_initial_speed,
     }
@@ -1381,6 +1741,11 @@ def validate_resume_payload(
         ),
         "control_token_type_embedding": (
             checkpoint_model.get("control_token_type_embedding", False)
+            if isinstance(checkpoint_model, dict)
+            else None
+        ),
+        "control_encoding": (
+            checkpoint_model.get("control_encoding", LEGACY_CONTROL_ENCODING)
             if isinstance(checkpoint_model, dict)
             else None
         ),
@@ -1539,6 +1904,42 @@ def resolve_device(requested: str) -> torch.device:
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable")
     return device
+
+
+def build_optimizer(
+    model: TaskTokenViTPolicy | AutoregressiveControlTokenViTPolicy,
+    config: TrainConfig,
+) -> torch.optim.AdamW:
+    """Create fresh AdamW state, optionally using a lower backbone LR."""
+    base_lr = config.optimizer.learning_rate
+    multiplier = config.optimizer.backbone_learning_rate_multiplier
+    if multiplier == 1.0:
+        parameter_groups: object = model.parameters()
+    else:
+        backbone_parameters = list(model.backbone.parameters())
+        backbone_ids = {id(parameter) for parameter in backbone_parameters}
+        policy_parameters = [
+            parameter
+            for parameter in model.parameters()
+            if id(parameter) not in backbone_ids
+        ]
+        parameter_groups = [
+            {
+                "params": backbone_parameters,
+                "lr": base_lr * multiplier,
+                "name": "backbone",
+            },
+            {
+                "params": policy_parameters,
+                "lr": base_lr,
+                "name": "policy",
+            },
+        ]
+    return torch.optim.AdamW(
+        parameter_groups,
+        lr=base_lr,
+        weight_decay=config.optimizer.weight_decay,
+    )
 
 
 def early_stopping_triggered(

@@ -20,17 +20,22 @@ adapter가 `×0.4`로 변환한 driver command `-40..40`만
   계속되면 grace가 지난 첫 제어 주기에 OFF가 된다.
 - 추론은 OFF 상태에서도 최신 camera frame으로 계속 수행한다. ON 상태에서만 최신
   유효 예측을 motor command로 사용하고, OFF 상태에서는 `[0, 0]`을 발행한다.
-- AR artifact는 `(angle=0, speed=25)` class 네 쌍으로 history를 시작하고 성공한
+- legacy AR artifact는 `(angle=0, speed=25)` class 네 쌍으로 history를 시작하고
   schema v2에서는 argmax 예측, schema v3에서는 실제 motor에 발행된 명령만
-  queue에 추가한다. 추론됐지만 발행되지 않은 명령은 v3 history에 넣지 않는다.
+  queue에 추가한다. schema v4 compact AR은 artifact에 따라 legacy UNKNOWN 또는
+  canonical 실제 명령 `(angle=0, dataset mean speed)` 네 쌍으로 시작하고 실제 발행 명령을 angle token `0..80`, speed
+  token `40..70`으로 바꿔 오래된 slot부터 교체한다. 추론됐지만 발행되지 않은 명령은
+  schema v3/v4 history에 넣지 않는다.
   추론 실패 또는 성공한 추론 사이가 0.25초 이상 벌어지면 초기 history로 reset한다.
 - A hold로 ON이 되는 순간에도 AR history와 저장된 예측을 reset한다. reset 뒤
   새 camera frame의 첫 예측이 완료될 때까지 motor output은 `[0, 0]`을 유지한다.
 - 새 증분 수집 기본은 schema v1 stateless artifact다. AR schema v2/v3 경로는
-  rollback 호환성만 유지하며 새 split이나 기본 실행 예시에 사용하지 않는다.
-- angle은 `angle_class_id - 100`이다. speed는
+  rollback 호환성을 유지하고 schema v4는 ARTrackV2-inspired AR4 실차 평가에 쓴다.
+- schema v1/v2/v3 angle은 `angle_class_id - 100`이다. speed는
   `max(0, speed_class_id - 100)`이므로 reverse는 금지하지만 양수 예측에는 별도
-  cap을 적용하지 않아 label 계약의 최대 `100`까지 전달한다.
+  cap을 적용하지 않아 label 계약의 최대 `100`까지 전달한다. schema v4 angle은
+  `(class_id - 40) ÷ 0.4`로 normalized 명령을 복원하고 speed는 class `0..30`을
+  그대로 사용한다.
 - Joy 또는 camera prediction이 0.25초 이상 stale, 추론/변환 오류, motor
   subscriber 소실, 다른 motor publisher 출현 시 즉시 OFF와 `[0, 0]`으로
   전환한다. 조건이 복구돼도 A release 후 새 press가 있어야 다시 ON된다.
@@ -60,13 +65,17 @@ adapter가 `×0.4`로 변환한 driver command `-40..40`만
     SHA256SUMS
 ```
 
-node는 시작 전에 checksum, input, angle/speed `[1,201]` tuple output,
+node는 시작 전에 checksum, input, angle/speed tuple output,
 normalization, label decode와 steering 계약을 검증한다. schema v1 stateless artifact는 고정
 RGB `[1,3,224,224]` 하나를 받고 계속 지원한다. schema v2 AR artifact는 RGB image와
 int64 history `[1,4,2]` tuple을 받으며 history pair 순서는
 `[angle_class_id, speed_class_id]`, 시간 순서는 오래된 값부터 최신 값까지다. 이후
 schema v3는 같은 tensor shape를 사용하지만 history source를 실제 실행 명령으로
-강제한다. CPU thread 8개로 model을 load하고 3회 warm-up한다. artifact 생성과 배포는 개발
+강제한다. schema v4는 `history_token_ids [1,4,2]`, angle `[1,81]`, speed `[1,31]`,
+UNKNOWN 또는 canonical `(0,dataset mean speed)×4` 초기화와 공용 numeric token
+mapping을 검증하고 실제 발행 history만 받는다. canonical 명령은 embedding
+경계에서만 내부 token ID로 encode되며 물리 명령의 초기 의미는 바뀌지 않는다.
+CPU thread 8개로 model을 load하고 3회 warm-up한다. artifact 생성과 배포는 개발
 Laptop의 MGW root에서 수행한다.
 
 ## Jetson 실시간 road-warp 튜너

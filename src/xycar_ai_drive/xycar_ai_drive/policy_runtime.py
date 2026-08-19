@@ -11,7 +11,12 @@ import cv2
 import numpy as np
 
 from xycar_ai_drive.artifact import RoadWarpParameters, load_policy_artifact
-from xycar_ai_drive.control import DriveCommand, decode_class_ids
+from xycar_ai_drive.artifact import COMPACT_CONTROL_ENCODING
+from xycar_ai_drive.control import (
+    DriveCommand,
+    decode_class_ids,
+    decode_compact_output_ids,
+)
 from xycar_ai_drive.road_warp import warp_road_image
 
 
@@ -183,8 +188,13 @@ class TorchScriptPolicy:
             raise PolicyRuntimeError(
                 f'TorchScript inference failed: {exc}'
             ) from exc
+        decoder = (
+            decode_compact_output_ids
+            if self.artifact.control_encoding == COMPACT_CONTROL_ENCODING
+            else decode_class_ids
+        )
         return InferenceResult(
-            command=decode_class_ids(angle_class_id, speed_class_id),
+            command=decoder(angle_class_id, speed_class_id),
             inference_ms=inference_ms,
         )
 
@@ -211,14 +221,7 @@ class TorchScriptPolicy:
             )
         values = [list(pair) for pair in supplied]
         if len(values) != history.frames or any(
-            len(pair) != 2
-            or any(
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or not 0 <= value <= 200
-                for value in pair
-            )
-            for pair in values
+            not history.valid_pair(pair) for pair in values
         ):
             raise PolicyRuntimeError(
                 'executed history must contain four [angle,speed] class pairs'
@@ -229,15 +232,16 @@ class TorchScriptPolicy:
         if not isinstance(outputs, (tuple, list)) or len(outputs) != 2:
             raise PolicyRuntimeError('model output must be a two-tensor tuple')
         angle_logits, speed_logits = outputs
-        for name, logits in (
-            ('angle_logits', angle_logits),
-            ('speed_logits', speed_logits),
+        for name, logits, expected_shape in (
+            ('angle_logits', angle_logits, self.artifact.output_shapes[0]),
+            ('speed_logits', speed_logits, self.artifact.output_shapes[1]),
         ):
             if not isinstance(logits, self._torch.Tensor):
                 raise PolicyRuntimeError(f'{name} must be a tensor')
-            if tuple(logits.shape) != (1, 201):
+            if tuple(logits.shape) != expected_shape:
                 raise PolicyRuntimeError(
-                    f'{name} shape must be [1,201], got {tuple(logits.shape)}'
+                    f'{name} shape must be {list(expected_shape)}, '
+                    f'got {tuple(logits.shape)}'
                 )
             if not bool(self._torch.isfinite(logits).all()):
                 raise PolicyRuntimeError(f'{name} contains a non-finite value')

@@ -186,15 +186,15 @@ def test_stateless_ema_config_uses_two_qualified_sources_and_raw_angle(
     assert config.data.current_generation == 0
     assert config.data.generation_decay == 0.5
     assert config.training.early_stopping_patience == 5
-    assert [(source.source_id, source.fixed_generation) for source in config.data.sources] == [
+    assert [
+        (source.source_id, source.fixed_generation) for source in config.data.sources
+    ] == [
         ("manual", 0),
         ("guided", None),
     ]
     assert config.data.sources[1].require_curriculum_generation
     assert config.output.run_name == "vit_small_stateless_manual_20260817_generation0"
-    validate_incremental_initialization(
-        config, initialize_from="", resume=""
-    )
+    validate_incremental_initialization(config, initialize_from="", resume="")
     with pytest.raises(ValueError, match="pretrained ImageNet"):
         validate_incremental_initialization(
             config, initialize_from="previous.pt", resume=""
@@ -239,15 +239,10 @@ def test_normalized_stateless_config_requires_raw_normalized_sessions(
 ):
     project_root = Path(__file__).parents[1]
     config = load_train_config(
-        project_root
-        / "config"
-        / "front_cam_policy_train_stateless_normalized_v1.yaml"
+        project_root / "config" / "front_cam_policy_train_stateless_normalized_v1.yaml"
     )
 
-    assert (
-        config.data.required_steering_contract
-        == "normalized_percent_v1"
-    )
+    assert config.data.required_steering_contract == "normalized_percent_v1"
     assert config.data.train_angle_mean_window == 1
     assert config.data.current_generation == 0
     assert config.data.root == project_root / "datasets/stateless_manual"
@@ -266,9 +261,7 @@ def test_normalized_stateless_config_requires_raw_normalized_sessions(
         / "config"
         / "front_cam_policy_train_stateless_normalized_v1_g1.yaml"
     )
-    assert guided_config.data.required_steering_contract == (
-        "normalized_percent_v1"
-    )
+    assert guided_config.data.required_steering_contract == ("normalized_percent_v1")
     assert guided_config.data.current_generation == 1
     assert guided_config.data.generation_decay == 0.8
     assert guided_config.data.source_sampling_masses == {
@@ -276,9 +269,7 @@ def test_normalized_stateless_config_requires_raw_normalized_sessions(
         "guided": 0.5,
     }
     assert guided_config.data.manual_anchor_split_manifest == (
-        project_root
-        / "config"
-        / "front_cam_policy_split_stateless_normalized_v1.yaml"
+        project_root / "config" / "front_cam_policy_split_stateless_normalized_v1.yaml"
     )
     assert guided_config.data.current_generation_session_counts == {
         "train": 3,
@@ -346,9 +337,7 @@ def test_source_sampling_masses_fail_closed(
         project_root / "config" / "front_cam_policy_preprocess.yaml"
     )
     config_path = tmp_path / "train.yaml"
-    config_path.write_text(
-        yaml.safe_dump(payload, sort_keys=False), encoding="utf-8"
-    )
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
     with pytest.raises(ValueError, match=message):
         load_train_config(config_path)
@@ -423,20 +412,26 @@ def test_source_anchored_validation_score_uses_same_half_and_half_mass():
     assert validation_selection_score(
         metrics, sessions=sessions, config=config
     ) == pytest.approx(10.75)
-    assert source_weighted_metric(
-        metrics,
-        sessions=sessions,
-        config=config,
-        source_id="manual",
-        metric_name="angle_mae",
-    ) == 8.0
-    assert source_weighted_metric(
-        metrics,
-        sessions=sessions,
-        config=config,
-        source_id="guided",
-        metric_name="angle_mae",
-    ) == 12.0
+    assert (
+        source_weighted_metric(
+            metrics,
+            sessions=sessions,
+            config=config,
+            source_id="manual",
+            metric_name="angle_mae",
+        )
+        == 8.0
+    )
+    assert (
+        source_weighted_metric(
+            metrics,
+            sessions=sessions,
+            config=config,
+            source_id="guided",
+            metric_name="angle_mae",
+        )
+        == 12.0
+    )
 
 
 def test_class_weights_use_source_anchored_sample_mass():
@@ -487,9 +482,7 @@ def test_stateless_two_root_config_validate_only_with_synthetic_sessions(
     )
     payload = yaml.safe_load(
         (
-            project_root
-            / "config"
-            / "front_cam_policy_train_stateless_ema.yaml"
+            project_root / "config" / "front_cam_policy_train_stateless_ema.yaml"
         ).read_text(encoding="utf-8")
     )
     payload["data"]["sources"]["manual"]["root"] = str(manual_root)
@@ -502,9 +495,7 @@ def test_stateless_two_root_config_validate_only_with_synthetic_sessions(
     )
     payload["output"]["root"] = str(tmp_path / "artifacts")
     config_path = tmp_path / "config" / "train.yaml"
-    config_path.write_text(
-        yaml.safe_dump(payload, sort_keys=False), encoding="utf-8"
-    )
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
     assert main(["--config", str(config_path), "--validate-only"]) == 0
 
@@ -729,8 +720,132 @@ def test_sequence_rollout_config_records_self_prediction_contract(tmp_path: Path
     assert history["train_source"] == "self_predicted_argmax_sequence_rollout"
     assert history["known_train_label_leakage"] is False
     assert history["sequence_reverse_probability"] == 0.5
-    assert history["clip_history_initialization"] == "canonical_initial_command"
+    assert history["session_history_initialization"] == ("canonical_initial_command")
+    assert history["compute_chunk_resets_history"] is False
+    assert history["augmentation_scope"] == "whole_session_per_epoch"
     assert history["edge_padding"] == "masked_repeat_last_frame"
+
+
+def test_frame_pretraining_records_unknown_non_teacher_forced_history(
+    tmp_path: Path,
+):
+    config_path = _write_config(
+        tmp_path,
+        tmp_path / "config" / "split.yaml",
+        epochs=1,
+        autoregressive=True,
+    )
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["model"]["history_update"] = "externally_executed_commands"
+    payload["model"]["control_encoding"] = "driver_compact_v1"
+    payload["training"]["history_training_source"] = "learned_unknown_tokens"
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    config = load_train_config(config_path)
+    history = build_label_contract(config)["history"]
+
+    assert config.training.history_training_source == "learned_unknown_tokens"
+    assert history["train_source"] == "learned_unknown_tokens"
+    assert history["evaluation_source"] == "learned_unknown_tokens"
+    assert history["initial_token_ids"] == [81, 82]
+    assert history["frame_pretraining"] is True
+    assert history["labels_used_as_history"] is False
+    assert history["known_train_label_leakage"] is False
+
+
+def test_compact_canonical_history_records_zero_angle_mean_speed_tokens(
+    tmp_path: Path,
+):
+    config_path = _write_config(
+        tmp_path,
+        tmp_path / "config" / "split.yaml",
+        epochs=1,
+        autoregressive=True,
+    )
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["model"]["history_update"] = "externally_executed_commands"
+    payload["model"]["control_encoding"] = "driver_compact_v1"
+    payload["model"]["history_initial_angle"] = 0
+    payload["model"]["history_initial_speed"] = 15
+    payload["training"]["history_training_source"] = "canonical_initial_command"
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    config = load_train_config(config_path)
+    history = build_label_contract(config)["history"]
+
+    assert history["initialization"] == "canonical_initial_command"
+    assert history["initial_command"] == [0, 15]
+    assert history["initial_token_ids"] == [40, 55]
+    assert history["train_source"] == "canonical_initial_command"
+    assert history["labels_used_as_history"] is False
+    assert history["known_train_label_leakage"] is False
+
+
+@pytest.mark.parametrize("initial_speed", [-1, 31])
+def test_compact_history_rejects_speed_outside_output_range(
+    tmp_path: Path,
+    initial_speed: int,
+):
+    config_path = _write_config(
+        tmp_path,
+        tmp_path / "config" / "split.yaml",
+        epochs=1,
+        autoregressive=True,
+    )
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["model"]["history_update"] = "externally_executed_commands"
+    payload["model"]["control_encoding"] = "driver_compact_v1"
+    payload["model"]["history_initial_speed"] = initial_speed
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"speed must be in \[0, 30\]"):
+        load_train_config(config_path)
+
+
+def test_compact_teacher_forcing_records_only_previous_truth(tmp_path: Path):
+    config_path = _write_config(
+        tmp_path,
+        tmp_path / "config" / "split.yaml",
+        epochs=1,
+        autoregressive=True,
+    )
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["model"]["history_update"] = "externally_executed_commands"
+    payload["model"]["control_encoding"] = "driver_compact_v1"
+    payload["model"]["history_initial_angle"] = 0
+    payload["model"]["history_initial_speed"] = 15
+    payload["training"]["history_training_source"] = "teacher_forced_executed_commands"
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    history = build_label_contract(load_train_config(config_path))["history"]
+
+    assert history["initial_command"] == [0, 15]
+    assert history["initial_token_ids"] == [40, 55]
+    assert history["train_source"] == (
+        "ground_truth_teacher_forcing_previous_executed_commands"
+    )
+    assert history["current_target_used_as_history"] is False
+    assert history["future_target_used_as_history"] is False
+    assert history["known_train_label_leakage"] is False
+
+
+def test_unknown_frame_history_rejects_sequence_rollout(tmp_path: Path):
+    config_path = _write_config(
+        tmp_path,
+        tmp_path / "config" / "split.yaml",
+        epochs=1,
+        autoregressive=True,
+    )
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["model"]["history_update"] = "externally_executed_commands"
+    payload["model"]["control_encoding"] = "driver_compact_v1"
+    payload["training"]["history_training_source"] = "learned_unknown_tokens"
+    payload["training"]["batch_size"] = 8
+    payload["training"]["sequence_length"] = 8
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="frame-level pretraining mode"):
+        load_train_config(config_path)
 
 
 def test_one_epoch_training_and_resume(tmp_path: Path):
@@ -910,7 +1025,17 @@ def test_one_epoch_sequence_rollout_training_uses_predicted_prompts(
         "20260810_130735_027_session",
         "20260810_130818_255_session",
     ]
-    labels = [(0.0, 25.0), (10.0, 25.0), (20.0, 25.0), (0.0, 25.0), (-10.0, 25.0)]
+    labels = [
+        (0.0, 25.0),
+        (10.0, 25.0),
+        (20.0, 25.0),
+        (0.0, 25.0),
+        (-10.0, 25.0),
+        (-20.0, 25.0),
+        (0.0, 25.0),
+        (10.0, 25.0),
+        (0.0, 25.0),
+    ]
     for name in names:
         write_session(data_root, name, labels=labels)
     split_path = write_split_manifest(
@@ -936,9 +1061,7 @@ def test_one_epoch_sequence_rollout_training_uses_predicted_prompts(
     assert main(["--config", str(config_path)]) == 0
 
     run_dir = tmp_path / "artifacts" / "runs" / "smoke"
-    checkpoint = torch.load(
-        run_dir / "best.pt", map_location="cpu", weights_only=True
-    )
+    checkpoint = torch.load(run_dir / "best.pt", map_location="cpu", weights_only=True)
     history = checkpoint["label_contract"]["history"]
     assert history["train_source"] == "self_predicted_argmax_sequence_rollout"
     assert history["evaluation_source"] == "predicted_argmax_rollout"
@@ -946,8 +1069,11 @@ def test_one_epoch_sequence_rollout_training_uses_predicted_prompts(
         "r", encoding="utf-8", newline=""
     ) as metrics_file:
         row = next(iter(csv.DictReader(metrics_file)))
-    assert row["train_sequence_clip_count"] == "1.0"
-    assert row["train_sample_count"] == "5.0"
+    assert row["train_sequence_clip_count"] == "2.0"
+    assert row["train_sequence_session_count"] == "1.0"
+    assert row["train_sequence_history_reset_count"] == "1.0"
+    assert row["train_sequence_carried_chunk_count"] == "1.0"
+    assert row["train_sample_count"] == "9.0"
 
 
 def _write_config(

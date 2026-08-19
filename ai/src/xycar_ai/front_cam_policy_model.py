@@ -8,6 +8,18 @@ from timm.models.vision_transformer import VisionTransformer
 from torch import nn
 from torch.nn import functional as F
 
+from xycar_ai.compact_control import (
+    ANGLE_OUTPUT_CLASSES,
+    ANGLE_QUERY_TOKEN_ID,
+    COMPACT_CONTROL_ENCODING,
+    CONTROL_TOKEN_COUNT,
+    LEGACY_CONTROL_ENCODING,
+    NUMERIC_TOKEN_OFFSET,
+    SPEED_OUTPUT_CLASSES,
+    SPEED_QUERY_TOKEN_ID,
+    UNKNOWN_ANGLE_TOKEN_ID,
+    UNKNOWN_SPEED_TOKEN_ID,
+)
 from xycar_ai.front_cam_policy_data import NUM_COMMAND_CLASSES
 
 DEFAULT_MODEL_NAME = "vit_tiny_patch16_224.augreg_in21k_ft_in1k"
@@ -117,6 +129,7 @@ class AutoregressiveControlTokenViTPolicy(nn.Module):
         num_classes: int = NUM_COMMAND_CLASSES,
         history_frames: int = 4,
         use_control_type_embedding: bool = False,
+        control_encoding: str = LEGACY_CONTROL_ENCODING,
     ) -> None:
         super().__init__()
         if history_frames != 4:
@@ -127,6 +140,12 @@ class AutoregressiveControlTokenViTPolicy(nn.Module):
         self.num_classes = int(num_classes)
         self.history_frames = int(history_frames)
         self.use_control_type_embedding = bool(use_control_type_embedding)
+        self.control_encoding = control_encoding
+        if control_encoding not in {
+            LEGACY_CONTROL_ENCODING,
+            COMPACT_CONTROL_ENCODING,
+        }:
+            raise ValueError(f"unsupported control encoding: {control_encoding}")
 
         backbone = timm.create_model(
             model_name,
@@ -148,14 +167,27 @@ class AutoregressiveControlTokenViTPolicy(nn.Module):
         control_token_count = self.history_frames * 2 + 2
         # Value ids 0..200 share a vocabulary. The last two ids are the
         # current angle and speed query commands.
-        self.control_token_embedding = nn.Embedding(num_classes + 2, embed_dim)
+        token_count = (
+            CONTROL_TOKEN_COUNT
+            if control_encoding == COMPACT_CONTROL_ENCODING
+            else num_classes + 2
+        )
+        self.control_token_embedding = nn.Embedding(token_count, embed_dim)
         self.control_slot_pos_embed = nn.Parameter(
             torch.zeros(1, control_token_count, embed_dim)
         )
         self.control_type_embedding = (
             nn.Embedding(2, embed_dim) if self.use_control_type_embedding else None
         )
-        self.output_bias = nn.Parameter(torch.zeros(2, num_classes))
+        if control_encoding == COMPACT_CONTROL_ENCODING:
+            self.angle_output_bias = nn.Parameter(
+                torch.zeros(ANGLE_OUTPUT_CLASSES)
+            )
+            self.speed_output_bias = nn.Parameter(
+                torch.zeros(SPEED_OUTPUT_CLASSES)
+            )
+        else:
+            self.output_bias = nn.Parameter(torch.zeros(2, num_classes))
         nn.init.trunc_normal_(self.control_token_embedding.weight, std=0.02)
         nn.init.trunc_normal_(self.control_slot_pos_embed, std=0.02)
         if self.control_type_embedding is not None:
@@ -168,14 +200,31 @@ class AutoregressiveControlTokenViTPolicy(nn.Module):
     ) -> dict[str, torch.Tensor]:
         features = self.forward_features(images, history_class_ids)
         query_features = features[:, -2:]
-        logits = F.linear(
-            query_features,
-            self.control_token_embedding.weight[: self.num_classes],
-        )
-        logits = logits + self.output_bias.unsqueeze(0)
+        if self.control_encoding == COMPACT_CONTROL_ENCODING:
+            angle_logits = F.linear(
+                query_features[:, 0],
+                self.control_token_embedding.weight[:ANGLE_OUTPUT_CLASSES],
+                self.angle_output_bias,
+            )
+            speed_logits = F.linear(
+                query_features[:, 1],
+                self.control_token_embedding.weight[
+                    NUMERIC_TOKEN_OFFSET : NUMERIC_TOKEN_OFFSET
+                    + SPEED_OUTPUT_CLASSES
+                ],
+                self.speed_output_bias,
+            )
+        else:
+            logits = F.linear(
+                query_features,
+                self.control_token_embedding.weight[: self.num_classes],
+            )
+            logits = logits + self.output_bias.unsqueeze(0)
+            angle_logits = logits[:, 0]
+            speed_logits = logits[:, 1]
         return {
-            "angle_logits": logits[:, 0],
-            "speed_logits": logits[:, 1],
+            "angle_logits": angle_logits,
+            "speed_logits": speed_logits,
         }
 
     def forward_features(
@@ -191,7 +240,22 @@ class AutoregressiveControlTokenViTPolicy(nn.Module):
             raise ValueError("history_class_ids must have shape [B,4,2]")
         if history_class_ids.dtype != torch.long:
             raise TypeError("history_class_ids must use torch.int64")
-        if bool((history_class_ids < 0).any()) or bool(
+        if self.control_encoding == COMPACT_CONTROL_ENCODING:
+            angle_ids = history_class_ids[:, :, 0]
+            speed_ids = history_class_ids[:, :, 1]
+            valid_angle = ((0 <= angle_ids) & (angle_ids < ANGLE_OUTPUT_CLASSES)) | (
+                angle_ids == UNKNOWN_ANGLE_TOKEN_ID
+            )
+            valid_speed = (
+                (NUMERIC_TOKEN_OFFSET <= speed_ids)
+                & (
+                    speed_ids
+                    < NUMERIC_TOKEN_OFFSET + SPEED_OUTPUT_CLASSES
+                )
+            ) | (speed_ids == UNKNOWN_SPEED_TOKEN_ID)
+            if not bool(valid_angle.all()) or not bool(valid_speed.all()):
+                raise ValueError("compact history contains an invalid token id")
+        elif bool((history_class_ids < 0).any()) or bool(
             (history_class_ids >= self.num_classes).any()
         ):
             raise ValueError("history class ids must be in [0,200]")
@@ -203,9 +267,14 @@ class AutoregressiveControlTokenViTPolicy(nn.Module):
         visual_tokens = torch.cat((cls_token, image_tokens), dim=1)
         visual_tokens = visual_tokens + backbone.pos_embed
 
+        query_pair = (
+            [ANGLE_QUERY_TOKEN_ID, SPEED_QUERY_TOKEN_ID]
+            if self.control_encoding == COMPACT_CONTROL_ENCODING
+            else [self.num_classes, self.num_classes + 1]
+        )
         query_ids = (
             torch.tensor(
-                [self.num_classes, self.num_classes + 1],
+                query_pair,
                 dtype=torch.long,
                 device=history_class_ids.device,
             )
@@ -254,6 +323,7 @@ def build_policy_model(
     image_size: int,
     history_frames: int = 0,
     control_token_type_embedding: bool = False,
+    control_encoding: str = LEGACY_CONTROL_ENCODING,
 ) -> TaskTokenViTPolicy | AutoregressiveControlTokenViTPolicy:
     if architecture == TASK_TOKEN_ARCHITECTURE:
         return TaskTokenViTPolicy(
@@ -268,6 +338,7 @@ def build_policy_model(
             image_size=image_size,
             history_frames=history_frames,
             use_control_type_embedding=control_token_type_embedding,
+            control_encoding=control_encoding,
         )
     raise ValueError(f"unsupported policy architecture: {architecture}")
 

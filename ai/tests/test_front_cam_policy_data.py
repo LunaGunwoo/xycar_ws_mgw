@@ -11,14 +11,17 @@ from conftest import write_session, write_split_manifest
 from PIL import Image
 from torchvision import transforms
 
+from xycar_ai.compact_control import COMPACT_CONTROL_ENCODING
 from xycar_ai.config import DataConfig, DataSourceConfig
 from xycar_ai.front_cam_policy_data import (
     FrontCamPolicyDataset,
     FrontCamPolicySequenceDataset,
     PolicyDatasetError,
     PolicySample,
+    attach_constant_control_history,
     attach_executed_command_history,
     attach_training_teacher_forced_history,
+    attach_unknown_control_history,
     build_policy_data_splits,
     command_class_id,
     compute_sqrt_inverse_frequency_weights,
@@ -33,7 +36,7 @@ from xycar_ai.front_cam_policy_data import (
 )
 
 
-def test_sequence_dataset_keeps_clips_session_local_and_uses_one_flip(
+def test_sequence_dataset_carries_one_session_augmentation_across_chunks(
     tmp_path: Path,
 ):
     data_root = tmp_path / "datasets" / "teleop"
@@ -71,13 +74,64 @@ def test_sequence_dataset_keeps_clips_session_local_and_uses_one_flip(
     first = dataset[0]
     assert first["session_id"] == names[0]
     assert first["sequence_reversed"] is True
-    assert first["angle"].tolist() == [-10, 0]
+    assert first["angle"].tolist() == [-20, -10]
     assert first["horizontal_flipped"].tolist() == [True, True]
     assert first["valid_mask"].tolist() == [True, True]
+    assert first["starts_session"] is True
+    assert first["ends_session"] is False
+    assert first["chunk_index"] == 0
     final = dataset[1]
     assert final["session_id"] == names[0]
-    assert final["angle"].tolist() == [-20, -20]
+    assert final["angle"].tolist() == [0, 0]
+    assert final["horizontal_flipped"].tolist() == [True, True]
     assert final["valid_mask"].tolist() == [True, False]
+    assert final["starts_session"] is False
+    assert final["ends_session"] is True
+    assert final["chunk_index"] == 1
+
+
+def test_sequence_batches_never_put_two_chunks_of_one_session_together(
+    tmp_path: Path,
+):
+    data_root = tmp_path / "datasets" / "teleop"
+    names = [
+        "20260810_130735_027_session",
+        "20260810_130818_255_session",
+        "20260810_130857_726_session",
+        "20260810_130938_647_session",
+    ]
+    for name in names:
+        write_session(
+            data_root,
+            name,
+            labels=[(float(index), 25.0) for index in range(5)],
+        )
+    manifest = write_split_manifest(
+        tmp_path / "config" / "split.yaml",
+        train=names[:2],
+        val=[names[2]],
+        test=[names[3]],
+    )
+    sessions = build_policy_data_splits(
+        _data_config(data_root, manifest)
+    ).train_sessions
+    dataset = FrontCamPolicySequenceDataset(
+        sessions,
+        sequence_length=2,
+        transform=transforms.ToTensor(),
+        augmentation_seed=123,
+    )
+
+    batches = dataset.session_ordered_batches(max_batch_size=2, seed=456)
+    seen_chunk: dict[str, int] = {}
+    for batch in batches:
+        session_ids = [dataset.clips[index].session_id for index in batch]
+        assert len(session_ids) == len(set(session_ids))
+        for index in batch:
+            clip = dataset.clips[index]
+            assert clip.chunk_index == seen_chunk.get(clip.session_id, 0)
+            seen_chunk[clip.session_id] = clip.chunk_index + 1
+    assert seen_chunk == {names[0]: 3, names[1]: 3}
 
 
 def test_gamepad_speed_filter_and_fixed_split(tmp_path: Path):
@@ -365,9 +419,7 @@ def test_multi_source_guided_requires_generation_and_source_manifest_schema(
     metadata_path = guided_root / guided_name / "metadata.yaml"
     metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
     metadata["curriculum"] = {"generation": 1}
-    metadata_path.write_text(
-        yaml.safe_dump(metadata, sort_keys=True), encoding="utf-8"
-    )
+    metadata_path.write_text(yaml.safe_dump(metadata, sort_keys=True), encoding="utf-8")
     write_split_manifest(
         manifest,
         train=[f"manual/{manual_name}"],
@@ -407,9 +459,7 @@ def test_guided_source_supports_generation_and_collection_directories(
         control_mode="guided_policy",
         generation=2,
     )
-    nested_id = (
-        "guided/generation_2/g2-20260817-a/" + nested_guided
-    )
+    nested_id = "guided/generation_2/g2-20260817-a/" + nested_guided
     manifest = write_split_manifest(
         tmp_path / "config" / "split.yaml",
         train=[
@@ -436,9 +486,7 @@ def test_guided_source_supports_generation_and_collection_directories(
         sample for sample in splits.train_samples if sample.session_id == nested_id
     )
     assert nested_sample.generation == 2
-    assert nested_sample.relative_image.startswith(
-        "guided/generation_2/g2-20260817-a/"
-    )
+    assert nested_sample.relative_image.startswith("guided/generation_2/g2-20260817-a/")
 
 
 def test_guided_collection_directory_generation_must_match_metadata(
@@ -649,6 +697,43 @@ def test_horizontal_flip_pairs_image_and_angle_labels(tmp_path: Path):
     assert flipped_center["angle_class_id"] == 100
 
 
+def test_compact_endpoints_flip_and_unknown_history_mapping(tmp_path: Path):
+    data_root = tmp_path / "datasets" / "teleop"
+    name = "20260810_130735_027_session"
+    write_session(
+        data_root,
+        name,
+        labels=[(-100.0, -5.0), (100.0, 35.0)],
+    )
+    samples = discover_policy_sessions(
+        _data_config(data_root, tmp_path / "missing-split.yaml")
+    )[0].samples
+    unknown = tuple((81, 82) for _ in range(4))
+    samples = tuple(replace(sample, history_class_ids=unknown) for sample in samples)
+    baseline = FrontCamPolicyDataset(
+        samples,
+        transform=transforms.ToTensor(),
+        control_encoding=COMPACT_CONTROL_ENCODING,
+    )
+    flipped = FrontCamPolicyDataset(
+        samples,
+        transform=transforms.ToTensor(),
+        horizontal_flip_probability=1.0,
+        control_encoding=COMPACT_CONTROL_ENCODING,
+    )
+
+    assert baseline[0]["angle_class_id"] == 0
+    assert baseline[0]["speed_class_id"] == 0
+    assert baseline[1]["angle_class_id"] == 80
+    assert baseline[1]["speed_class_id"] == 30
+    assert flipped[0]["angle_class_id"] == 80
+    assert flipped[1]["angle_class_id"] == 0
+    assert torch.equal(
+        flipped[0]["history_token_ids"],
+        torch.tensor(unknown, dtype=torch.long),
+    )
+
+
 def test_training_angle_mean_uses_session_edge_padding_and_preserves_other_targets(
     tmp_path: Path,
 ):
@@ -818,6 +903,114 @@ def test_external_history_uses_session_seed_and_raw_executed_commands(
         )
 
 
+def test_unknown_history_never_uses_frame_labels(tmp_path: Path):
+    data_root = tmp_path / "datasets" / "teleop"
+    names = [
+        "20260810_130735_027_session",
+        "20260810_130818_255_session",
+        "20260810_130857_726_session",
+    ]
+    for name in names:
+        write_session(
+            data_root,
+            name,
+            labels=[(-40.0, 7.0), (60.0, 30.0)],
+        )
+    manifest = write_split_manifest(
+        tmp_path / "config" / "split.yaml",
+        train=[names[0]],
+        val=[names[1]],
+        test=[names[2]],
+    )
+
+    attached = attach_unknown_control_history(
+        build_policy_data_splits(_data_config(data_root, manifest)),
+        history_frames=4,
+    )
+
+    for sample in (
+        *attached.train_samples,
+        *attached.val_samples,
+        *attached.test_samples,
+    ):
+        assert sample.history_class_ids == ((81, 82),) * 4
+
+
+def test_canonical_compact_history_uses_zero_angle_mean_speed_tokens(
+    tmp_path: Path,
+):
+    data_root = tmp_path / "datasets" / "teleop"
+    names = [
+        "20260810_130735_027_session",
+        "20260810_130818_255_session",
+        "20260810_130857_726_session",
+    ]
+    for name in names:
+        write_session(data_root, name, labels=[(-40.0, 7.0), (60.0, 30.0)])
+    manifest = write_split_manifest(
+        tmp_path / "config" / "split.yaml",
+        train=[names[0]],
+        val=[names[1]],
+        test=[names[2]],
+    )
+
+    attached = attach_constant_control_history(
+        build_policy_data_splits(_data_config(data_root, manifest)),
+        history_frames=4,
+        pair=(40, 55),
+    )
+
+    for sample in (
+        *attached.train_samples,
+        *attached.val_samples,
+        *attached.test_samples,
+    ):
+        assert sample.history_class_ids == ((40, 55),) * 4
+
+
+def test_compact_teacher_forcing_uses_previous_truth_after_mean_speed_padding(
+    tmp_path: Path,
+):
+    data_root = tmp_path / "datasets" / "teleop"
+    names = [
+        "20260810_130735_027_session",
+        "20260810_130818_255_session",
+        "20260810_130857_726_session",
+    ]
+    for name in names:
+        write_session(
+            data_root,
+            name,
+            labels=[(-40.0, 7.0), (60.0, 30.0)],
+        )
+    manifest = write_split_manifest(
+        tmp_path / "config" / "split.yaml",
+        train=[names[0]],
+        val=[names[1]],
+        test=[names[2]],
+    )
+
+    attached = attach_executed_command_history(
+        build_policy_data_splits(_data_config(data_root, manifest)),
+        history_frames=4,
+        control_encoding=COMPACT_CONTROL_ENCODING,
+        initial_command=(0.0, 15.0),
+    )
+
+    for samples in (
+        attached.train_samples,
+        attached.val_samples,
+        attached.test_samples,
+    ):
+        assert samples[0].history_class_ids == ((40, 55),) * 4
+        assert samples[1].history_class_ids == (
+            (40, 55),
+            (40, 55),
+            (40, 55),
+            (24, 47),
+        )
+
+
 def test_generation_weights_assign_ema_mass_uniformly_within_generation():
     samples = [
         _policy_sample(generation=0, angle_class_id=100),
@@ -886,12 +1079,15 @@ def test_source_anchored_weights_keep_manual_half_and_decay_guided_only():
     assert sum(weights[:2]) == pytest.approx(0.5)
     assert sum(weights[2:4]) == pytest.approx(0.5 * 0.8 / 1.8)
     assert sum(weights[4:]) == pytest.approx(0.5 / 1.8)
-    assert generation_epoch_sample_count(
-        samples,
-        current_generation=2,
-        generation_decay=0.8,
-        source_sampling_masses=source_masses,
-    ) == 18
+    assert (
+        generation_epoch_sample_count(
+            samples,
+            current_generation=2,
+            generation_decay=0.8,
+            source_sampling_masses=source_masses,
+        )
+        == 18
+    )
     summary = generation_sampling_summary(
         samples,
         current_generation=2,
@@ -906,9 +1102,7 @@ def test_source_anchored_weights_keep_manual_half_and_decay_guided_only():
 
 
 def test_source_anchored_weights_require_exact_configured_sources():
-    samples = [
-        _policy_sample(generation=1, angle_class_id=100, source_id="guided")
-    ]
+    samples = [_policy_sample(generation=1, angle_class_id=100, source_id="guided")]
 
     with pytest.raises(PolicyDatasetError, match="exactly match"):
         generation_sampling_weights(

@@ -17,7 +17,9 @@ from xycar_ai_drive.steering_contract import (
     parse_steering_contract,
 )
 
-SUPPORTED_ARTIFACT_SCHEMA_VERSIONS = {1, 2, 3}
+SUPPORTED_ARTIFACT_SCHEMA_VERSIONS = {1, 2, 3, 4}
+LEGACY_CONTROL_ENCODING = 'legacy_command_201'
+COMPACT_CONTROL_ENCODING = 'driver_compact_v1'
 CHECKSUM_FILENAME = 'SHA256SUMS'
 MANIFEST_FILENAME = 'manifest.yaml'
 
@@ -45,6 +47,21 @@ class PolicyHistoryContract:
     frames: int
     initial_class_ids: tuple[int, int]
     update: str
+    control_encoding: str = LEGACY_CONTROL_ENCODING
+
+    def valid_pair(self, pair: object) -> bool:
+        if (
+            not isinstance(pair, (list, tuple))
+            or len(pair) != 2
+            or any(isinstance(value, bool) or not isinstance(value, int) for value in pair)
+        ):
+            return False
+        angle_id, speed_id = pair
+        if self.control_encoding == COMPACT_CONTROL_ENCODING:
+            return pair == [81, 82] or pair == (81, 82) or (
+                0 <= angle_id <= 80 and 40 <= speed_id <= 70
+            )
+        return 0 <= angle_id <= 200 and 0 <= speed_id <= 200
 
 
 @dataclass(frozen=True)
@@ -58,6 +75,11 @@ class PolicyArtifact:
     road_warp: RoadWarpParameters | None
     history: PolicyHistoryContract | None
     steering_contract: SteeringContract | None
+    control_encoding: str = LEGACY_CONTROL_ENCODING
+    output_shapes: tuple[tuple[int, int], tuple[int, int]] = (
+        (1, 201),
+        (1, 201),
+    )
 
 
 def load_policy_artifact(root: str | Path) -> PolicyArtifact:
@@ -93,6 +115,11 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
 
     model_input = _required_mapping(model, 'input', 'model')
     history = None
+    control_encoding = (
+        COMPACT_CONTROL_ENCODING
+        if schema_version == 4
+        else LEGACY_CONTROL_ENCODING
+    )
     if schema_version == 1:
         shape = _validate_image_input(model_input)
     else:
@@ -102,7 +129,10 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
             raise ArtifactContractError(
                 'AR schema model input must be a tuple'
             )
-        if model_input.get('order') != ['images', 'history_class_ids']:
+        history_input_name = (
+            'history_token_ids' if schema_version == 4 else 'history_class_ids'
+        )
+        if model_input.get('order') != ['images', history_input_name]:
             raise ArtifactContractError(
                 'AR schema model input order is unsupported'
             )
@@ -111,7 +141,7 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
         )
         history_input = _required_mapping(
             model_input,
-            'history_class_ids',
+            history_input_name,
             'model.input',
         )
         if history_input.get('dtype') != 'int64':
@@ -126,8 +156,15 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
         raise ArtifactContractError('model output kind must be tuple')
     if model_output.get('order') != ['angle_logits', 'speed_logits']:
         raise ArtifactContractError('model output order is unsupported')
-    if model_output.get('shapes') != [[1, 201], [1, 201]]:
-        raise ArtifactContractError('model output shapes must both be [1,201]')
+    expected_output_shapes = (
+        [[1, 81], [1, 31]]
+        if schema_version == 4
+        else [[1, 201], [1, 201]]
+    )
+    if model_output.get('shapes') != expected_output_shapes:
+        raise ArtifactContractError(
+            f'model output shapes must be {expected_output_shapes}'
+        )
 
     preprocessing = _required_mapping(
         manifest,
@@ -161,10 +198,13 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
         'label_contract',
         'manifest',
     )
-    if label_contract.get('num_classes') != 201:
-        raise ArtifactContractError('label contract must use 201 classes')
-    if label_contract.get('decode_mapping') != 'class_id - 100':
-        raise ArtifactContractError('unsupported label decode mapping')
+    if schema_version == 4:
+        _validate_compact_label_contract(label_contract)
+    else:
+        if label_contract.get('num_classes') != 201:
+            raise ArtifactContractError('label contract must use 201 classes')
+        if label_contract.get('decode_mapping') != 'class_id - 100':
+            raise ArtifactContractError('unsupported label decode mapping')
 
     try:
         steering_contract = parse_steering_contract(
@@ -184,6 +224,8 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
         road_warp=road_warp,
         history=history,
         steering_contract=steering_contract,
+        control_encoding=control_encoding,
+        output_shapes=tuple(tuple(value) for value in expected_output_shapes),
     )
 
 
@@ -215,44 +257,122 @@ def _history_contract(
     history = _required_mapping(manifest, 'history', 'manifest')
     if history.get('frames') != 4:
         raise ArtifactContractError('history.frames must be 4')
-    if history.get('pair_order') != [
-        'angle_class_id',
-        'speed_class_id',
-    ]:
+    expected_pair_order = (
+        ['angle_token_id', 'speed_token_id']
+        if schema_version == 4
+        else ['angle_class_id', 'speed_class_id']
+    )
+    if history.get('pair_order') != expected_pair_order:
         raise ArtifactContractError('history pair order is unsupported')
     if history.get('time_order') != 'oldest_to_newest':
         raise ArtifactContractError('history time order is unsupported')
     expected_update = (
         'externally_executed_commands'
-        if schema_version == 3
+        if schema_version in {3, 4}
         else 'predicted_argmax'
     )
     if history.get('update') != expected_update:
         raise ArtifactContractError('history update mode is unsupported')
-    initial_ids = history.get('initial_class_ids')
+    initial_key = (
+        'initial_token_ids' if schema_version == 4 else 'initial_class_ids'
+    )
+    initial_ids = history.get(initial_key)
     if (
         not isinstance(initial_ids, list)
         or len(initial_ids) != 2
         or any(
             isinstance(value, bool)
             or not isinstance(value, int)
-            or not 0 <= value <= 200
+            or not 0 <= value <= (82 if schema_version == 4 else 200)
             for value in initial_ids
         )
     ):
         raise ArtifactContractError('history initial class ids are invalid')
-    if initial_ids != [100, 125]:
+    initialization = history.get('initialization')
+    if schema_version == 4 and initialization == 'learned_unknown_tokens':
+        expected_initial = [81, 82]
+    elif schema_version == 4 and initialization == 'canonical_initial_command':
+        initial_command = history.get('initial_command')
+        if (
+            not isinstance(initial_command, list)
+            or len(initial_command) != 2
+            or any(isinstance(value, bool) for value in initial_command)
+            or not all(isinstance(value, (int, float)) for value in initial_command)
+            or not all(math.isfinite(float(value)) for value in initial_command)
+            or not -100 <= float(initial_command[0]) <= 100
+            or not 0 <= float(initial_command[1]) <= 30
+        ):
+            raise ArtifactContractError(
+                'schema v4 canonical history command is invalid'
+            )
+        expected_initial = [
+            round(float(initial_command[0]) * 0.4) + 40,
+            round(float(initial_command[1])) + 40,
+        ]
+    else:
+        expected_initial = [100, 125]
+    if initial_ids != expected_initial:
         raise ArtifactContractError(
-            'history initial class ids must be [100,125]'
+            f'history initial ids must be {expected_initial}'
         )
-    initial_command = history.get('initial_command')
-    if initial_command != [0, 25]:
-        raise ArtifactContractError('history initial command must be [0,25]')
+    if schema_version == 4:
+        if initialization not in {
+            'learned_unknown_tokens',
+            'canonical_initial_command',
+        }:
+            raise ArtifactContractError(
+                'schema v4 history initialization is unsupported'
+            )
+        if history.get('actual_angle_token_range') != [0, 80]:
+            raise ArtifactContractError('schema v4 angle token range is invalid')
+        if history.get('actual_speed_token_range') != [40, 70]:
+            raise ArtifactContractError('schema v4 speed token range is invalid')
+    else:
+        initial_command = history.get('initial_command')
+        if initial_command != [0, 25]:
+            raise ArtifactContractError('history initial command must be [0,25]')
     return PolicyHistoryContract(
         frames=4,
         initial_class_ids=(initial_ids[0], initial_ids[1]),
         update=expected_update,
+        control_encoding=(
+            COMPACT_CONTROL_ENCODING
+            if schema_version == 4
+            else LEGACY_CONTROL_ENCODING
+        ),
     )
+
+
+def _validate_compact_label_contract(
+    contract: Mapping[str, object],
+) -> None:
+    if contract.get('control_encoding') != COMPACT_CONTROL_ENCODING:
+        raise ArtifactContractError('schema v4 control encoding is unsupported')
+    if contract.get('output_shapes') != {
+        'angle_logits': [1, 81],
+        'speed_logits': [1, 31],
+    }:
+        raise ArtifactContractError('schema v4 label output shapes are invalid')
+    angle = _required_mapping(contract, 'angle', 'label_contract')
+    speed = _required_mapping(contract, 'speed', 'label_contract')
+    vocabulary = _required_mapping(
+        contract,
+        'shared_numeric_vocabulary',
+        'label_contract',
+    )
+    if angle.get('num_classes') != 81 or angle.get('driver_range') != [-40, 40]:
+        raise ArtifactContractError('schema v4 angle label contract is invalid')
+    if speed.get('num_classes') != 31 or speed.get('command_range') != [0, 30]:
+        raise ArtifactContractError('schema v4 speed label contract is invalid')
+    if (
+        vocabulary.get('numeric_range') != [-40, 40]
+        or vocabulary.get('unknown_angle_token_id') != 81
+        or vocabulary.get('unknown_speed_token_id') != 82
+        or vocabulary.get('angle_query_token_id') != 83
+        or vocabulary.get('speed_query_token_id') != 84
+        or vocabulary.get('vocabulary_size') != 85
+    ):
+        raise ArtifactContractError('schema v4 numeric vocabulary is invalid')
 
 
 def _road_warp_parameters(

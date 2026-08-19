@@ -9,12 +9,23 @@ from typing import Any
 
 import yaml
 
+from xycar_ai.compact_control import (
+    COMPACT_CONTROL_ENCODING,
+    CONTROL_ENCODINGS,
+    LEGACY_CONTROL_ENCODING,
+)
 from xycar_ai.steering_contract import validate_required_contract_name
 
 CONFIG_SCHEMA_VERSIONS = {1, 2, 3}
 CLASS_WEIGHTING_MODES = {"none", "sqrt_inverse_frequency"}
 MODEL_ARCHITECTURES = {"task_tokens", "ar_control_tokens"}
 HISTORY_UPDATE_MODES = {"predicted_argmax", "externally_executed_commands"}
+HISTORY_TRAINING_SOURCES = {
+    "runtime_default",
+    "learned_unknown_tokens",
+    "canonical_initial_command",
+    "teacher_forced_executed_commands",
+}
 STATELESS_EMA_MODEL = "vit_small_patch16_224.augreg_in21k_ft_in1k"
 
 
@@ -24,6 +35,7 @@ class ModelConfig:
     pretrained: bool
     image_size: int
     architecture: str = "task_tokens"
+    control_encoding: str = LEGACY_CONTROL_ENCODING
     history_frames: int = 0
     control_token_type_embedding: bool = False
     history_initial_angle: int = 0
@@ -86,6 +98,7 @@ class OptimizerConfig:
     name: str
     learning_rate: float
     weight_decay: float
+    backbone_learning_rate_multiplier: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -104,6 +117,7 @@ class TrainingConfig:
     device: str
     amp: bool
     deterministic: bool
+    history_training_source: str = "runtime_default"
     sequence_length: int = 0
     sequence_reverse_probability: float = 0.0
 
@@ -189,6 +203,7 @@ def load_train_config(path: str | Path) -> TrainConfig:
         "model",
         optional={
             "architecture",
+            "control_encoding",
             "history_frames",
             "control_token_type_embedding",
             "history_initial_angle",
@@ -218,6 +233,7 @@ def load_train_config(path: str | Path) -> TrainConfig:
         optimizer_payload,
         {"name", "learning_rate", "weight_decay"},
         "optimizer",
+        optional={"backbone_learning_rate_multiplier"},
     )
     _expect_keys(scheduler_payload, {"name", "warmup_epochs"}, "scheduler")
     _expect_keys(
@@ -234,6 +250,7 @@ def load_train_config(path: str | Path) -> TrainConfig:
         "training",
         optional={
             "early_stopping_patience",
+            "history_training_source",
             "sequence_length",
             "sequence_reverse_probability",
         },
@@ -265,6 +282,11 @@ def load_train_config(path: str | Path) -> TrainConfig:
                 _string(model_payload, "architecture")
                 if "architecture" in model_payload
                 else "task_tokens"
+            ),
+            control_encoding=(
+                _string(model_payload, "control_encoding")
+                if "control_encoding" in model_payload
+                else LEGACY_CONTROL_ENCODING
             ),
             history_frames=(
                 _integer(model_payload, "history_frames")
@@ -425,6 +447,14 @@ def load_train_config(path: str | Path) -> TrainConfig:
             name=_string(optimizer_payload, "name"),
             learning_rate=_number(optimizer_payload, "learning_rate"),
             weight_decay=_number(optimizer_payload, "weight_decay"),
+            backbone_learning_rate_multiplier=(
+                _number(
+                    optimizer_payload,
+                    "backbone_learning_rate_multiplier",
+                )
+                if "backbone_learning_rate_multiplier" in optimizer_payload
+                else 1.0
+            ),
         ),
         scheduler=SchedulerConfig(
             name=_string(scheduler_payload, "name"),
@@ -443,6 +473,11 @@ def load_train_config(path: str | Path) -> TrainConfig:
             device=_string(training_payload, "device"),
             amp=_boolean(training_payload, "amp"),
             deterministic=_boolean(training_payload, "deterministic"),
+            history_training_source=(
+                _string(training_payload, "history_training_source")
+                if "history_training_source" in training_payload
+                else "runtime_default"
+            ),
             sequence_length=(
                 _integer(training_payload, "sequence_length")
                 if "sequence_length" in training_payload
@@ -490,6 +525,8 @@ def _validate(config: TrainConfig) -> None:
         raise ValueError("the selected pretrained ViT requires image_size 224")
     if config.model.architecture not in MODEL_ARCHITECTURES:
         raise ValueError("unsupported model.architecture")
+    if config.model.control_encoding not in CONTROL_ENCODINGS:
+        raise ValueError("unsupported model.control_encoding")
     if config.model.history_update not in HISTORY_UPDATE_MODES:
         raise ValueError("unsupported model.history_update")
     if not -100 <= config.model.history_initial_angle <= 100:
@@ -497,6 +534,8 @@ def _validate(config: TrainConfig) -> None:
     if not -100 <= config.model.history_initial_speed <= 100:
         raise ValueError("model.history_initial_speed must be in [-100, 100]")
     if config.model.architecture == "task_tokens":
+        if config.model.control_encoding != LEGACY_CONTROL_ENCODING:
+            raise ValueError("task_tokens model requires legacy control encoding")
         if config.model.history_frames != 0:
             raise ValueError("task_tokens model.history_frames must be 0")
         if config.model.control_token_type_embedding:
@@ -507,11 +546,29 @@ def _validate(config: TrainConfig) -> None:
         if config.model.history_frames != 4:
             raise ValueError("ar_control_tokens model.history_frames must be 4")
         if (
-            config.model.history_initial_angle,
-            config.model.history_initial_speed,
-        ) != (0, 25):
+            config.model.control_encoding == LEGACY_CONTROL_ENCODING
+            and (
+                config.model.history_initial_angle,
+                config.model.history_initial_speed,
+            )
+            != (0, 25)
+        ):
             raise ValueError(
                 "ar_control_tokens initial history command must be (0, 25)"
+            )
+        if (
+            config.model.control_encoding == COMPACT_CONTROL_ENCODING
+            and config.model.history_update != "externally_executed_commands"
+        ):
+            raise ValueError(
+                "compact AR control requires externally executed history"
+            )
+        if (
+            config.model.control_encoding == COMPACT_CONTROL_ENCODING
+            and not 0 <= config.model.history_initial_speed <= 30
+        ):
+            raise ValueError(
+                "compact AR initial history speed must be in [0, 30]"
             )
     if config.data.num_workers < 0:
         raise ValueError("data.num_workers must be >= 0")
@@ -667,6 +724,10 @@ def _validate(config: TrainConfig) -> None:
         raise ValueError("optimizer.learning_rate must be > 0")
     if optimizer.weight_decay < 0:
         raise ValueError("optimizer.weight_decay must be >= 0")
+    if optimizer.backbone_learning_rate_multiplier <= 0:
+        raise ValueError(
+            "optimizer.backbone_learning_rate_multiplier must be > 0"
+        )
     scheduler = config.scheduler
     if scheduler.name != "cosine":
         raise ValueError("scheduler.name must be cosine")
@@ -684,6 +745,43 @@ def _validate(config: TrainConfig) -> None:
         raise ValueError("training.grad_clip must be >= 0")
     if training.sequence_length < 0:
         raise ValueError("training.sequence_length must be >= 0")
+    if training.history_training_source not in HISTORY_TRAINING_SOURCES:
+        raise ValueError("unsupported training.history_training_source")
+    if training.history_training_source == "learned_unknown_tokens":
+        if config.model.architecture != "ar_control_tokens":
+            raise ValueError(
+                "learned UNKNOWN history training requires ar_control_tokens"
+            )
+        if config.model.control_encoding != COMPACT_CONTROL_ENCODING:
+            raise ValueError(
+                "learned UNKNOWN history requires compact control encoding"
+            )
+        if training.sequence_length:
+            raise ValueError(
+                "learned UNKNOWN history is a frame-level pretraining mode"
+            )
+    if training.history_training_source == "canonical_initial_command":
+        if config.model.architecture != "ar_control_tokens":
+            raise ValueError(
+                "canonical initial history training requires ar_control_tokens"
+            )
+        if config.model.history_update != "externally_executed_commands":
+            raise ValueError(
+                "canonical initial history requires externally executed history"
+            )
+    if training.history_training_source == "teacher_forced_executed_commands":
+        if config.model.architecture != "ar_control_tokens":
+            raise ValueError(
+                "teacher-forced history requires ar_control_tokens"
+            )
+        if config.model.history_update != "externally_executed_commands":
+            raise ValueError(
+                "teacher-forced history requires externally executed history"
+            )
+        if training.sequence_length:
+            raise ValueError(
+                "teacher-forced history is a frame-level warm-up mode"
+            )
     if not 0 <= training.sequence_reverse_probability <= 1:
         raise ValueError(
             "training.sequence_reverse_probability must be in [0, 1]"
@@ -696,6 +794,13 @@ def _validate(config: TrainConfig) -> None:
         if config.model.history_update != "externally_executed_commands":
             raise ValueError(
                 "sequence rollout artifacts require externally executed history"
+            )
+        if (
+            config.model.control_encoding == COMPACT_CONTROL_ENCODING
+            and training.sequence_reverse_probability != 0
+        ):
+            raise ValueError(
+                "compact AR sequence training does not use reverse-time augmentation"
             )
         if training.sequence_length <= config.model.history_frames:
             raise ValueError(

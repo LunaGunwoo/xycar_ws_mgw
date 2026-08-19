@@ -5,6 +5,12 @@ from dataclasses import dataclass, field
 import torch
 from torch.nn import functional as F
 
+from xycar_ai.compact_control import (
+    COMPACT_CONTROL_ENCODING,
+    DRIVER_ANGLE_OFFSET,
+    LEGACY_CONTROL_ENCODING,
+    NORMALIZED_TO_DRIVER_SCALE,
+)
 from xycar_ai.front_cam_policy_data import COMMAND_OFFSET
 
 ANGLE_BUCKETS = {
@@ -19,6 +25,7 @@ ANGLE_BUCKETS = {
 @dataclass
 class ClassificationMetricAccumulator:
     split_name: str
+    control_encoding: str = LEGACY_CONTROL_ENCODING
     sample_count: int = 0
     total_loss_sum: float = 0.0
     angle_loss_sum: float = 0.0
@@ -87,10 +94,21 @@ class ClassificationMetricAccumulator:
 
         angle_pred_class = outputs["angle_logits"].argmax(dim=1)
         speed_pred_class = outputs["speed_logits"].argmax(dim=1)
-        angle_pred = angle_pred_class.float() - COMMAND_OFFSET
-        speed_pred = speed_pred_class.float() - COMMAND_OFFSET
-        angle_expected = expected_command(outputs["angle_logits"])
-        speed_expected = expected_command(outputs["speed_logits"])
+        if self.control_encoding == COMPACT_CONTROL_ENCODING:
+            angle_pred = (
+                angle_pred_class.float() - DRIVER_ANGLE_OFFSET
+            ) / NORMALIZED_TO_DRIVER_SCALE
+            speed_pred = speed_pred_class.float()
+            angle_expected = (
+                expected_class_id(outputs["angle_logits"])
+                - DRIVER_ANGLE_OFFSET
+            ) / NORMALIZED_TO_DRIVER_SCALE
+            speed_expected = expected_class_id(outputs["speed_logits"])
+        else:
+            angle_pred = angle_pred_class.float() - COMMAND_OFFSET
+            speed_pred = speed_pred_class.float() - COMMAND_OFFSET
+            angle_expected = expected_command(outputs["angle_logits"])
+            speed_expected = expected_command(outputs["speed_logits"])
         angle_error = (angle_pred - angle_true).abs()
         speed_error = (speed_pred - speed_true).abs()
 
@@ -199,6 +217,12 @@ class ClassificationMetricAccumulator:
             f"{prefix}_angle_expected_mae": (self.angle_expected_abs_error_sum / count),
             f"{prefix}_speed_expected_mae": (self.speed_expected_abs_error_sum / count),
         }
+        if self.control_encoding == COMPACT_CONTROL_ENCODING:
+            metrics[f"{prefix}_angle_driver_mae"] = (
+                self.angle_abs_error_sum
+                / count
+                * NORMALIZED_TO_DRIVER_SCALE
+            )
         for bucket in ANGLE_BUCKETS:
             bucket_count = self.bucket_counts[bucket]
             bucket_prefix = f"{prefix}_angle_bucket_{bucket}"
@@ -255,6 +279,15 @@ def expected_command(logits: torch.Tensor) -> torch.Tensor:
     values = torch.arange(
         -COMMAND_OFFSET,
         COMMAND_OFFSET + 1,
+        device=logits.device,
+        dtype=logits.dtype,
+    )
+    return (logits.softmax(dim=1) * values).sum(dim=1)
+
+
+def expected_class_id(logits: torch.Tensor) -> torch.Tensor:
+    values = torch.arange(
+        logits.shape[1],
         device=logits.device,
         dtype=logits.dtype,
     )

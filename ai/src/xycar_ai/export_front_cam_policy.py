@@ -14,6 +14,14 @@ import torch
 import yaml
 from torch import nn
 
+from xycar_ai.compact_control import (
+    ANGLE_OUTPUT_CLASSES,
+    COMPACT_CONTROL_ENCODING,
+    LEGACY_CONTROL_ENCODING,
+    SPEED_OUTPUT_CLASSES,
+    executed_command_to_history_tokens,
+    unknown_history_pair,
+)
 from xycar_ai.front_cam_policy_model import (
     AR_CONTROL_TOKEN_ARCHITECTURE,
     AutoregressiveControlTokenViTPolicy,
@@ -27,6 +35,7 @@ from xycar_ai.steering_contract import (
 
 LEGACY_ARTIFACT_SCHEMA_VERSION = 1
 AR_ARTIFACT_SCHEMA_VERSION = 3
+COMPACT_AR_ARTIFACT_SCHEMA_VERSION = 4
 ARTIFACT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 DEFAULT_OUTPUT_ROOT = Path("artifacts/models")
 MODEL_FILENAME = "model.ts"
@@ -76,7 +85,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--require-schema-version",
         type=int,
-        choices=(LEGACY_ARTIFACT_SCHEMA_VERSION, AR_ARTIFACT_SCHEMA_VERSION),
+        choices=(
+            LEGACY_ARTIFACT_SCHEMA_VERSION,
+            AR_ARTIFACT_SCHEMA_VERSION,
+            COMPACT_AR_ARTIFACT_SCHEMA_VERSION,
+        ),
         help="Reject export unless the artifact has this schema version.",
     )
     parser.add_argument(
@@ -125,6 +138,7 @@ def export_checkpoint(
     payload = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     checkpoint = _checkpoint_mapping(payload)
     checkpoint_config = _mapping(checkpoint, "config", "checkpoint")
+    label_contract = _mapping(checkpoint, "label_contract", "checkpoint")
     data_config = _mapping(checkpoint_config, "data", "checkpoint.config")
     if data_config.get("required_steering_contract") != STEERING_CONTRACT_NAME:
         raise PolicyExportError(
@@ -140,8 +154,14 @@ def export_checkpoint(
     )
     model_name = _string(model_config, "name", "checkpoint.config.model")
     architecture = str(model_config.get("architecture", "task_tokens"))
+    control_encoding = str(
+        model_config.get("control_encoding", LEGACY_CONTROL_ENCODING)
+    )
     schema_version = (
-        AR_ARTIFACT_SCHEMA_VERSION
+        COMPACT_AR_ARTIFACT_SCHEMA_VERSION
+        if architecture == AR_CONTROL_TOKEN_ARCHITECTURE
+        and control_encoding == COMPACT_CONTROL_ENCODING
+        else AR_ARTIFACT_SCHEMA_VERSION
         if architecture == AR_CONTROL_TOKEN_ARCHITECTURE
         else LEGACY_ARTIFACT_SCHEMA_VERSION
     )
@@ -167,19 +187,24 @@ def export_checkpoint(
     history_frames = int(model_config.get("history_frames", 0))
     use_type_embedding = bool(model_config.get("control_token_type_embedding", False))
     if architecture == AR_CONTROL_TOKEN_ARCHITECTURE:
-        if (
+        if control_encoding == LEGACY_CONTROL_ENCODING and (
             model_config.get("history_initial_angle", 0),
             model_config.get("history_initial_speed", 25),
         ) != (0, 25):
             raise PolicyExportError(
                 "AR checkpoint initial history command must be (0, 25)"
             )
+        policy_arguments: dict[str, object] = {
+            "model_name": model_name,
+            "pretrained": False,
+            "image_size": image_size,
+            "history_frames": history_frames,
+            "use_control_type_embedding": use_type_embedding,
+        }
+        if control_encoding == COMPACT_CONTROL_ENCODING:
+            policy_arguments["control_encoding"] = control_encoding
         policy = AutoregressiveControlTokenViTPolicy(
-            model_name=model_name,
-            pretrained=False,
-            image_size=image_size,
-            history_frames=history_frames,
-            use_control_type_embedding=use_type_embedding,
+            **policy_arguments,
         )
     elif architecture == "task_tokens":
         policy = TaskTokenViTPolicy(
@@ -196,8 +221,15 @@ def export_checkpoint(
     image_sample = torch.zeros(1, 3, image_size, image_size, dtype=torch.float32)
     if architecture == AR_CONTROL_TOKEN_ARCHITECTURE:
         wrapper = _TupleOutputARPolicy(policy).eval()
-        initial_angle = int(model_config.get("history_initial_angle", 0)) + 100
-        initial_speed = int(model_config.get("history_initial_speed", 25)) + 100
+        if control_encoding == COMPACT_CONTROL_ENCODING:
+            initial_angle, initial_speed, _ = _compact_history_initialization(
+                label_contract
+            )
+            expected_shapes = ((1, ANGLE_OUTPUT_CLASSES), (1, SPEED_OUTPUT_CLASSES))
+        else:
+            initial_angle = int(model_config.get("history_initial_angle", 0)) + 100
+            initial_speed = int(model_config.get("history_initial_speed", 25)) + 100
+            expected_shapes = ((1, 201), (1, 201))
         history_sample = torch.tensor(
             [[[initial_angle, initial_speed]] * history_frames],
             dtype=torch.long,
@@ -209,12 +241,13 @@ def export_checkpoint(
     else:
         wrapper = _TupleOutputPolicy(policy).eval()
         sample_inputs = (image_sample,)
+        expected_shapes = ((1, 201), (1, 201))
     with torch.inference_mode():
         eager_outputs = wrapper(*sample_inputs)
         traced = torch.jit.trace(wrapper, sample_inputs, strict=True)
         traced_outputs = traced(*sample_inputs)
-    _validate_outputs(eager_outputs)
-    _validate_outputs(traced_outputs)
+    _validate_outputs(eager_outputs, expected_shapes=expected_shapes)
+    _validate_outputs(traced_outputs, expected_shapes=expected_shapes)
     for eager, exported in zip(eager_outputs, traced_outputs, strict=True):
         if not torch.allclose(eager, exported, atol=1e-5, rtol=1e-5):
             raise PolicyExportError("TorchScript output differs from eager output")
@@ -230,7 +263,7 @@ def export_checkpoint(
         reloaded = torch.jit.load(str(model_path), map_location="cpu").eval()
         with torch.inference_mode():
             reloaded_outputs = reloaded(*sample_inputs)
-        _validate_outputs(reloaded_outputs)
+        _validate_outputs(reloaded_outputs, expected_shapes=expected_shapes)
         for eager, exported in zip(eager_outputs, reloaded_outputs, strict=True):
             if not torch.allclose(eager, exported, atol=1e-5, rtol=1e-5):
                 raise PolicyExportError(
@@ -366,30 +399,64 @@ def _build_manifest(
             dataset_snapshot = snapshot
     if architecture == AR_CONTROL_TOKEN_ARCHITECTURE:
         history_frames = int(model_config.get("history_frames", 0))
-        initial_angle = int(model_config.get("history_initial_angle", 0))
-        initial_speed = int(model_config.get("history_initial_speed", 25))
+        control_encoding = str(
+            model_config.get("control_encoding", LEGACY_CONTROL_ENCODING)
+        )
+        compact = control_encoding == COMPACT_CONTROL_ENCODING
+        history_input_name = (
+            "history_token_ids" if compact else "history_class_ids"
+        )
         model_input: dict[str, object] = {
             "kind": "tuple",
-            "order": ["images", "history_class_ids"],
+            "order": ["images", history_input_name],
             "images": {
                 "color_space": "RGB",
                 "dtype": "float32",
                 "shape": [1, 3, image_size, image_size],
             },
-            "history_class_ids": {
+            history_input_name: {
                 "dtype": "int64",
                 "shape": [1, history_frames, 2],
             },
         }
-        history_contract: dict[str, object] | None = {
-            "frames": history_frames,
-            "pair_order": ["angle_class_id", "speed_class_id"],
-            "time_order": "oldest_to_newest",
-            "initial_command": [initial_angle, initial_speed],
-            "initial_class_ids": [initial_angle + 100, initial_speed + 100],
-            "update": "externally_executed_commands",
-        }
-        schema_version = AR_ARTIFACT_SCHEMA_VERSION
+        if compact:
+            initial_angle, initial_speed, initialization = (
+                _compact_history_initialization(label_contract)
+            )
+            history_contract = {
+                "frames": history_frames,
+                "pair_order": ["angle_token_id", "speed_token_id"],
+                "time_order": "oldest_to_newest",
+                "initialization": initialization,
+                "initial_token_ids": [initial_angle, initial_speed],
+                "actual_angle_token_range": [0, 80],
+                "actual_speed_token_range": [40, 70],
+                "update": "externally_executed_commands",
+            }
+            if initialization == "canonical_initial_command":
+                label_history = _mapping(
+                    label_contract,
+                    "history",
+                    "checkpoint.label_contract",
+                )
+                history_contract["initial_command"] = list(
+                    label_history["initial_command"]
+                )
+            output_shapes = [[1, ANGLE_OUTPUT_CLASSES], [1, SPEED_OUTPUT_CLASSES]]
+            schema_version = COMPACT_AR_ARTIFACT_SCHEMA_VERSION
+        else:
+            initial_angle = int(model_config.get("history_initial_angle", 0))
+            initial_speed = int(model_config.get("history_initial_speed", 25))
+            history_contract = {
+                "frames": history_frames,
+                "pair_order": ["angle_class_id", "speed_class_id"],
+                "time_order": "oldest_to_newest",
+                "initial_command": [initial_angle, initial_speed],
+                "initial_class_ids": [initial_angle + 100, initial_speed + 100],
+                "update": "externally_executed_commands",
+            }
+            output_shapes = [[1, 201], [1, 201]]
+            schema_version = AR_ARTIFACT_SCHEMA_VERSION
     else:
         model_input = {
             "name": "images",
@@ -398,6 +465,7 @@ def _build_manifest(
             "shape": [1, 3, image_size, image_size],
         }
         history_contract = None
+        output_shapes = [[1, 201], [1, 201]]
         schema_version = LEGACY_ARTIFACT_SCHEMA_VERSION
     manifest: dict[str, object] = {
         "schema_version": schema_version,
@@ -416,11 +484,14 @@ def _build_manifest(
             "file": MODEL_FILENAME,
             "name": model_name,
             "architecture": architecture,
+            "control_encoding": str(
+                model_config.get("control_encoding", LEGACY_CONTROL_ENCODING)
+            ),
             "input": model_input,
             "output": {
                 "kind": "tuple",
                 "order": ["angle_logits", "speed_logits"],
-                "shapes": [[1, 201], [1, 201]],
+                "shapes": output_shapes,
             },
         },
         "preprocessing": dict(preprocessing),
@@ -509,6 +580,43 @@ def _checkpoint_mapping(payload: object) -> Mapping[str, Any]:
     return payload
 
 
+def _compact_history_initialization(
+    label_contract: Mapping[str, Any],
+) -> tuple[int, int, str]:
+    history = _mapping(label_contract, "history", "checkpoint.label_contract")
+    initialization = history.get("initialization")
+    initial_ids = history.get("initial_token_ids")
+    if initialization == "learned_unknown_tokens":
+        expected = unknown_history_pair()
+    elif initialization == "canonical_initial_command":
+        initial_command = history.get("initial_command")
+        if (
+            not isinstance(initial_command, list)
+            or len(initial_command) != 2
+            or any(isinstance(value, bool) for value in initial_command)
+            or not all(
+                isinstance(value, (int, float)) for value in initial_command
+            )
+        ):
+            raise PolicyExportError(
+                "compact canonical history initial_command must be numeric "
+                "[angle, speed]"
+            )
+        expected = executed_command_to_history_tokens(
+            float(initial_command[0]),
+            float(initial_command[1]),
+        )
+    else:
+        raise PolicyExportError(
+            "compact history initialization must be learned UNKNOWN or canonical"
+        )
+    if initial_ids != list(expected):
+        raise PolicyExportError(
+            f"compact history initial_token_ids must encode {list(expected)}"
+        )
+    return expected[0], expected[1], str(initialization)
+
+
 def _mapping(
     payload: Mapping[str, Any],
     key: str,
@@ -534,19 +642,25 @@ def _integer(payload: Mapping[str, Any], key: str, context: str) -> int:
     return value
 
 
-def _validate_outputs(outputs: object) -> None:
+def _validate_outputs(
+    outputs: object,
+    *,
+    expected_shapes: tuple[tuple[int, int], tuple[int, int]],
+) -> None:
     if not isinstance(outputs, tuple) or len(outputs) != 2:
         raise PolicyExportError("policy output must be a two-tensor tuple")
-    for name, output in zip(
+    for name, output, expected_shape in zip(
         ("angle_logits", "speed_logits"),
         outputs,
+        expected_shapes,
         strict=True,
     ):
         if not isinstance(output, torch.Tensor):
             raise PolicyExportError(f"{name} must be a tensor")
-        if tuple(output.shape) != (1, 201):
+        if tuple(output.shape) != expected_shape:
             raise PolicyExportError(
-                f"{name} must have shape [1, 201], got {tuple(output.shape)}"
+                f"{name} must have shape {list(expected_shape)}, "
+                f"got {tuple(output.shape)}"
             )
         if not torch.isfinite(output).all():
             raise PolicyExportError(f"{name} contains a non-finite value")

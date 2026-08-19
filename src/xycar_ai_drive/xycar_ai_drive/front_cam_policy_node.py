@@ -18,7 +18,7 @@ from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import Image, Joy
 from std_msgs.msg import Bool, Float32MultiArray
 
-from xycar_ai_drive.artifact import PolicyArtifact
+from xycar_ai_drive.artifact import COMPACT_CONTROL_ENCODING, PolicyArtifact
 from xycar_ai_drive.control import (
     STOP_COMMAND,
     DriveCommand,
@@ -26,6 +26,7 @@ from xycar_ai_drive.control import (
     PolicyPrediction,
     ToggleAction,
     command_class_ids,
+    command_history_token_ids,
     is_fresh,
 )
 from xycar_ai_drive.policy_ipc import UnixSocketPolicyClient
@@ -348,6 +349,14 @@ class FrontCamPolicyNode(Node):
             maxlen=history.frames,
         )
 
+    def _executed_history_pair(self, command: DriveCommand) -> tuple[int, int]:
+        if (
+            self.artifact is not None
+            and self.artifact.control_encoding == COMPACT_CONTROL_ENCODING
+        ):
+            return command_history_token_ids(command)
+        return command_class_ids(command)
+
     def _on_joy(self, message: Joy) -> None:
         now = time.monotonic()
         if len(message.buttons) <= self.a_button_index:
@@ -511,7 +520,7 @@ class FrontCamPolicyNode(Node):
                         != self._last_executed_prediction_sequence
                     ):
                         self._history.append(
-                            command_class_ids(prediction.command)
+                            self._executed_history_pair(prediction.command)
                         )
                         self._last_executed_prediction_sequence = (
                             self._prediction_sequence

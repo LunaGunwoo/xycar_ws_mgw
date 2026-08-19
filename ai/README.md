@@ -454,6 +454,59 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
   --resume artifacts/runs/front_cam_policy/vit_small_warp_angle_mean5_hflip_p05_seed20260811/last.pt
 ```
 
+### ARTrackV2-inspired AR4 `(0,mean-speed)×4`/81/31 재학습
+
+2026-08-19 AR4 재학습은 ARTrackV2의 pair/frame pretraining과 self-predicted
+sequence training을 Xycar 제어에 맞게 옮긴다. v2 frame warm-up과 v1 frame
+adaptation은 독립 frame마다 history를 실제 명령 `(angle=0, speed=15)` 네 쌍으로
+고정하고 현재 frame target에만 loss를 계산한다. 이전 frame의 정답 명령을 prompt로
+넣는 시간축 teacher forcing은 사용하지 않는다. speed `15`는
+v1 전체 frame 평균 `15.0`과 v2 전체 frame 평균 `14.9963`을 정수 class로 양자화한
+공통값이다.
+
+이어지는 v1 sequence 단계는 실제 session 시작에서만 `(0,15)` 네 쌍으로
+초기화한다. 메모리 제어를 위한 비중첩 32-frame compute chunk 사이에는 history를
+reset하지 않고 직전 chunk의 마지막 history를 전달한다. 현재 model의 argmax 예측을
+clamp·detach한 뒤 다음 frame prompt로 다시 넣으며 정답 history teacher forcing과
+scheduled sampling을 사용하지 않는다. optimizer, scheduler, AMP
+scaler, epoch와 early-stopping state는 세 단계마다 새로 시작하고 checkpoint에서는
+model weight만 넘긴다.
+
+공용 numeric vocabulary는 `-40..40 → token 0..80`이다. angle target은
+`round(clamp(normalized_angle × 0.4, -40, 40)) + 40`의 81 class, speed target은
+`round(clamp(speed, 0, 30))`의 31 class다. speed history token만 같은 vocabulary의
+`40..70`을 사용한다. query는 `ANGLE_QUERY=83`, `SPEED_QUERY=84`다. runtime은 angle
+class를 driver 단위 `-40..40`으로 decode한 뒤 `÷0.4`하여 기존 normalized
+`/xycar_motor_safe` 명령으로 복원한다. offline angle metric도 비교 가능하도록
+normalized `-100..100` 단위로 계산한다.
+
+초기 history의 외부 명령 계약은 언제나 `(0,15)×4`다. embedding lookup 경계에서만
+numeric vocabulary의 `value+40` 규칙에 따라 내부 token ID로 encode한다. 내부 ID는
+물리 명령을 뜻하지 않으며 motor에 해당 ID 값을 발행하지 않는다.
+
+좌우 반전과 ColorJitter는 frame이나 compute chunk별로 독립 적용하지 않고 한 epoch의
+session 전체에 같은 결정을 적용한다. 반전 시 angle class/token은 `80-id`, speed는 그대로다.
+시간 역순 증강은 사용하지 않으며 compact sequence config에서 0이 아니면 validation을
+거부한다. sequence optimizer는 backbone LR `8e-6`, 나머지 LR `8e-5`, weight decay
+`0.05`, grad clip `0.1`이다.
+
+아래 ignored workflow는 direct LAN `192.168.50.2`로 v1/v2를 dry-run, 증분 sync,
+checksum dry-run 순서로 동기화하고 전체 JPEG decode, 세 단계 학습, 고정 `(0,15)` 평가,
+full-session self-rollout, offline gate, schema v4 export와 artifact checksum 배포까지
+수행한다. tracked runtime source의 commit/push/pull/build 및 hardware 실행은 별도
+승인을 받아야 한다.
+
+```bash
+cd /home/xytron/xycar_ws/apps/xycar_ws_mgw
+bash ai/artifacts/workflows/ar_v2pre_v1norm_init0mean15_20260819/run.sh
+```
+
+최종 artifact ID는
+`front-cam-policy-vit-small-ar4-artrackv2-init0mean15-a81-s31-v2pre-v1norm-20260819`이다. 전체 test와
+full-session rollout의 angle MAE `≤12`, within-10 `≥70%`, speed MAE `≤1`, zero-angle
+baseline 개선을 요구한다. 32-frame clip별 첫 4 frame과 그중
+`|normalized angle|≥11`인 회전 시작 표본에도 angle gate를 별도로 적용한다.
+
 ### 기존 AR control token 재현 (rollback 전용)
 
 이 절은 과거 결과 재현과 rollback 검증에만 사용한다. 새 stateless dataset과
@@ -477,13 +530,14 @@ target이 들어간다. validation/test와 runtime은 정답을 사용하지 않
 선택적 self-predicted sequence rollout은 기존 AR YAML을 자동으로 바꾸지 않으며
 `training.sequence_length` 기본값 `0`에서 비활성이다. 별도 실험 config에서
 `model.history_update: externally_executed_commands`와 history frame 수보다 큰
-`training.sequence_length`를 함께 지정하면 session 경계를 넘지 않는 비중첩 clip을
-만든다. 각 clip은 canonical `(angle=0, speed=25)` history에서 시작하고 현재
+`training.sequence_length`를 함께 지정하면 session 경계를 넘지 않는 비중첩 compute
+chunk를 만든다. canonical `(angle=0, speed=25)` history는 실제 session 시작에만
+설정하고, chunk 경계에는 직전 chunk의 마지막 predicted history를 전달한다. 현재
 model의 detached argmax를 다음 frame history로 사용한다. angle class는 `0..200`,
 후진을 금지하는 speed class는 `100..200`으로 제한한다. 마지막 짧은 clip의 padding은
-loss와 history update에서 제외하며 horizontal flip은 clip 전체에 한 번만
-결정한다. `training.sequence_reverse_probability`는 기본 `0.0`이고 설정할 때만
-clip 순서를 뒤집는다. 이 mode는 다세대 EMA sampling과 함께 사용할 수 없고
+loss와 history update에서 제외하며 horizontal flip과 ColorJitter는 epoch별 session
+전체에 한 번만 결정한다. `training.sequence_reverse_probability`는 기본 `0.0`이고
+설정할 때만 session 전체 순서를 뒤집는다. 이 mode는 다세대 EMA sampling과 함께 사용할 수 없고
 `training.batch_size >= training.sequence_length`를 요구한다. checkpoint와 artifact
 history 계약에는 sequence 길이, reverse 확률, self-predicted train source와 label
 history leakage가 없다는 사실을 기록한다.
@@ -829,8 +883,11 @@ artifacts/models/<artifact-id>/
 TorchScript tuple-output artifact로 변환할 때는 다음 명령을 사용한다. 기존
 artifact ID는 덮어쓰지 않는다. stateless schema v1은 image `[1,3,224,224]` 하나를
 받고 기존 AR schema v2는 image와 predicted history `[1,4,2]`를 함께 받는다.
-현재 AR exporter는 같은 input shape에 실제 실행 history를 요구하는 schema v3를
-생성한다. v1/v2 runtime 호환은 유지한다.
+legacy AR exporter는 같은 input shape에 실제 실행 history를 요구하는 schema v3를
+생성한다. compact AR exporter는 `history_token_ids [1,4,2]`, angle `[1,81]`, speed
+`[1,31]`과 UNKNOWN 또는 canonical `(0,25)×4` 초기화를 명시하는 schema v4를
+생성한다. v1/v2/v3 runtime 호환은
+유지한다.
 
 G1 이상 run은 아래 명령에 같은 run의
 `--promotion-report artifacts/runs/front_cam_policy/<stateless-run>/promotion_gate.json`

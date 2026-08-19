@@ -16,6 +16,16 @@ from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms import functional as transform_functional
 
+from xycar_ai.compact_control import (
+    ANGLE_OUTPUT_CLASSES,
+    COMPACT_CONTROL_ENCODING,
+    LEGACY_CONTROL_ENCODING,
+    angle_target_class_id,
+    executed_command_to_history_tokens,
+    flip_angle_history_token,
+    speed_target_class_id,
+    unknown_history_pair,
+)
 from xycar_ai.config import AugmentationConfig, DataConfig, DataSourceConfig
 from xycar_ai.front_cam_policy_warp import RoadWarpConfig, warp_pil_image
 from xycar_ai.steering_contract import metadata_has_required_steering_contract
@@ -136,6 +146,27 @@ class PolicyDataSplits:
         }
 
 
+@dataclass(frozen=True)
+class _PolicySequenceClip:
+    session_id: str
+    chunk_index: int
+    starts_session: bool
+    ends_session: bool
+    sequence_reversed: bool
+    horizontal_flipped: bool
+    fixed_color_jitter: (
+        tuple[
+            tuple[int, ...],
+            float | None,
+            float | None,
+            float | None,
+            float | None,
+        ]
+        | None
+    )
+    samples: tuple[PolicySample, ...]
+
+
 def smooth_training_angle_targets(
     splits: PolicyDataSplits,
     window_size: int,
@@ -198,13 +229,21 @@ def attach_training_teacher_forced_history(
 def attach_executed_command_history(
     splits: PolicyDataSplits,
     history_frames: int,
+    *,
+    control_encoding: str = LEGACY_CONTROL_ENCODING,
+    initial_command: tuple[float, float] = (0.0, 25.0),
 ) -> PolicyDataSplits:
     """Attach the actual previously executed commands to every split."""
     if history_frames <= 0:
         raise ValueError("history_frames must be positive")
     groups = {
         name: tuple(
-            _attach_session_executed_history(session, history_frames)
+            _attach_session_executed_history(
+                session,
+                history_frames,
+                control_encoding=control_encoding,
+                initial_command=initial_command,
+            )
             for session in sessions
         )
         for name, sessions in splits._session_groups().items()
@@ -217,16 +256,94 @@ def attach_executed_command_history(
     )
 
 
+def attach_unknown_control_history(
+    splits: PolicyDataSplits,
+    history_frames: int,
+) -> PolicyDataSplits:
+    """Attach learned UNKNOWN prompt tokens to every frame in every split.
+
+    This is the Xycar frame-level warm-up equivalent of ARTrackV2's pair
+    pretraining: labels supervise the current output only and never enter a
+    later frame's prompt.
+    """
+    if history_frames <= 0:
+        raise ValueError("history_frames must be positive")
+    history = (unknown_history_pair(),) * history_frames
+
+    def attach(sessions: Sequence[PolicySession]) -> tuple[PolicySession, ...]:
+        return tuple(
+            replace(
+                session,
+                samples=tuple(
+                    replace(sample, history_class_ids=history)
+                    for sample in session.samples
+                ),
+            )
+            for session in sessions
+        )
+
+    return replace(
+        splits,
+        train_sessions=attach(splits.train_sessions),
+        val_sessions=attach(splits.val_sessions),
+        test_sessions=attach(splits.test_sessions),
+    )
+
+
+def attach_constant_control_history(
+    splits: PolicyDataSplits,
+    history_frames: int,
+    pair: tuple[int, int],
+) -> PolicyDataSplits:
+    """Attach one fixed non-teacher-forced prompt to every frame."""
+    if history_frames <= 0:
+        raise ValueError("history_frames must be positive")
+    history = (pair,) * history_frames
+
+    def attach(sessions: Sequence[PolicySession]) -> tuple[PolicySession, ...]:
+        return tuple(
+            replace(
+                session,
+                samples=tuple(
+                    replace(sample, history_class_ids=history)
+                    for sample in session.samples
+                ),
+            )
+            for session in sessions
+        )
+
+    return replace(
+        splits,
+        train_sessions=attach(splits.train_sessions),
+        val_sessions=attach(splits.val_sessions),
+        test_sessions=attach(splits.test_sessions),
+    )
+
+
 def _attach_session_executed_history(
     session: PolicySession,
     history_frames: int,
+    *,
+    control_encoding: str,
+    initial_command: tuple[float, float],
 ) -> PolicySession:
-    initial = _session_initial_history(session, history_frames)
+    if control_encoding == COMPACT_CONTROL_ENCODING:
+        initial_pair = executed_command_to_history_tokens(*initial_command)
+        initial = (initial_pair,) * history_frames
+    else:
+        initial = _session_initial_history(session, history_frames)
     history = list(initial)
     samples: list[PolicySample] = []
     for sample in session.samples:
         samples.append(replace(sample, history_class_ids=tuple(history)))
-        history = history[1:] + [(sample.angle_class_id, sample.speed_class_id)]
+        if control_encoding == COMPACT_CONTROL_ENCODING:
+            executed_pair = executed_command_to_history_tokens(
+                sample.angle_raw,
+                sample.speed_raw,
+            )
+        else:
+            executed_pair = (sample.angle_class_id, sample.speed_class_id)
+        history = history[1:] + [executed_pair]
     return replace(session, samples=tuple(samples))
 
 
@@ -317,9 +434,7 @@ def discover_policy_sessions(config: DataConfig) -> tuple[PolicySession, ...]:
             sessions.extend(
                 _discover_source_sessions(
                     source,
-                    required_steering_contract=(
-                        config.required_steering_contract
-                    ),
+                    required_steering_contract=(config.required_steering_contract),
                 )
             )
         if not sessions:
@@ -379,9 +494,7 @@ def _discover_source_sessions(
             metadata,
             source_id=source.source_id,
             fixed_generation=source.fixed_generation,
-            require_curriculum_generation=(
-                source.require_curriculum_generation
-            ),
+            require_curriculum_generation=(source.require_curriculum_generation),
         )
         if (
             directory_generation is not None
@@ -409,9 +522,7 @@ def _source_session_paths(
 
     nested: list[tuple[Path, int]] = []
     for generation_root in sorted(source.root.iterdir()):
-        generation_match = GUIDED_GENERATION_DIR_RE.fullmatch(
-            generation_root.name
-        )
+        generation_match = GUIDED_GENERATION_DIR_RE.fullmatch(generation_root.name)
         if (
             generation_match is None
             or generation_root.is_symlink()
@@ -527,7 +638,9 @@ def _validate_manual_anchor_split(
     if set(payload) != {"schema_version", "dataset_snapshot", "splits"}:
         raise PolicyDatasetError(f"unexpected Manual anchor manifest keys: {path}")
     if _manifest_integer(payload, "schema_version") != 1:
-        raise PolicyDatasetError("Manual anchor split manifest must use schema_version 1")
+        raise PolicyDatasetError(
+            "Manual anchor split manifest must use schema_version 1"
+        )
     split_payload = payload.get("splits")
     if not isinstance(split_payload, dict) or set(split_payload) != set(SPLIT_NAMES):
         raise PolicyDatasetError("Manual anchor split must define train, val, and test")
@@ -542,9 +655,7 @@ def _validate_manual_anchor_split(
             )
         expected = {f"manual/{session_id}" for session_id in raw_expected}
         observed = {
-            session.session_id
-            for session in sessions
-            if session.source_id == "manual"
+            session.session_id for session in sessions if session.source_id == "manual"
         }
         if observed != expected:
             raise PolicyDatasetError(
@@ -667,6 +778,54 @@ def make_policy_transform(
     return transforms.Compose(steps)
 
 
+def sample_color_jitter(
+    augmentation: AugmentationConfig,
+) -> tuple[
+    tuple[int, ...],
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+]:
+    fn_idx, brightness, contrast, saturation, hue = transforms.ColorJitter.get_params(
+        [max(0.0, 1.0 - augmentation.brightness), 1.0 + augmentation.brightness],
+        [max(0.0, 1.0 - augmentation.contrast), 1.0 + augmentation.contrast],
+        [max(0.0, 1.0 - augmentation.saturation), 1.0 + augmentation.saturation],
+        [-augmentation.hue, augmentation.hue],
+    )
+    return (
+        tuple(int(value) for value in fn_idx.tolist()),
+        brightness,
+        contrast,
+        saturation,
+        hue,
+    )
+
+
+def apply_fixed_color_jitter(
+    image: Image.Image,
+    parameters: tuple[
+        tuple[int, ...],
+        float | None,
+        float | None,
+        float | None,
+        float | None,
+    ],
+) -> Image.Image:
+    fn_idx, brightness, contrast, saturation, hue = parameters
+    result = image
+    for operation in fn_idx:
+        if operation == 0 and brightness is not None:
+            result = transform_functional.adjust_brightness(result, brightness)
+        elif operation == 1 and contrast is not None:
+            result = transform_functional.adjust_contrast(result, contrast)
+        elif operation == 2 and saturation is not None:
+            result = transform_functional.adjust_saturation(result, saturation)
+        elif operation == 3 and hue is not None:
+            result = transform_functional.adjust_hue(result, hue)
+    return result
+
+
 class FrontCamPolicyDataset(Dataset):
     def __init__(
         self,
@@ -675,6 +834,15 @@ class FrontCamPolicyDataset(Dataset):
         transform: object,
         horizontal_flip_probability: float = 0.0,
         road_warp: RoadWarpConfig | None = None,
+        control_encoding: str = LEGACY_CONTROL_ENCODING,
+        fixed_color_jitter: tuple[
+            tuple[int, ...],
+            float | None,
+            float | None,
+            float | None,
+            float | None,
+        ]
+        | None = None,
     ) -> None:
         if not 0 <= horizontal_flip_probability <= 1:
             raise ValueError("horizontal_flip_probability must be in [0, 1]")
@@ -682,6 +850,8 @@ class FrontCamPolicyDataset(Dataset):
         self.transform = transform
         self.horizontal_flip_probability = float(horizontal_flip_probability)
         self.road_warp = road_warp
+        self.control_encoding = control_encoding
+        self.fixed_color_jitter = fixed_color_jitter
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -699,14 +869,29 @@ class FrontCamPolicyDataset(Dataset):
                 rgb_image = warp_pil_image(rgb_image, self.road_warp)
             if horizontal_flipped:
                 rgb_image = transform_functional.hflip(rgb_image)
+            if self.fixed_color_jitter is not None:
+                rgb_image = apply_fixed_color_jitter(
+                    rgb_image,
+                    self.fixed_color_jitter,
+                )
             image_tensor = self.transform(rgb_image)
         angle_raw = -sample.angle_raw if horizontal_flipped else sample.angle_raw
         angle = -sample.angle if horizontal_flipped else sample.angle
-        angle_class_id = (
-            NUM_COMMAND_CLASSES - 1 - sample.angle_class_id
-            if horizontal_flipped
-            else sample.angle_class_id
-        )
+        if self.control_encoding == COMPACT_CONTROL_ENCODING:
+            base_angle_class_id = angle_target_class_id(sample.angle)
+            speed_class_id = speed_target_class_id(sample.speed)
+            angle_class_id = (
+                ANGLE_OUTPUT_CLASSES - 1 - base_angle_class_id
+                if horizontal_flipped
+                else base_angle_class_id
+            )
+        else:
+            speed_class_id = sample.speed_class_id
+            angle_class_id = (
+                NUM_COMMAND_CLASSES - 1 - sample.angle_class_id
+                if horizontal_flipped
+                else sample.angle_class_id
+            )
         item: dict[str, object] = {
             "image_tensor": image_tensor,
             "angle": angle,
@@ -714,7 +899,7 @@ class FrontCamPolicyDataset(Dataset):
             "angle_raw": angle_raw,
             "speed_raw": sample.speed_raw,
             "angle_class_id": angle_class_id,
-            "speed_class_id": sample.speed_class_id,
+            "speed_class_id": speed_class_id,
             "horizontal_flipped": horizontal_flipped,
             "session_id": sample.session_id,
             "relative_image": sample.relative_image,
@@ -728,20 +913,35 @@ class FrontCamPolicyDataset(Dataset):
                 dtype=torch.long,
             )
             if horizontal_flipped:
-                history_class_ids[:, 0] = (
-                    NUM_COMMAND_CLASSES - 1 - history_class_ids[:, 0]
-                )
-            item["history_class_ids"] = history_class_ids
+                if self.control_encoding == COMPACT_CONTROL_ENCODING:
+                    history_class_ids[:, 0] = torch.tensor(
+                        [
+                            flip_angle_history_token(int(value))
+                            for value in history_class_ids[:, 0]
+                        ],
+                        dtype=torch.long,
+                    )
+                else:
+                    history_class_ids[:, 0] = (
+                        NUM_COMMAND_CLASSES - 1 - history_class_ids[:, 0]
+                    )
+            history_key = (
+                "history_token_ids"
+                if self.control_encoding == COMPACT_CONTROL_ENCODING
+                else "history_class_ids"
+            )
+            item[history_key] = history_class_ids
         return item
 
 
 class FrontCamPolicySequenceDataset(Dataset):
-    """Materialize session-local clips for self-predicted history rollout.
+    """Materialize ordered compute chunks for session-continuous rollout.
 
-    A clip never crosses a session boundary. Horizontal mirroring is sampled
-    once per clip so every command and history item keeps the same steering
-    sign. The final short clip is edge-padded and accompanied by a validity
-    mask; padded frames never contribute a target or history update.
+    A chunk never crosses a session boundary. Mirroring, ColorJitter, and
+    optional time reversal are sampled once per whole session so the final
+    predicted history from one chunk remains valid for the next. The final
+    short chunk is edge-padded and accompanied by a validity mask; padded
+    frames never contribute a target or history update.
     """
 
     def __init__(
@@ -753,6 +953,9 @@ class FrontCamPolicySequenceDataset(Dataset):
         horizontal_flip_probability: float = 0.0,
         sequence_reverse_probability: float = 0.0,
         road_warp: RoadWarpConfig | None = None,
+        control_encoding: str = LEGACY_CONTROL_ENCODING,
+        augmentation: AugmentationConfig | None = None,
+        augmentation_seed: int = 0,
     ) -> None:
         if sequence_length <= 0:
             raise ValueError("sequence_length must be positive")
@@ -760,46 +963,111 @@ class FrontCamPolicySequenceDataset(Dataset):
             raise ValueError("horizontal_flip_probability must be in [0, 1]")
         if not 0 <= sequence_reverse_probability <= 1:
             raise ValueError("sequence_reverse_probability must be in [0, 1]")
-        clips: list[tuple[PolicySample, ...]] = []
-        for session in sessions:
-            clips.extend(
-                session.samples[start : start + sequence_length]
-                for start in range(0, len(session.samples), sequence_length)
+        clips: list[_PolicySequenceClip] = []
+        session_clip_indices: dict[str, list[int]] = {}
+        for session_index, session in enumerate(sessions):
+            session_seed = augmentation_seed + session_index * 1009
+            generator = torch.Generator()
+            generator.manual_seed(session_seed)
+            horizontal_flipped = bool(
+                torch.rand((), generator=generator).item() < horizontal_flip_probability
             )
+            sequence_reversed = bool(
+                torch.rand((), generator=generator).item()
+                < sequence_reverse_probability
+            )
+            fixed_color_jitter = None
+            if augmentation is not None:
+                with torch.random.fork_rng(devices=[]):
+                    torch.manual_seed(session_seed + 1)
+                    fixed_color_jitter = sample_color_jitter(augmentation)
+            ordered_samples = (
+                tuple(reversed(session.samples))
+                if sequence_reversed
+                else session.samples
+            )
+            session_chunks = [
+                ordered_samples[start : start + sequence_length]
+                for start in range(0, len(ordered_samples), sequence_length)
+            ]
+            indices: list[int] = []
+            for chunk_index, samples in enumerate(session_chunks):
+                indices.append(len(clips))
+                clips.append(
+                    _PolicySequenceClip(
+                        session_id=session.session_id,
+                        chunk_index=chunk_index,
+                        starts_session=chunk_index == 0,
+                        ends_session=chunk_index == len(session_chunks) - 1,
+                        sequence_reversed=sequence_reversed,
+                        horizontal_flipped=horizontal_flipped,
+                        fixed_color_jitter=fixed_color_jitter,
+                        samples=samples,
+                    )
+                )
+            session_clip_indices[session.session_id] = indices
         if not clips:
             raise PolicyDatasetError("sequence dataset has no clips")
         self.clips = tuple(clips)
+        self.session_clip_indices = {
+            session_id: tuple(indices)
+            for session_id, indices in session_clip_indices.items()
+        }
         self.sequence_length = int(sequence_length)
         self.transform = transform
         self.horizontal_flip_probability = float(horizontal_flip_probability)
         self.sequence_reverse_probability = float(sequence_reverse_probability)
         self.road_warp = road_warp
+        self.control_encoding = control_encoding
+        self.augmentation = augmentation
+
+    def session_ordered_batches(
+        self,
+        *,
+        max_batch_size: int,
+        seed: int,
+    ) -> tuple[tuple[int, ...], ...]:
+        """Batch matching chunk indices while preserving per-session order."""
+        if max_batch_size <= 0:
+            raise ValueError("max_batch_size must be positive")
+        session_ids = list(self.session_clip_indices)
+        generator = torch.Generator()
+        generator.manual_seed(seed)
+        order = torch.randperm(len(session_ids), generator=generator).tolist()
+        session_ids = [session_ids[index] for index in order]
+        max_chunks = max(len(indices) for indices in self.session_clip_indices.values())
+        batches: list[tuple[int, ...]] = []
+        for chunk_index in range(max_chunks):
+            indices = [
+                self.session_clip_indices[session_id][chunk_index]
+                for session_id in session_ids
+                if chunk_index < len(self.session_clip_indices[session_id])
+            ]
+            batches.extend(
+                tuple(indices[start : start + max_batch_size])
+                for start in range(0, len(indices), max_batch_size)
+            )
+        return tuple(batches)
 
     def __len__(self) -> int:
         return len(self.clips)
 
     def __getitem__(self, index: int) -> dict[str, object]:
-        samples = self.clips[index]
-        horizontal_flipped = bool(
-            torch.rand(()).item() < self.horizontal_flip_probability
-        )
-        sequence_reversed = bool(
-            torch.rand(()).item() < self.sequence_reverse_probability
-        )
-        ordered = tuple(reversed(samples)) if sequence_reversed else samples
+        clip = self.clips[index]
+        samples = clip.samples
         frame_dataset = FrontCamPolicyDataset(
-            ordered,
+            samples,
             transform=self.transform,
-            horizontal_flip_probability=float(horizontal_flipped),
+            horizontal_flip_probability=float(clip.horizontal_flipped),
             road_warp=self.road_warp,
+            control_encoding=self.control_encoding,
+            fixed_color_jitter=clip.fixed_color_jitter,
         )
-        items = [frame_dataset[item_index] for item_index in range(len(ordered))]
+        items = [frame_dataset[item_index] for item_index in range(len(samples))]
         valid_length = len(items)
         items.extend([items[-1]] * (self.sequence_length - valid_length))
         return {
-            "image_tensor": torch.stack(
-                [item["image_tensor"] for item in items]
-            ),
+            "image_tensor": torch.stack([item["image_tensor"] for item in items]),
             "angle": torch.tensor([item["angle"] for item in items]),
             "speed": torch.tensor([item["speed"] for item in items]),
             "angle_class_id": torch.tensor(
@@ -815,8 +1083,11 @@ class FrontCamPolicySequenceDataset(Dataset):
                 [item["generation"] for item in items], dtype=torch.long
             ),
             "valid_mask": torch.arange(self.sequence_length) < valid_length,
-            "sequence_reversed": sequence_reversed,
-            "session_id": ordered[0].session_id,
+            "sequence_reversed": clip.sequence_reversed,
+            "session_id": clip.session_id,
+            "chunk_index": clip.chunk_index,
+            "starts_session": clip.starts_session,
+            "ends_session": clip.ends_session,
         }
 
 
@@ -828,6 +1099,8 @@ def compute_sqrt_inverse_frequency_weights(
     max_weight: float,
     mirror_probability: float = 0.0,
     sample_weights: Sequence[float] | None = None,
+    num_classes: int = NUM_COMMAND_CLASSES,
+    class_ids: Sequence[int] | None = None,
 ) -> torch.Tensor:
     if field not in {"angle_class_id", "speed_class_id"}:
         raise ValueError(f"unsupported class field: {field}")
@@ -837,18 +1110,25 @@ def compute_sqrt_inverse_frequency_weights(
         raise ValueError("mirror_probability is only valid for angle_class_id")
     if sample_weights is not None and len(sample_weights) != len(samples):
         raise ValueError("sample_weights length must match samples")
+    if class_ids is not None and len(class_ids) != len(samples):
+        raise ValueError("class_ids length must match samples")
     effective_weights = sample_weights or [1.0] * len(samples)
     raw_counts: Counter[int] = Counter()
-    for sample, sample_weight in zip(samples, effective_weights, strict=True):
+    target_ids = class_ids or [int(getattr(sample, field)) for sample in samples]
+    for class_id, sample_weight in zip(target_ids, effective_weights, strict=True):
         if not math.isfinite(sample_weight) or sample_weight <= 0:
             raise ValueError("sample_weights must be finite and positive")
-        raw_counts[int(getattr(sample, field))] += float(sample_weight)
+        if not 0 <= int(class_id) < num_classes:
+            raise PolicyDatasetError(
+                f"class id {class_id} is outside configured output space"
+            )
+        raw_counts[int(class_id)] += float(sample_weight)
     if not raw_counts:
         raise PolicyDatasetError("cannot compute class weights for no samples")
     counts = [
         (1 - mirror_probability) * raw_counts.get(class_id, 0)
-        + mirror_probability * raw_counts.get(NUM_COMMAND_CLASSES - 1 - class_id, 0)
-        for class_id in range(NUM_COMMAND_CLASSES)
+        + mirror_probability * raw_counts.get(num_classes - 1 - class_id, 0)
+        for class_id in range(num_classes)
     ]
     nonzero_counts = [count for count in counts if count > 0]
     mean_count = sum(nonzero_counts) / len(nonzero_counts)
@@ -983,12 +1263,18 @@ def generation_sampling_summary(
                 str(generation): {
                     "sample_count": sum(
                         count
-                        for (source_id, observed_generation), count in pair_counts.items()
+                        for (
+                            source_id,
+                            observed_generation,
+                        ), count in pair_counts.items()
                         if observed_generation == generation
                     ),
                     "total_sampling_mass": sum(
                         mass
-                        for (source_id, observed_generation), mass in pair_masses.items()
+                        for (
+                            source_id,
+                            observed_generation,
+                        ), mass in pair_masses.items()
                         if observed_generation == generation
                     ),
                 }
@@ -1049,8 +1335,7 @@ def source_generation_sampling_masses(
     if not source_sampling_masses:
         raise ValueError("source_sampling_masses must not be empty")
     if any(
-        not math.isfinite(mass) or mass <= 0
-        for mass in source_sampling_masses.values()
+        not math.isfinite(mass) or mass <= 0 for mass in source_sampling_masses.values()
     ):
         raise ValueError("source_sampling_masses must be finite and positive")
     if not math.isclose(
@@ -1068,7 +1353,11 @@ def source_generation_sampling_masses(
             f"configured={sorted(source_sampling_masses)}"
         )
     future = sorted(
-        {sample.generation for sample in samples if sample.generation > current_generation}
+        {
+            sample.generation
+            for sample in samples
+            if sample.generation > current_generation
+        }
     )
     if future:
         raise PolicyDatasetError(

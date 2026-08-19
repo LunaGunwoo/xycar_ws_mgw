@@ -45,12 +45,14 @@ class _TinyARPolicy(nn.Module):
         image_size: int,
         history_frames: int,
         use_control_type_embedding: bool,
+        control_encoding: str = "legacy_command_201",
     ) -> None:
         super().__init__()
         del model_name, pretrained, image_size, use_control_type_embedding
         self.history_frames = history_frames
-        self.angle_bias = nn.Parameter(torch.zeros(201))
-        self.speed_bias = nn.Parameter(torch.ones(201))
+        compact = control_encoding == "driver_compact_v1"
+        self.angle_bias = nn.Parameter(torch.zeros(81 if compact else 201))
+        self.speed_bias = nn.Parameter(torch.ones(31 if compact else 201))
 
     def forward(
         self,
@@ -388,3 +390,108 @@ def test_export_ar_checkpoint_writes_v3_external_history_contract(
     )
     assert tuple(angle.shape) == (1, 201)
     assert tuple(speed.shape) == (1, 201)
+
+
+@pytest.mark.parametrize(
+    ("initialization", "initial_ids", "initial_command"),
+    [
+        ("learned_unknown_tokens", [81, 82], None),
+        ("canonical_initial_command", [40, 55], [0, 15]),
+    ],
+)
+def test_export_compact_ar_checkpoint_writes_schema_v4(
+    monkeypatch,
+    tmp_path: Path,
+    initialization: str,
+    initial_ids: list[int],
+    initial_command: list[int] | None,
+):
+    monkeypatch.setattr(
+        export_module,
+        "AutoregressiveControlTokenViTPolicy",
+        _TinyARPolicy,
+    )
+    checkpoint_path = tmp_path / "compact.pt"
+    model = _TinyARPolicy(
+        model_name="tiny",
+        pretrained=False,
+        image_size=16,
+        history_frames=4,
+        use_control_type_embedding=False,
+        control_encoding="driver_compact_v1",
+    )
+    label_contract = {
+        "schema_version": 2,
+        "control_encoding": "driver_compact_v1",
+        "output_shapes": {
+            "angle_logits": [1, 81],
+            "speed_logits": [1, 31],
+        },
+        "angle": {"num_classes": 81, "driver_range": [-40, 40]},
+        "speed": {"num_classes": 31, "command_range": [0, 30]},
+        "shared_numeric_vocabulary": {
+            "numeric_range": [-40, 40],
+            "unknown_angle_token_id": 81,
+            "unknown_speed_token_id": 82,
+            "angle_query_token_id": 83,
+            "speed_query_token_id": 84,
+            "vocabulary_size": 85,
+        },
+        "history": {
+            "initialization": initialization,
+            "initial_token_ids": initial_ids,
+        },
+    }
+    if initial_command is not None:
+        label_contract["history"]["initial_command"] = initial_command
+    torch.save(
+        {
+            "epoch": 1,
+            "config": {
+                "model": {
+                    "name": "tiny",
+                    "image_size": 16,
+                    "architecture": "ar_control_tokens",
+                    "control_encoding": "driver_compact_v1",
+                    "history_frames": 4,
+                    "control_token_type_embedding": False,
+                },
+                "data": {
+                    "required_steering_contract": "normalized_percent_v1"
+                },
+            },
+            "model_state": model.state_dict(),
+            "preprocessing": {
+                "geometry": "full_frame_bicubic_resize",
+                "image_size": 16,
+                "mean": [0.5, 0.5, 0.5],
+                "std": [0.5, 0.5, 0.5],
+            },
+            "label_contract": label_contract,
+        },
+        checkpoint_path,
+    )
+
+    artifact = export_checkpoint(
+        checkpoint_path=checkpoint_path,
+        artifact_id="compact-ar-policy",
+        output_root=tmp_path / "models",
+        require_schema_version=4,
+    )
+    manifest = yaml.safe_load((artifact / "manifest.yaml").read_text())
+    assert manifest["schema_version"] == 4
+    assert manifest["model"]["input"]["order"] == [
+        "images",
+        "history_token_ids",
+    ]
+    assert manifest["model"]["output"]["shapes"] == [[1, 81], [1, 31]]
+    assert manifest["history"]["initialization"] == initialization
+    assert manifest["history"]["initial_token_ids"] == initial_ids
+    assert manifest["history"]["update"] == "externally_executed_commands"
+    model_ts = torch.jit.load(str(artifact / "model.ts"), map_location="cpu")
+    angle, speed = model_ts(
+        torch.zeros(1, 3, 16, 16),
+        torch.tensor([[initial_ids] * 4], dtype=torch.long),
+    )
+    assert tuple(angle.shape) == (1, 81)
+    assert tuple(speed.shape) == (1, 31)

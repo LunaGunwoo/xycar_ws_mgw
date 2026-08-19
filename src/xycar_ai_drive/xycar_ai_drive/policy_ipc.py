@@ -88,7 +88,7 @@ class UnixSocketPolicyClient:
         payload = _IMAGE_HEADER.pack(*frame.shape)
         history = self._artifact.history
         if history is not None and history.update == 'externally_executed_commands':
-            values = _flatten_external_history(history_class_ids, history.frames)
+            values = _flatten_external_history(history_class_ids, history)
             payload += _HISTORY_CLASS_IDS.pack(*values)
         elif history_class_ids is not None:
             raise PolicyRuntimeError(
@@ -425,21 +425,14 @@ def _recv_exact_socket(connection: socket.socket, size: int) -> bytes:
     return bytes(chunks)
 
 
-def _flatten_external_history(history_class_ids, frames: int) -> list[int]:
+def _flatten_external_history(history_class_ids, history) -> list[int]:
     if history_class_ids is None:
         raise PolicyRuntimeError(
             'schema v3 policy requires executed command history'
         )
     values = [list(pair) for pair in history_class_ids]
-    if len(values) != frames or any(
-        len(pair) != 2
-        or any(
-            isinstance(value, bool)
-            or not isinstance(value, int)
-            or not 0 <= value <= 200
-            for value in pair
-        )
-        for pair in values
+    if len(values) != history.frames or any(
+        not history.valid_pair(pair) for pair in values
     ):
         raise PolicyRuntimeError(
             'executed history must contain four [angle,speed] class pairs'

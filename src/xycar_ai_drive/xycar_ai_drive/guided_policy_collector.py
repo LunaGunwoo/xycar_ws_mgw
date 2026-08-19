@@ -23,7 +23,11 @@ from sensor_msgs.msg import Image, Joy
 from std_msgs.msg import Bool, Float32MultiArray
 from xycar_data.session_writer import AsyncSessionWriter, CameraSample
 
-from xycar_ai_drive.artifact import PolicyArtifact, load_policy_artifact
+from xycar_ai_drive.artifact import (
+    COMPACT_CONTROL_ENCODING,
+    PolicyArtifact,
+    load_policy_artifact,
+)
 from xycar_ai_drive.collection_profile import validate_collection_profile
 from xycar_ai_drive.control import (
     STOP_COMMAND,
@@ -31,6 +35,7 @@ from xycar_ai_drive.control import (
     ToggleAction,
     ToggleDriveGate,
     command_class_ids,
+    command_history_token_ids,
     is_fresh,
 )
 from xycar_ai_drive.front_cam_policy_node import (
@@ -735,7 +740,13 @@ class GuidedPolicyCollectorNode(Node):
         self._last_executed_prediction_sequence = prediction.sequence
         with self._lock:
             if self._history is not None:
-                self._history.append(command_class_ids(fused.executed))
+                pair = (
+                    command_history_token_ids(fused.executed)
+                    if self.artifact.control_encoding
+                    == COMPACT_CONTROL_ENCODING
+                    else command_class_ids(fused.executed)
+                )
+                self._history.append(pair)
         if self._session_token is not None and fused.executed.speed > 0:
             self._record_prediction(prediction, guide, fused)
 
@@ -839,7 +850,13 @@ class GuidedPolicyCollectorNode(Node):
             ),
         }
         if history is not None:
-            curriculum['initial_history_class_ids'] = history
+            history_key = (
+                'initial_history_token_ids'
+                if self.artifact.control_encoding
+                == COMPACT_CONTROL_ENCODING
+                else 'initial_history_class_ids'
+            )
+            curriculum[history_key] = history
         metadata = {
             'dataset_kind': 'camera_first_teleop_behavior_cloning',
             'camera_is_primary': True,
