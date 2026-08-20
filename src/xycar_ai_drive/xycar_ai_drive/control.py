@@ -188,6 +188,37 @@ def decode_compact_output_ids(
     )
 
 
+def decode_regression_outputs(
+    angle_driver: float,
+    speed: float,
+) -> DriveCommand:
+    """Decode schema-v6 scalar outputs into normalized motor commands."""
+    if not all(math.isfinite(value) for value in (angle_driver, speed)):
+        raise ValueError('regression outputs must be finite')
+    if not -50.0 <= angle_driver <= 50.0:
+        raise ValueError('regression angle_driver must be in [-50, 50]')
+    if not 0.0 <= speed <= 30.0:
+        raise ValueError('regression speed must be in [0, 30]')
+    return DriveCommand(
+        angle=float(angle_driver / NORMALIZED_TO_DRIVER_SCALE),
+        speed=float(speed),
+    )
+
+
+def cap_command_speed(command: DriveCommand, speed_cap: float) -> DriveCommand:
+    """Apply a finite forward-speed ceiling before publish and AR history."""
+    if not all(
+        math.isfinite(value) for value in (command.angle, command.speed, speed_cap)
+    ):
+        raise ValueError('command and speed_cap must be finite')
+    if not 0.0 <= speed_cap <= 30.0:
+        raise ValueError('speed_cap must be in [0, 30]')
+    return DriveCommand(
+        angle=command.angle,
+        speed=max(0.0, min(command.speed, speed_cap)),
+    )
+
+
 def command_history_token_ids(command: DriveCommand) -> tuple[int, int]:
     """Quantize an actually published normalized command for schema v5."""
     if not all(math.isfinite(value) for value in (command.angle, command.speed)):

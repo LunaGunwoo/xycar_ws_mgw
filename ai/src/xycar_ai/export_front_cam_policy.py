@@ -25,6 +25,8 @@ from xycar_ai.compact_control import (
 )
 from xycar_ai.front_cam_policy_model import (
     AR_CONTROL_TOKEN_ARCHITECTURE,
+    CATEGORICAL_PREDICTION_MODE,
+    CONTINUOUS_REGRESSION_PREDICTION_MODE,
     AutoregressiveControlTokenViTPolicy,
     TaskTokenViTPolicy,
 )
@@ -37,6 +39,7 @@ from xycar_ai.steering_contract import (
 LEGACY_ARTIFACT_SCHEMA_VERSION = 1
 AR_ARTIFACT_SCHEMA_VERSION = 3
 COMPACT_AR_ARTIFACT_SCHEMA_VERSION = 5
+REGRESSION_AR_ARTIFACT_SCHEMA_VERSION = 6
 ARTIFACT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 DEFAULT_OUTPUT_ROOT = Path("artifacts/models")
 MODEL_FILENAME = "model.ts"
@@ -70,6 +73,20 @@ class _TupleOutputARPolicy(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         outputs = self.policy(images, history_class_ids)
         return outputs["angle_logits"], outputs["speed_logits"]
+
+
+class _RegressionTupleOutputARPolicy(nn.Module):
+    def __init__(self, policy: nn.Module) -> None:
+        super().__init__()
+        self.policy = policy
+
+    def forward(
+        self,
+        images: torch.Tensor,
+        history_class_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        outputs = self.policy(images, history_class_ids)
+        return outputs["angle_driver"], outputs["speed"]
 
 
 class _FixedSpeedTupleOutputARPolicy(nn.Module):
@@ -107,6 +124,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
             LEGACY_ARTIFACT_SCHEMA_VERSION,
             AR_ARTIFACT_SCHEMA_VERSION,
             COMPACT_AR_ARTIFACT_SCHEMA_VERSION,
+            REGRESSION_AR_ARTIFACT_SCHEMA_VERSION,
         ),
         help="Reject export unless the artifact has this schema version.",
     )
@@ -175,7 +193,25 @@ def export_checkpoint(
     control_encoding = str(
         model_config.get("control_encoding", LEGACY_CONTROL_ENCODING)
     )
+    prediction_mode = str(
+        model_config.get("prediction_mode", CATEGORICAL_PREDICTION_MODE)
+    )
+    if prediction_mode not in {
+        CATEGORICAL_PREDICTION_MODE,
+        CONTINUOUS_REGRESSION_PREDICTION_MODE,
+    }:
+        raise PolicyExportError(f"unsupported prediction mode: {prediction_mode}")
+    if prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE and (
+        architecture != AR_CONTROL_TOKEN_ARCHITECTURE
+        or control_encoding != COMPACT_CONTROL_ENCODING
+    ):
+        raise PolicyExportError("continuous regression requires compact AR control")
     schema_version = (
+        REGRESSION_AR_ARTIFACT_SCHEMA_VERSION
+        if architecture == AR_CONTROL_TOKEN_ARCHITECTURE
+        and control_encoding == COMPACT_CONTROL_ENCODING
+        and prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE
+        else
         COMPACT_AR_ARTIFACT_SCHEMA_VERSION
         if architecture == AR_CONTROL_TOKEN_ARCHITECTURE
         and control_encoding == COMPACT_CONTROL_ENCODING
@@ -208,6 +244,17 @@ def export_checkpoint(
         architecture=architecture,
         control_encoding=control_encoding,
     )
+    if prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE:
+        if (
+            label_contract.get("prediction_mode")
+            != CONTINUOUS_REGRESSION_PREDICTION_MODE
+            or training_objective is None
+            or training_objective.get("mode") != "joint_angle_speed_regression"
+            or training_objective.get("speed_output_trained") is not True
+        ):
+            raise PolicyExportError(
+                "regression checkpoint label and training objective contracts differ"
+            )
 
     history_frames = int(model_config.get("history_frames", 0))
     use_type_embedding = bool(model_config.get("control_token_type_embedding", False))
@@ -228,6 +275,8 @@ def export_checkpoint(
         }
         if control_encoding == COMPACT_CONTROL_ENCODING:
             policy_arguments["control_encoding"] = control_encoding
+        if prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE:
+            policy_arguments["prediction_mode"] = prediction_mode
         policy = AutoregressiveControlTokenViTPolicy(
             **policy_arguments,
         )
@@ -245,16 +294,25 @@ def export_checkpoint(
     policy.eval()
     image_sample = torch.zeros(1, 3, image_size, image_size, dtype=torch.float32)
     if architecture == AR_CONTROL_TOKEN_ARCHITECTURE:
-        wrapper = (
-            _TupleOutputARPolicy(policy)
-            if fixed_speed_class_id is None
-            else _FixedSpeedTupleOutputARPolicy(policy, fixed_speed_class_id)
-        ).eval()
+        if prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE:
+            if fixed_speed_class_id is not None:
+                raise PolicyExportError("regression artifact cannot use fixed speed")
+            wrapper = _RegressionTupleOutputARPolicy(policy).eval()
+        else:
+            wrapper = (
+                _TupleOutputARPolicy(policy)
+                if fixed_speed_class_id is None
+                else _FixedSpeedTupleOutputARPolicy(policy, fixed_speed_class_id)
+            ).eval()
         if control_encoding == COMPACT_CONTROL_ENCODING:
             initial_angle, initial_speed, _ = _compact_history_initialization(
                 label_contract
             )
-            expected_shapes = ((1, ANGLE_OUTPUT_CLASSES), (1, SPEED_OUTPUT_CLASSES))
+            expected_shapes = (
+                ((1, 1), (1, 1))
+                if prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE
+                else ((1, ANGLE_OUTPUT_CLASSES), (1, SPEED_OUTPUT_CLASSES))
+            )
         else:
             initial_angle = int(model_config.get("history_initial_angle", 0)) + 100
             initial_speed = int(model_config.get("history_initial_speed", 25)) + 100
@@ -277,6 +335,8 @@ def export_checkpoint(
         traced_outputs = traced(*sample_inputs)
     _validate_outputs(eager_outputs, expected_shapes=expected_shapes)
     _validate_outputs(traced_outputs, expected_shapes=expected_shapes)
+    _validate_regression_outputs(eager_outputs, prediction_mode=prediction_mode)
+    _validate_regression_outputs(traced_outputs, prediction_mode=prediction_mode)
     _validate_fixed_speed_output(eager_outputs, fixed_speed_class_id)
     _validate_fixed_speed_output(traced_outputs, fixed_speed_class_id)
     for eager, exported in zip(eager_outputs, traced_outputs, strict=True):
@@ -295,6 +355,10 @@ def export_checkpoint(
         with torch.inference_mode():
             reloaded_outputs = reloaded(*sample_inputs)
         _validate_outputs(reloaded_outputs, expected_shapes=expected_shapes)
+        _validate_regression_outputs(
+            reloaded_outputs,
+            prediction_mode=prediction_mode,
+        )
         _validate_fixed_speed_output(reloaded_outputs, fixed_speed_class_id)
         for eager, exported in zip(eager_outputs, reloaded_outputs, strict=True):
             if not torch.allclose(eager, exported, atol=1e-5, rtol=1e-5):
@@ -439,6 +503,9 @@ def _build_manifest(
         control_encoding = str(
             model_config.get("control_encoding", LEGACY_CONTROL_ENCODING)
         )
+        prediction_mode = str(
+            model_config.get("prediction_mode", CATEGORICAL_PREDICTION_MODE)
+        )
         compact = control_encoding == COMPACT_CONTROL_ENCODING
         history_input_name = (
             "history_token_ids" if compact else "history_class_ids"
@@ -479,8 +546,33 @@ def _build_manifest(
                 history_contract["initial_command"] = list(
                     label_history["initial_command"]
                 )
-            output_shapes = [[1, ANGLE_OUTPUT_CLASSES], [1, SPEED_OUTPUT_CLASSES]]
-            schema_version = COMPACT_AR_ARTIFACT_SCHEMA_VERSION
+            if prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE:
+                output_shapes = [[1, 1], [1, 1]]
+                output_order = ["angle_driver", "speed"]
+                output_values: list[dict[str, object]] | None = [
+                    {
+                        "name": "angle_driver",
+                        "dtype": "float32",
+                        "unit": "driver_angle",
+                        "range": [-50.0, 50.0],
+                        "runtime_normalized_mapping": "value * 2",
+                    },
+                    {
+                        "name": "speed",
+                        "dtype": "float32",
+                        "unit": "motor_speed",
+                        "range": [0.0, 30.0],
+                    },
+                ]
+                schema_version = REGRESSION_AR_ARTIFACT_SCHEMA_VERSION
+            else:
+                output_shapes = [
+                    [1, ANGLE_OUTPUT_CLASSES],
+                    [1, SPEED_OUTPUT_CLASSES],
+                ]
+                output_order = ["angle_logits", "speed_logits"]
+                output_values = None
+                schema_version = COMPACT_AR_ARTIFACT_SCHEMA_VERSION
         else:
             initial_angle = int(model_config.get("history_initial_angle", 0))
             initial_speed = int(model_config.get("history_initial_speed", 25))
@@ -493,6 +585,8 @@ def _build_manifest(
                 "update": "externally_executed_commands",
             }
             output_shapes = [[1, 201], [1, 201]]
+            output_order = ["angle_logits", "speed_logits"]
+            output_values = None
             schema_version = AR_ARTIFACT_SCHEMA_VERSION
     else:
         model_input = {
@@ -503,7 +597,17 @@ def _build_manifest(
         }
         history_contract = None
         output_shapes = [[1, 201], [1, 201]]
+        output_order = ["angle_logits", "speed_logits"]
+        output_values = None
         schema_version = LEGACY_ARTIFACT_SCHEMA_VERSION
+        prediction_mode = CATEGORICAL_PREDICTION_MODE
+    model_output: dict[str, object] = {
+        "kind": "tuple",
+        "order": output_order,
+        "shapes": output_shapes,
+    }
+    if output_values is not None:
+        model_output["values"] = output_values
     manifest: dict[str, object] = {
         "schema_version": schema_version,
         "artifact_id": artifact_id,
@@ -524,12 +628,9 @@ def _build_manifest(
             "control_encoding": str(
                 model_config.get("control_encoding", LEGACY_CONTROL_ENCODING)
             ),
+            "prediction_mode": prediction_mode,
             "input": model_input,
-            "output": {
-                "kind": "tuple",
-                "order": ["angle_logits", "speed_logits"],
-                "shapes": output_shapes,
-            },
+            "output": model_output,
         },
         "preprocessing": dict(preprocessing),
         "label_contract": dict(label_contract),
@@ -586,6 +687,49 @@ def _training_objective_contract(
         "speed_loss_weight": speed_loss_weight,
         "validation_speed_mae_weight": validation_speed_mae_weight,
     }
+    if mode == "joint_angle_speed_regression":
+        if raw_objective.get("loss") != "smooth_l1_normalized":
+            raise PolicyExportError(
+                "regression objective must use normalized SmoothL1"
+            )
+        angle_normalization = _finite_number(
+            raw_objective,
+            "angle_normalization",
+            "checkpoint.training_objective",
+        )
+        speed_normalization = _finite_number(
+            raw_objective,
+            "speed_normalization",
+            "checkpoint.training_objective",
+        )
+        angle_beta = _finite_number(
+            raw_objective,
+            "angle_beta",
+            "checkpoint.training_objective",
+        )
+        speed_beta = _finite_number(
+            raw_objective,
+            "speed_beta",
+            "checkpoint.training_objective",
+        )
+        if (
+            angle_normalization != 50.0
+            or speed_normalization != 30.0
+            or angle_beta <= 0.0
+            or speed_beta <= 0.0
+            or speed_loss_weight <= 0.0
+            or not speed_output_trained
+        ):
+            raise PolicyExportError("regression objective contract is invalid")
+        objective.update(
+            {
+                "loss": "smooth_l1_normalized",
+                "angle_normalization": angle_normalization,
+                "speed_normalization": speed_normalization,
+                "angle_beta": angle_beta,
+                "speed_beta": speed_beta,
+            }
+        )
     if speed_output_trained:
         return objective, None
     if (
@@ -856,6 +1000,20 @@ def _validate_outputs(
             )
         if not torch.isfinite(output).all():
             raise PolicyExportError(f"{name} contains a non-finite value")
+
+
+def _validate_regression_outputs(
+    outputs: tuple[torch.Tensor, torch.Tensor],
+    *,
+    prediction_mode: str,
+) -> None:
+    if prediction_mode != CONTINUOUS_REGRESSION_PREDICTION_MODE:
+        return
+    angle_driver, speed = outputs
+    if bool((angle_driver < -50.0).any()) or bool((angle_driver > 50.0).any()):
+        raise PolicyExportError("regression angle output is outside [-50, 50]")
+    if bool((speed < 0.0).any()) or bool((speed > 30.0).any()):
+        raise PolicyExportError("regression speed output is outside [0, 30]")
 
 
 def _validate_fixed_speed_output(

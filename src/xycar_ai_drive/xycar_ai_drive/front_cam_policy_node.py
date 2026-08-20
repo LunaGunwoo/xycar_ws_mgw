@@ -25,6 +25,7 @@ from xycar_ai_drive.control import (
     HoldDriveGate,
     PolicyPrediction,
     ToggleAction,
+    cap_command_speed,
     command_class_ids,
     command_history_token_ids,
     is_fresh,
@@ -184,6 +185,7 @@ class FrontCamPolicyNode(Node):
             f'inference_device={self.inference_device}, '
             f'A=buttons[{self.a_button_index}], '
             f'A_release_grace={self.a_release_grace_sec:g} s, '
+            f'speed_cap={self.speed_cap:g}, '
             f'allow_motion={self.allow_motion}'
         )
 
@@ -204,6 +206,7 @@ class FrontCamPolicyNode(Node):
         self.declare_parameter('a_button_index', 0)
         self.declare_parameter('a_release_grace_sec', 0.12)
         self.declare_parameter('allow_motion', True)
+        self.declare_parameter('speed_cap', 30.0)
         self.declare_parameter('publish_rate_hz', 20.0)
         self.declare_parameter('joy_timeout_sec', 0.25)
         self.declare_parameter('inference_timeout_sec', 0.25)
@@ -239,6 +242,7 @@ class FrontCamPolicyNode(Node):
             self.get_parameter('a_release_grace_sec').value
         )
         self.allow_motion = bool(self.get_parameter('allow_motion').value)
+        self.speed_cap = float(self.get_parameter('speed_cap').value)
         self.publish_rate_hz = float(
             self.get_parameter('publish_rate_hz').value
         )
@@ -285,6 +289,8 @@ class FrontCamPolicyNode(Node):
                 raise ValueError(f'{label} must not be empty')
         if self.a_button_index < 0:
             raise ValueError('a_button_index must be non-negative')
+        if not np.isfinite(self.speed_cap) or not 0.0 <= self.speed_cap <= 30.0:
+            raise ValueError('speed_cap must be finite and in [0, 30]')
         for node in self.allowed_motor_relay_nodes:
             if not node.startswith('/') or node.endswith('/'):
                 raise ValueError(
@@ -509,18 +515,22 @@ class FrontCamPolicyNode(Node):
             if reason is None and self._drive_gate.enabled:
                 prediction = self._prediction
                 if prediction is not None:
+                    executed_command = cap_command_speed(
+                        prediction.command,
+                        self.speed_cap,
+                    )
                     self._stop_reason = None
                     # Keep the state decision and publish ordered against a
                     # worker-thread fault. A fault that waits on this lock
                     # will publish its stop command after this command.
-                    self._publish(prediction.command)
+                    self._publish(executed_command)
                     if (
                         self._history is not None
                         and self._prediction_sequence
                         != self._last_executed_prediction_sequence
                     ):
                         self._history.append(
-                            self._executed_history_pair(prediction.command)
+                            self._executed_history_pair(executed_command)
                         )
                         self._last_executed_prediction_sequence = (
                             self._prediction_sequence

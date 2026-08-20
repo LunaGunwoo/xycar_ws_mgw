@@ -25,7 +25,8 @@ adapter가 `×0.5`로 변환한 driver command `-50..50`만
   queue에 추가한다. schema v5 compact AR은 artifact에 따라 UNKNOWN 또는
   canonical 실제 명령 `(angle=0, dataset mean speed)` 네 쌍으로 시작하고 실제 발행 명령을 angle token `0..100`, speed
   token `50..80`으로 바꿔 오래된 slot부터 교체한다. 추론됐지만 발행되지 않은 명령은
-  schema v3/v5 history에 넣지 않는다.
+  schema v3/v5/v6 history에 넣지 않는다. schema v6도 compact history를 사용하지만
+  연속 angle/speed를 범위 검사한 뒤 실제 발행 명령을 round해 token으로 만든다.
   추론 실패 또는 성공한 추론 사이가 0.25초 이상 벌어지면 초기 history로 reset한다.
 - A hold로 ON이 되는 순간에도 AR history와 저장된 예측을 reset한다. reset 뒤
   새 camera frame의 첫 예측이 완료될 때까지 motor output은 `[0, 0]`을 유지한다.
@@ -36,6 +37,10 @@ adapter가 `×0.5`로 변환한 driver command `-50..50`만
   cap을 적용하지 않아 label 계약의 최대 `100`까지 전달한다. schema v5 angle은
   `(class_id - 50) ÷ 0.5`로 normalized 명령을 복원하고 speed는 class `0..30`을
   그대로 사용한다.
+- schema v6는 float scalar `angle_driver [-50,50]`, `speed [0,30]`을 받고 angle을
+  `×2`하여 normalized motor 명령으로 바꾼다. shape, NaN/Inf 또는 범위 위반은
+  fail-closed다. 모든 schema의 예측 speed에는 launch `speed_cap` 기본값 `30`을
+  motor publish 전에 적용하며, external AR history에도 이 capped 실제 명령만 넣는다.
 - Joy 또는 camera prediction이 0.25초 이상 stale, 추론/변환 오류, motor
   subscriber 소실, 다른 motor publisher 출현 시 즉시 OFF와 `[0, 0]`으로
   전환한다. 조건이 복구돼도 A release 후 새 press가 있어야 다시 ON된다.
@@ -78,6 +83,10 @@ mapping을 검증하고 실제 발행 history만 받는다. canonical 명령은 
 Angle-only schema v5 artifact는 tuple shape를 바꾸지 않고 speed logits를 검증된
 dataset 고정 class로 강제하며, manifest의 `training_objective.speed_output_trained`와
 `speed_output`에 미학습 head와 실제 고정 출력을 함께 기록한다.
+schema v6는 같은 compact history input과 canonical `(0,25)×4` 초기화를 사용하고,
+tuple output을 driver angle `[1,1]`, speed `[1,1]` float scalar로 바꾼다. manifest의
+단위·범위·`angle_driver × 2` mapping을 검사하고 범위를 벗어난 runtime 출력은
+발행하지 않는다.
 CPU thread 8개로 model을 load하고 3회 warm-up한다. artifact 생성과 배포는 개발
 Laptop의 MGW root에서 수행한다.
 
@@ -403,6 +412,7 @@ source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch xycar_ai_drive jetson_gpu_policy.launch.py \
   artifact_id:=<schema-v1-stateless-artifact-id> \
+  speed_cap:=30.0 \
   use_camera:=true use_gamepad:=true allow_motion:=true
 ```
 
@@ -413,6 +423,11 @@ container를 먼저 준비하고 Unix socket이 열린 뒤 camera, gamepad와 po
 container도 함께 정리한다. 이미 camera나 gamepad publisher가 있으면
 `use_camera:=false` 또는 `use_gamepad:=false`를 지정한다. 기존 `xycar-ai-gpu`
 wrapper와 `ARTIFACT_ID=<id>` 방식도 호환을 위해 계속 지원한다.
+
+nice_adaptive 분류/회귀 A/B에서는 다른 조건을 같게 만들기 위해 두 artifact 모두
+`speed_cap:=25.0`을 명시한다. cap은 prediction debug topic이 아니라 실제 motor
+publish와 external history에 적용된다. 같은 코스를 두 번 이상 교차 순서로 실행하고
+완주, 조향 진동, 커브 복원, 속도 변화와 사람 개입 횟수를 기록한다.
 
 wrapper는 camera를 열기 전에 host NumPy 1.x, OpenCV와 `cv_bridge` import를
 검사한다. user site-packages의 NumPy 2.x가 ROS Humble ABI를 가리면 즉시 종료하며

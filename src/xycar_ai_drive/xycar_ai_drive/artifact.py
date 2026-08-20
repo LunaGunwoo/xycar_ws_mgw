@@ -17,9 +17,11 @@ from xycar_ai_drive.steering_contract import (
     parse_steering_contract,
 )
 
-SUPPORTED_ARTIFACT_SCHEMA_VERSIONS = {1, 2, 3, 5}
+SUPPORTED_ARTIFACT_SCHEMA_VERSIONS = {1, 2, 3, 5, 6}
 LEGACY_CONTROL_ENCODING = 'legacy_command_201'
 COMPACT_CONTROL_ENCODING = 'driver_compact_v2'
+CATEGORICAL_PREDICTION_MODE = 'categorical'
+CONTINUOUS_REGRESSION_PREDICTION_MODE = 'continuous_regression'
 CHECKSUM_FILENAME = 'SHA256SUMS'
 MANIFEST_FILENAME = 'manifest.yaml'
 
@@ -80,6 +82,7 @@ class PolicyArtifact:
         (1, 201),
         (1, 201),
     )
+    prediction_mode: str = CATEGORICAL_PREDICTION_MODE
 
 
 def load_policy_artifact(root: str | Path) -> PolicyArtifact:
@@ -117,7 +120,7 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
     history = None
     control_encoding = (
         COMPACT_CONTROL_ENCODING
-        if schema_version == 5
+        if schema_version in {5, 6}
         else LEGACY_CONTROL_ENCODING
     )
     if schema_version == 1:
@@ -130,7 +133,9 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
                 'AR schema model input must be a tuple'
             )
         history_input_name = (
-            'history_token_ids' if schema_version == 5 else 'history_class_ids'
+            'history_token_ids'
+            if schema_version in {5, 6}
+            else 'history_class_ids'
         )
         if model_input.get('order') != ['images', history_input_name]:
             raise ArtifactContractError(
@@ -154,9 +159,17 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
     model_output = _required_mapping(model, 'output', 'model')
     if model_output.get('kind') != 'tuple':
         raise ArtifactContractError('model output kind must be tuple')
-    if model_output.get('order') != ['angle_logits', 'speed_logits']:
+    expected_output_order = (
+        ['angle_driver', 'speed']
+        if schema_version == 6
+        else ['angle_logits', 'speed_logits']
+    )
+    if model_output.get('order') != expected_output_order:
         raise ArtifactContractError('model output order is unsupported')
     expected_output_shapes = (
+        [[1, 1], [1, 1]]
+        if schema_version == 6
+        else
         [[1, 101], [1, 31]]
         if schema_version == 5
         else [[1, 201], [1, 201]]
@@ -165,6 +178,18 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
         raise ArtifactContractError(
             f'model output shapes must be {expected_output_shapes}'
         )
+    prediction_mode = str(
+        model.get('prediction_mode', CATEGORICAL_PREDICTION_MODE)
+    )
+    expected_prediction_mode = (
+        CONTINUOUS_REGRESSION_PREDICTION_MODE
+        if schema_version == 6
+        else CATEGORICAL_PREDICTION_MODE
+    )
+    if prediction_mode != expected_prediction_mode:
+        raise ArtifactContractError('model prediction_mode is incompatible')
+    if schema_version == 6:
+        _validate_regression_output_values(model_output)
 
     preprocessing = _required_mapping(
         manifest,
@@ -198,8 +223,11 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
         'label_contract',
         'manifest',
     )
-    if schema_version == 5:
-        _validate_compact_label_contract(label_contract)
+    if schema_version in {5, 6}:
+        _validate_compact_label_contract(
+            label_contract,
+            regression=schema_version == 6,
+        )
     else:
         if label_contract.get('num_classes') != 201:
             raise ArtifactContractError('label contract must use 201 classes')
@@ -226,6 +254,7 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
         steering_contract=steering_contract,
         control_encoding=control_encoding,
         output_shapes=tuple(tuple(value) for value in expected_output_shapes),
+        prediction_mode=prediction_mode,
     )
 
 
@@ -259,7 +288,7 @@ def _history_contract(
         raise ArtifactContractError('history.frames must be 4')
     expected_pair_order = (
         ['angle_token_id', 'speed_token_id']
-        if schema_version == 5
+        if schema_version in {5, 6}
         else ['angle_class_id', 'speed_class_id']
     )
     if history.get('pair_order') != expected_pair_order:
@@ -268,13 +297,15 @@ def _history_contract(
         raise ArtifactContractError('history time order is unsupported')
     expected_update = (
         'externally_executed_commands'
-        if schema_version in {3, 5}
+        if schema_version in {3, 5, 6}
         else 'predicted_argmax'
     )
     if history.get('update') != expected_update:
         raise ArtifactContractError('history update mode is unsupported')
     initial_key = (
-        'initial_token_ids' if schema_version == 5 else 'initial_class_ids'
+        'initial_token_ids'
+        if schema_version in {5, 6}
+        else 'initial_class_ids'
     )
     initial_ids = history.get(initial_key)
     if (
@@ -283,15 +314,18 @@ def _history_contract(
         or any(
             isinstance(value, bool)
             or not isinstance(value, int)
-            or not 0 <= value <= (102 if schema_version == 5 else 200)
+            or not 0 <= value <= (102 if schema_version in {5, 6} else 200)
             for value in initial_ids
         )
     ):
         raise ArtifactContractError('history initial class ids are invalid')
     initialization = history.get('initialization')
-    if schema_version == 5 and initialization == 'learned_unknown_tokens':
+    if schema_version in {5, 6} and initialization == 'learned_unknown_tokens':
         expected_initial = [101, 102]
-    elif schema_version == 5 and initialization == 'canonical_initial_command':
+    elif (
+        schema_version in {5, 6}
+        and initialization == 'canonical_initial_command'
+    ):
         initial_command = history.get('initial_command')
         if (
             not isinstance(initial_command, list)
@@ -315,7 +349,7 @@ def _history_contract(
         raise ArtifactContractError(
             f'history initial ids must be {expected_initial}'
         )
-    if schema_version == 5:
+    if schema_version in {5, 6}:
         if initialization not in {
             'learned_unknown_tokens',
             'canonical_initial_command',
@@ -337,7 +371,7 @@ def _history_contract(
         update=expected_update,
         control_encoding=(
             COMPACT_CONTROL_ENCODING
-            if schema_version == 5
+            if schema_version in {5, 6}
             else LEGACY_CONTROL_ENCODING
         ),
     )
@@ -345,16 +379,32 @@ def _history_contract(
 
 def _validate_compact_label_contract(
     contract: Mapping[str, object],
+    *,
+    regression: bool,
 ) -> None:
     if contract.get('control_encoding') != COMPACT_CONTROL_ENCODING:
-        raise ArtifactContractError('schema v5 control encoding is unsupported')
-    if contract.get('output_shapes') != {
-        'angle_logits': [1, 101],
-        'speed_logits': [1, 31],
-    }:
-        raise ArtifactContractError('schema v5 label output shapes are invalid')
+        raise ArtifactContractError('compact control encoding is unsupported')
+    expected_shapes = (
+        {'angle_driver': [1, 1], 'speed': [1, 1]}
+        if regression
+        else {'angle_logits': [1, 101], 'speed_logits': [1, 31]}
+    )
+    if contract.get('output_shapes') != expected_shapes:
+        raise ArtifactContractError('compact label output shapes are invalid')
     angle = _required_mapping(contract, 'angle', 'label_contract')
     speed = _required_mapping(contract, 'speed', 'label_contract')
+    if regression:
+        if contract.get('prediction_mode') != CONTINUOUS_REGRESSION_PREDICTION_MODE:
+            raise ArtifactContractError('schema v6 prediction mode is invalid')
+        if (
+            angle.get('unit') != 'driver_angle'
+            or angle.get('range') != [-50.0, 50.0]
+            or angle.get('runtime_normalized_mapping') != 'angle_driver * 2'
+            or speed.get('unit') != 'motor_speed'
+            or speed.get('range') != [0.0, 30.0]
+        ):
+            raise ArtifactContractError('schema v6 scalar label contract is invalid')
+        return
     vocabulary = _required_mapping(
         contract,
         'shared_numeric_vocabulary',
@@ -373,6 +423,28 @@ def _validate_compact_label_contract(
         or vocabulary.get('vocabulary_size') != 105
     ):
         raise ArtifactContractError('schema v5 numeric vocabulary is invalid')
+
+
+def _validate_regression_output_values(
+    output: Mapping[str, object],
+) -> None:
+    expected = [
+        {
+            'name': 'angle_driver',
+            'dtype': 'float32',
+            'unit': 'driver_angle',
+            'range': [-50.0, 50.0],
+            'runtime_normalized_mapping': 'value * 2',
+        },
+        {
+            'name': 'speed',
+            'dtype': 'float32',
+            'unit': 'motor_speed',
+            'range': [0.0, 30.0],
+        },
+    ]
+    if output.get('values') != expected:
+        raise ArtifactContractError('schema v6 output value contract is invalid')
 
 
 def _road_warp_parameters(

@@ -25,9 +25,11 @@ from xycar_ai_drive.control import (
     HoldDriveGate,
     ToggleAction,
     ToggleDriveGate,
+    cap_command_speed,
     command_history_token_ids,
     decode_class_ids,
     decode_compact_output_ids,
+    decode_regression_outputs,
     is_fresh,
 )
 from xycar_ai_drive.guided_policy_collector import (
@@ -67,6 +69,19 @@ def test_motor_relay_default_is_explicit_in_vehicle_config():
     parameters = config['front_cam_policy']['ros__parameters']
     assert parameters['allowed_motor_relay_nodes'] == ['/ros_bridge']
     assert parameters['a_release_grace_sec'] == pytest.approx(0.12)
+    assert parameters['speed_cap'] == pytest.approx(30.0)
+
+
+def test_regression_decode_and_speed_cap_are_applied_in_command_units():
+    command = decode_regression_outputs(-12.5, 27.25)
+    assert command == DriveCommand(-25.0, 27.25)
+    capped = cap_command_speed(command, 25.0)
+    assert capped == DriveCommand(-25.0, 25.0)
+    assert command_history_token_ids(capped) == (38, 75)
+    with pytest.raises(ValueError, match='angle_driver'):
+        decode_regression_outputs(50.1, 20.0)
+    with pytest.raises(ValueError, match='finite'):
+        decode_regression_outputs(0.0, float('nan'))
 
 
 def test_a_button_toggle_requires_release_and_fault_rearming():
@@ -962,6 +977,122 @@ def test_schema_v5_runtime_uses_compact_initial_and_external_tokens(
     assert prediction.command == DriveCommand(-100.0, 30.0)
     with pytest.raises(PolicyRuntimeError, match='executed history'):
         runtime.infer(frame, [[101, 50]] * 4)
+
+
+def test_schema_v6_runtime_decodes_regression_and_fails_closed(tmp_path):
+    torch = pytest.importorskip('torch')
+
+    class RegressionPolicy(torch.nn.Module):
+        def forward(self, images, history_token_ids):
+            signal = history_token_ids[:, :1, :1].to(images.dtype) * 0
+            return signal - 12.5, signal + 24.25
+
+    artifact = tmp_path / 'fixture-regression-ar-policy'
+    artifact.mkdir()
+    sample_image = torch.zeros(1, 3, 4, 4)
+    sample_history = torch.tensor([[[50, 75]] * 4], dtype=torch.long)
+    torch.jit.trace(
+        RegressionPolicy(),
+        (sample_image, sample_history),
+        strict=True,
+    ).save(str(artifact / 'model.ts'))
+    manifest = {
+        'schema_version': 6,
+        'artifact_id': artifact.name,
+        'model': {
+            'format': 'torchscript',
+            'file': 'model.ts',
+            'architecture': 'ar_control_tokens',
+            'control_encoding': 'driver_compact_v2',
+            'prediction_mode': 'continuous_regression',
+            'input': {
+                'kind': 'tuple',
+                'order': ['images', 'history_token_ids'],
+                'images': {
+                    'color_space': 'RGB',
+                    'dtype': 'float32',
+                    'shape': [1, 3, 4, 4],
+                },
+                'history_token_ids': {
+                    'dtype': 'int64',
+                    'shape': [1, 4, 2],
+                },
+            },
+            'output': {
+                'kind': 'tuple',
+                'order': ['angle_driver', 'speed'],
+                'shapes': [[1, 1], [1, 1]],
+                'values': [
+                    {
+                        'name': 'angle_driver',
+                        'dtype': 'float32',
+                        'unit': 'driver_angle',
+                        'range': [-50.0, 50.0],
+                        'runtime_normalized_mapping': 'value * 2',
+                    },
+                    {
+                        'name': 'speed',
+                        'dtype': 'float32',
+                        'unit': 'motor_speed',
+                        'range': [0.0, 30.0],
+                    },
+                ],
+            },
+        },
+        'preprocessing': {
+            'geometry': 'full_frame_bicubic_resize',
+            'image_size': 4,
+            'mean': [0.5, 0.5, 0.5],
+            'std': [0.5, 0.5, 0.5],
+        },
+        'label_contract': {
+            'control_encoding': 'driver_compact_v2',
+            'prediction_mode': 'continuous_regression',
+            'output_shapes': {'angle_driver': [1, 1], 'speed': [1, 1]},
+            'angle': {
+                'unit': 'driver_angle',
+                'range': [-50.0, 50.0],
+                'runtime_normalized_mapping': 'angle_driver * 2',
+            },
+            'speed': {'unit': 'motor_speed', 'range': [0.0, 30.0]},
+        },
+        'history': {
+            'frames': 4,
+            'pair_order': ['angle_token_id', 'speed_token_id'],
+            'time_order': 'oldest_to_newest',
+            'initialization': 'canonical_initial_command',
+            'initial_command': [0, 25],
+            'initial_token_ids': [50, 75],
+            'actual_angle_token_range': [0, 100],
+            'actual_speed_token_range': [50, 80],
+            'update': 'externally_executed_commands',
+        },
+        'steering_contract': steering_contract_mapping(),
+    }
+    (artifact / 'manifest.yaml').write_text(
+        yaml.safe_dump(manifest, sort_keys=False),
+        encoding='utf-8',
+    )
+    _write_checksums(artifact)
+
+    contract = load_policy_artifact(artifact)
+    assert contract.prediction_mode == 'continuous_regression'
+    runtime = TorchScriptPolicy(
+        artifact_dir=str(artifact),
+        torch_num_threads=1,
+        warmup_count=0,
+    )
+    frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    result = runtime.infer(frame, [[50, 75]] * 4)
+    assert result.command == DriveCommand(-25.0, 24.25)
+
+    class OutOfRangePolicy:
+        def __call__(self, *_args):
+            return torch.tensor([[51.0]]), torch.tensor([[25.0]])
+
+    runtime._model = OutOfRangePolicy()
+    with pytest.raises(PolicyRuntimeError, match=r'\[-50, 50\]'):
+        runtime.infer(frame, [[50, 75]] * 4)
 
 
 def test_road_warp_artifact_and_runtime_preprocessing(tmp_path):

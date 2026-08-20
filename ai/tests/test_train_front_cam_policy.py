@@ -22,6 +22,7 @@ from xycar_ai.train_front_cam_policy import (
     load_configured_road_warp,
     main,
     rollout_predicted_histories,
+    compute_policy_losses,
     source_weighted_metric,
     validation_selection_score,
     validate_incremental_initialization,
@@ -91,6 +92,83 @@ def test_compact_sequence_rollout_can_fix_speed_history():
     assert prompts[0, 0].tolist() == [[50, 73]] * 4
     assert prompts[0, 1, -1].tolist() == [100, 73]
     assert final_history[0, -1].tolist() == [100, 73]
+
+
+def test_regression_rollout_rounds_and_detaches_both_history_values():
+    outputs = {
+        "angle_driver": torch.tensor([[-49.6], [4.6]], requires_grad=True),
+        "speed": torch.tensor([[-1.0], [30.6]], requires_grad=True),
+    }
+    from xycar_ai.train_front_cam_policy import predicted_executed_class_pair
+
+    pair = predicted_executed_class_pair(
+        outputs,
+        control_encoding="driver_compact_v2",
+    )
+
+    assert pair.tolist() == [[0, 50], [55, 80]]
+    assert not pair.requires_grad
+
+
+def test_regression_config_and_normalized_smooth_l1_loss(tmp_path: Path):
+    config_path = _write_config(
+        tmp_path,
+        tmp_path / "config" / "split.yaml",
+        epochs=1,
+        autoregressive=True,
+    )
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["model"].update(
+        {
+            "control_encoding": "driver_compact_v2",
+            "history_update": "externally_executed_commands",
+            "history_initial_speed": 25,
+            "prediction_mode": "continuous_regression",
+        }
+    )
+    payload["training"].update(
+        {
+            "history_training_source": "canonical_initial_command",
+            "validation_speed_mae_weight": 0.25,
+        }
+    )
+    payload["loss"].update(
+        {
+            "angle_label_smoothing": 0.0,
+            "speed_label_smoothing": 0.0,
+            "angle_class_weighting": "none",
+            "speed_class_weighting": "none",
+            "emd_loss_weight": 0.0,
+            "angle_regression_beta": 0.1,
+            "speed_regression_beta": 1.0 / 30.0,
+        }
+    )
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    config = load_train_config(config_path)
+    angle_criterion = torch.nn.SmoothL1Loss(beta=0.1)
+    speed_criterion = torch.nn.SmoothL1Loss(beta=1.0 / 30.0)
+    outputs = {
+        "angle_driver": torch.tensor([[25.0]]),
+        "speed": torch.tensor([[24.0]]),
+    }
+    total, angle, speed, emd = compute_policy_losses(
+        outputs=outputs,
+        batch={"angle_raw": torch.tensor([0.0]), "speed_raw": torch.tensor([25.0])},
+        config=config,
+        angle_criterion=angle_criterion,
+        speed_criterion=speed_criterion,
+    )
+
+    assert angle == pytest.approx(0.45)
+    assert speed.item() == pytest.approx(1.0 / 60.0, rel=1e-5)
+    assert total.item() == pytest.approx(0.45 + 0.5 / 60.0, rel=1e-5)
+    assert emd.item() == 0.0
+    contract = build_label_contract(config)
+    assert contract["output_shapes"] == {"angle_driver": [1, 1], "speed": [1, 1]}
+    assert contract["history"]["initial_token_ids"] == [50, 75]
+    assert build_training_objective_contract(config)["mode"] == (
+        "joint_angle_speed_regression"
+    )
 
 
 def test_ab_configs_only_change_flip_and_run_name():

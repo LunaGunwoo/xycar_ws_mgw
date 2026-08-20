@@ -25,6 +25,7 @@ def generate_launch_description():
     use_camera = LaunchConfiguration('use_camera')
     use_gamepad = LaunchConfiguration('use_gamepad')
     allow_motion = LaunchConfiguration('allow_motion')
+    speed_cap = LaunchConfiguration('speed_cap')
     inference_backend = LaunchConfiguration('inference_backend')
     inference_device = LaunchConfiguration('inference_device')
     inference_socket_path = LaunchConfiguration('inference_socket_path')
@@ -70,6 +71,11 @@ def generate_launch_description():
                 'allow_motion',
                 default_value='true',
                 description='Allow A-button toggles to publish nonzero motor commands.',
+            ),
+            DeclareLaunchArgument(
+                'speed_cap',
+                default_value='30.0',
+                description='Hard ceiling applied before motor publish and history.',
             ),
             DeclareLaunchArgument(
                 'device_id',
@@ -139,6 +145,10 @@ def generate_launch_description():
                         'allow_motion': ParameterValue(
                             allow_motion,
                             value_type=bool,
+                        ),
+                        'speed_cap': ParameterValue(
+                            speed_cap,
+                            value_type=float,
                         ),
                         'inference_backend': inference_backend,
                         'inference_device': inference_device,

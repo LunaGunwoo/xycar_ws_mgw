@@ -19,6 +19,7 @@ from xycar_ai.steering_contract import validate_required_contract_name
 CONFIG_SCHEMA_VERSIONS = {1, 2, 3}
 CLASS_WEIGHTING_MODES = {"none", "sqrt_inverse_frequency"}
 MODEL_ARCHITECTURES = {"task_tokens", "ar_control_tokens"}
+PREDICTION_MODES = {"categorical", "continuous_regression"}
 HISTORY_UPDATE_MODES = {"predicted_argmax", "externally_executed_commands"}
 HISTORY_TRAINING_SOURCES = {
     "runtime_default",
@@ -41,6 +42,7 @@ class ModelConfig:
     history_initial_angle: int = 0
     history_initial_speed: int = 25
     history_update: str = "predicted_argmax"
+    prediction_mode: str = "categorical"
 
 
 @dataclass(frozen=True)
@@ -134,6 +136,8 @@ class LossConfig:
     max_class_weight: float
     speed_loss_weight: float
     emd_loss_weight: float
+    angle_regression_beta: float = 0.1
+    speed_regression_beta: float = 1.0 / 30.0
 
 
 @dataclass(frozen=True)
@@ -211,6 +215,7 @@ def load_train_config(path: str | Path) -> TrainConfig:
             "history_initial_angle",
             "history_initial_speed",
             "history_update",
+            "prediction_mode",
         },
     )
     _expect_data_keys(data_payload, schema_version=schema_version)
@@ -272,6 +277,7 @@ def load_train_config(path: str | Path) -> TrainConfig:
             "emd_loss_weight",
         },
         "loss",
+        optional={"angle_regression_beta", "speed_regression_beta"},
     )
     _expect_keys(output_payload, {"root", "run_name"}, "output")
 
@@ -316,6 +322,11 @@ def load_train_config(path: str | Path) -> TrainConfig:
                 _string(model_payload, "history_update")
                 if "history_update" in model_payload
                 else "predicted_argmax"
+            ),
+            prediction_mode=(
+                _string(model_payload, "prediction_mode")
+                if "prediction_mode" in model_payload
+                else "categorical"
             ),
         ),
         data=DataConfig(
@@ -510,6 +521,16 @@ def load_train_config(path: str | Path) -> TrainConfig:
             max_class_weight=_number(loss_payload, "max_class_weight"),
             speed_loss_weight=_number(loss_payload, "speed_loss_weight"),
             emd_loss_weight=_number(loss_payload, "emd_loss_weight"),
+            angle_regression_beta=(
+                _number(loss_payload, "angle_regression_beta")
+                if "angle_regression_beta" in loss_payload
+                else 0.1
+            ),
+            speed_regression_beta=(
+                _number(loss_payload, "speed_regression_beta")
+                if "speed_regression_beta" in loss_payload
+                else 1.0 / 30.0
+            ),
         ),
         output=OutputConfig(
             root=_resolve_project_path(project_root, _string(output_payload, "root")),
@@ -537,6 +558,8 @@ def _validate(config: TrainConfig) -> None:
         raise ValueError("the selected pretrained ViT requires image_size 224")
     if config.model.architecture not in MODEL_ARCHITECTURES:
         raise ValueError("unsupported model.architecture")
+    if config.model.prediction_mode not in PREDICTION_MODES:
+        raise ValueError("unsupported model.prediction_mode")
     if config.model.control_encoding not in CONTROL_ENCODINGS:
         raise ValueError("unsupported model.control_encoding")
     if config.model.history_update not in HISTORY_UPDATE_MODES:
@@ -546,6 +569,8 @@ def _validate(config: TrainConfig) -> None:
     if not -100 <= config.model.history_initial_speed <= 100:
         raise ValueError("model.history_initial_speed must be in [-100, 100]")
     if config.model.architecture == "task_tokens":
+        if config.model.prediction_mode != "categorical":
+            raise ValueError("continuous regression requires ar_control_tokens")
         if config.model.control_encoding != LEGACY_CONTROL_ENCODING:
             raise ValueError("task_tokens model requires legacy control encoding")
         if config.model.history_frames != 0:
@@ -574,6 +599,11 @@ def _validate(config: TrainConfig) -> None:
             and not 0 <= config.model.history_initial_speed <= 30
         ):
             raise ValueError("compact AR initial history speed must be in [0, 30]")
+        if (
+            config.model.prediction_mode == "continuous_regression"
+            and config.model.control_encoding != COMPACT_CONTROL_ENCODING
+        ):
+            raise ValueError("continuous regression requires compact control encoding")
     if config.data.num_workers < 0:
         raise ValueError("data.num_workers must be >= 0")
     if config.data.sources:
@@ -849,6 +879,26 @@ def _validate(config: TrainConfig) -> None:
         raise ValueError("loss.max_class_weight must be >= min_class_weight")
     if loss.speed_loss_weight < 0 or loss.emd_loss_weight < 0:
         raise ValueError("loss weights must be >= 0")
+    if (
+        not math.isfinite(loss.angle_regression_beta)
+        or loss.angle_regression_beta <= 0
+        or not math.isfinite(loss.speed_regression_beta)
+        or loss.speed_regression_beta <= 0
+    ):
+        raise ValueError("regression SmoothL1 beta values must be finite and positive")
+    if config.model.prediction_mode == "continuous_regression":
+        if (
+            loss.angle_label_smoothing != 0
+            or loss.speed_label_smoothing != 0
+            or loss.angle_class_weighting != "none"
+            or loss.speed_class_weighting != "none"
+            or loss.emd_loss_weight != 0
+        ):
+            raise ValueError(
+                "continuous regression disables label smoothing, class weighting, and EMD"
+            )
+        if training.sequence_rollout_fixed_speed is not None:
+            raise ValueError("continuous regression must train the predicted speed rollout")
 
 
 def _load_yaml_mapping(path: Path) -> dict[str, object]:

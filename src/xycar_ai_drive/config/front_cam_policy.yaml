@@ -21,6 +21,8 @@ front_cam_policy:
     # Keep motion enabled through those pulses, but stop after stable release.
     a_release_grace_sec: 0.12
     allow_motion: true
+    # Applied before motor publish; the capped command is recorded in AR history.
+    speed_cap: 30.0
 
     # Inference runs on every available latest frame. Motor commands and
     # disabled-state [0, 0] commands are published by this 20 Hz timer.

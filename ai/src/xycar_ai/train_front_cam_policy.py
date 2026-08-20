@@ -56,12 +56,15 @@ from xycar_ai.front_cam_policy_data import (
 )
 from xycar_ai.front_cam_policy_metrics import (
     ClassificationMetricAccumulator,
+    RegressionMetricAccumulator,
     combine_policy_losses,
     ordinal_emd_loss,
     selection_score,
 )
 from xycar_ai.front_cam_policy_model import (
     AR_CONTROL_TOKEN_ARCHITECTURE,
+    CATEGORICAL_PREDICTION_MODE,
+    CONTINUOUS_REGRESSION_PREDICTION_MODE,
     AutoregressiveControlTokenViTPolicy,
     TaskTokenViTPolicy,
     build_policy_model,
@@ -193,6 +196,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         history_frames=config.model.history_frames,
         control_token_type_embedding=config.model.control_token_type_embedding,
         control_encoding=config.model.control_encoding,
+        prediction_mode=config.model.prediction_mode,
     ).to(device)
     initialization = initialize_model_weights(
         model=model,
@@ -214,28 +218,32 @@ def main(argv: Iterable[str] | None = None) -> int:
         road_warp=road_warp,
     )
     train_samples = splits.train_samples
-    angle_weights = class_weights(
-        train_samples,
-        field="angle_class_id",
-        mode=config.loss.angle_class_weighting,
-        config=config,
-        device=device,
-    )
-    speed_weights = class_weights(
-        train_samples,
-        field="speed_class_id",
-        mode=config.loss.speed_class_weighting,
-        config=config,
-        device=device,
-    )
-    angle_criterion = nn.CrossEntropyLoss(
-        weight=angle_weights,
-        label_smoothing=config.loss.angle_label_smoothing,
-    )
-    speed_criterion = nn.CrossEntropyLoss(
-        weight=speed_weights,
-        label_smoothing=config.loss.speed_label_smoothing,
-    )
+    if config.model.prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE:
+        angle_criterion = nn.SmoothL1Loss(beta=config.loss.angle_regression_beta)
+        speed_criterion = nn.SmoothL1Loss(beta=config.loss.speed_regression_beta)
+    else:
+        angle_weights = class_weights(
+            train_samples,
+            field="angle_class_id",
+            mode=config.loss.angle_class_weighting,
+            config=config,
+            device=device,
+        )
+        speed_weights = class_weights(
+            train_samples,
+            field="speed_class_id",
+            mode=config.loss.speed_class_weighting,
+            config=config,
+            device=device,
+        )
+        angle_criterion = nn.CrossEntropyLoss(
+            weight=angle_weights,
+            label_smoothing=config.loss.angle_label_smoothing,
+        )
+        speed_criterion = nn.CrossEntropyLoss(
+            weight=speed_weights,
+            label_smoothing=config.loss.speed_label_smoothing,
+        )
     optimizer = build_optimizer(model, config)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
@@ -326,8 +334,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 scaler=scaler,
                 amp_enabled=amp_enabled,
                 grad_clip=config.training.grad_clip,
-                speed_loss_weight=config.loss.speed_loss_weight,
-                emd_loss_weight=config.loss.emd_loss_weight,
+                config=config,
             )
         val_metrics = evaluate_policy(
             model=model,
@@ -483,6 +490,8 @@ def main(argv: Iterable[str] | None = None) -> int:
 
 
 def build_label_contract(config: TrainConfig) -> dict[str, object]:
+    if config.model.prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE:
+        return _build_regression_label_contract(config)
     if config.model.control_encoding == COMPACT_CONTROL_ENCODING:
         canonical_initialization = (
             config.training.history_training_source == "canonical_initial_command"
@@ -789,17 +798,123 @@ def build_label_contract(config: TrainConfig) -> dict[str, object]:
     return contract
 
 
+def _build_regression_label_contract(config: TrainConfig) -> dict[str, object]:
+    if config.model.control_encoding != COMPACT_CONTROL_ENCODING:
+        raise ValueError("continuous regression requires compact control encoding")
+    initial_pair = executed_command_to_history_tokens(
+        config.model.history_initial_angle,
+        config.model.history_initial_speed,
+    )
+    sequence_rollout = config.training.sequence_length > 0
+    history_contract: dict[str, object] = {
+        "frames": config.model.history_frames,
+        "shape": [config.model.history_frames, 2],
+        "input_name": "history_token_ids",
+        "pair_order": ["angle_token_id", "speed_token_id"],
+        "time_order": "oldest_to_newest",
+        "initialization": "canonical_initial_command",
+        "initial_command": [
+            config.model.history_initial_angle,
+            config.model.history_initial_speed,
+        ],
+        "initial_token_ids": list(initial_pair),
+        "actual_angle_token_range": [0, 100],
+        "actual_speed_token_range": [50, 80],
+        "update": "externally_executed_commands",
+        "known_train_label_leakage": False,
+    }
+    if sequence_rollout:
+        history_contract.update(
+            {
+                "train_source": "self_predicted_regression_sequence_rollout",
+                "train_prediction_execution": {
+                    "angle_driver_clamp": [-50.0, 50.0],
+                    "speed_clamp": [0.0, 30.0],
+                    "angle_history_token_mapping": "round(angle_driver) + 50",
+                    "speed_history_token_mapping": "round(speed) + 50",
+                    "gradient": "clamp_round_detach_before_history_update",
+                },
+                "sequence_length": config.training.sequence_length,
+                "sequence_boundaries": (
+                    "session_start_reset_non_overlapping_compute_chunks_"
+                    "carry_predicted_history"
+                ),
+                "sequence_reverse_probability": 0.0,
+                "evaluation_source": "predicted_regression_full_session_rollout",
+                "session_history_initialization": "canonical_initial_command",
+                "compute_chunk_resets_history": False,
+                "augmentation_scope": "whole_session_per_epoch",
+                "edge_padding": "masked_repeat_last_frame",
+                "teacher_forcing": False,
+                "scheduled_sampling": False,
+            }
+        )
+    else:
+        history_contract.update(
+            {
+                "train_source": "canonical_initial_command",
+                "evaluation_source": "canonical_initial_command",
+                "frame_pretraining": True,
+                "labels_used_as_history": False,
+                "edge_padding": "not_applicable",
+            }
+        )
+    return {
+        "schema_version": 4,
+        "control_encoding": COMPACT_CONTROL_ENCODING,
+        "prediction_mode": CONTINUOUS_REGRESSION_PREDICTION_MODE,
+        "output_keys": ["angle_driver", "speed"],
+        "output_shapes": {"angle_driver": [1, 1], "speed": [1, 1]},
+        "angle": {
+            "dtype": "float32",
+            "unit": "driver_angle",
+            "range": [-50.0, 50.0],
+            "activation": "tanh_times_50",
+            "runtime_normalized_mapping": "angle_driver * 2",
+        },
+        "speed": {
+            "dtype": "float32",
+            "unit": "motor_speed",
+            "range": [0.0, 30.0],
+            "activation": "sigmoid_times_30",
+        },
+        "train_angle_target": {
+            "method": "centered_mean",
+            "window_size": config.data.train_angle_mean_window,
+            "padding": "repeat_session_edge",
+            "applied_splits": ["train"],
+            "average_before_driver_scale": True,
+            "driver_scale": 0.5,
+            "validation_test_target": "raw_continuous",
+            "speed_target": "raw_continuous_unchanged",
+        },
+        "history": history_contract,
+    }
+
+
 def build_training_objective_contract(config: TrainConfig) -> dict[str, object]:
     speed_output_trained = config.loss.speed_loss_weight > 0
     angle_only = (
         not speed_output_trained and config.training.validation_speed_mae_weight == 0
     )
-    return {
+    objective: dict[str, object] = {
         "mode": "angle_only" if angle_only else "joint_angle_speed",
         "speed_output_trained": speed_output_trained,
         "speed_loss_weight": config.loss.speed_loss_weight,
         "validation_speed_mae_weight": (config.training.validation_speed_mae_weight),
     }
+    if config.model.prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE:
+        objective.update(
+            {
+                "mode": "joint_angle_speed_regression",
+                "loss": "smooth_l1_normalized",
+                "angle_normalization": 50.0,
+                "speed_normalization": 30.0,
+                "angle_beta": config.loss.angle_regression_beta,
+                "speed_beta": config.loss.speed_regression_beta,
+            }
+        )
+    return objective
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -982,8 +1097,7 @@ def evaluate_policy(
         scaler=scaler,
         amp_enabled=amp_enabled,
         grad_clip=config.training.grad_clip,
-        speed_loss_weight=config.loss.speed_loss_weight,
-        emd_loss_weight=config.loss.emd_loss_weight,
+        config=config,
     )
 
 
@@ -1001,10 +1115,7 @@ def run_rollout_evaluation(
     amp_enabled: bool,
 ) -> dict[str, float]:
     model.eval()
-    accumulator = ClassificationMetricAccumulator(
-        split_name,
-        control_encoding=config.model.control_encoding,
-    )
+    accumulator = _metric_accumulator(split_name, config)
     progress = tqdm(
         total=sum(len(session.samples) for session in sessions),
         desc=split_name,
@@ -1054,25 +1165,16 @@ def run_rollout_evaluation(
                         non_blocking=True,
                     )
                 )
-                angle_class = torch.tensor(
-                    [item["angle_class_id"]], dtype=torch.long, device=device
-                )
-                speed_class = torch.tensor(
-                    [item["speed_class_id"]], dtype=torch.long, device=device
-                )
                 with torch.autocast(device_type=device.type, enabled=amp_enabled):
                     outputs = model(images, history)
-                    angle_loss = angle_criterion(outputs["angle_logits"], angle_class)
-                    speed_loss = speed_criterion(outputs["speed_logits"], speed_class)
-                    angle_emd = ordinal_emd_loss(outputs["angle_logits"], angle_class)
-                    speed_emd = ordinal_emd_loss(outputs["speed_logits"], speed_class)
-                    total_loss, emd_loss = combine_policy_losses(
-                        angle_loss=angle_loss,
-                        speed_loss=speed_loss,
-                        angle_emd_loss=angle_emd,
-                        speed_emd_loss=speed_emd,
-                        speed_loss_weight=config.loss.speed_loss_weight,
-                        emd_loss_weight=config.loss.emd_loss_weight,
+                    total_loss, angle_loss, speed_loss, emd_loss = (
+                        compute_policy_losses(
+                            outputs=outputs,
+                            batch=item,
+                            config=config,
+                            angle_criterion=angle_criterion,
+                            speed_criterion=speed_criterion,
+                        )
                     )
                 accumulator.update(
                     outputs={key: value.detach() for key, value in outputs.items()},
@@ -1108,6 +1210,22 @@ def predicted_executed_class_pair(
     fixed_speed: int | None = None,
 ) -> torch.Tensor:
     """Decode the class pair that the no-reverse runtime can publish."""
+    if "angle_driver" in outputs or "speed" in outputs:
+        if set(outputs) != {"angle_driver", "speed"}:
+            raise ValueError("regression outputs must contain angle_driver and speed")
+        if fixed_speed is not None:
+            raise ValueError("regression rollout cannot use fixed speed")
+        angle_driver = outputs["angle_driver"].reshape(-1)
+        speed = outputs["speed"].reshape(-1)
+        if angle_driver.shape != speed.shape:
+            raise ValueError("regression output batch sizes must match")
+        return torch.stack(
+            (
+                angle_driver.clamp(-50.0, 50.0).round().long() + 50,
+                speed.clamp(0.0, 30.0).round().long() + 50,
+            ),
+            dim=1,
+        ).detach()
     if control_encoding == COMPACT_CONTROL_ENCODING:
         angle_class = outputs["angle_logits"].argmax(dim=1).clamp(0, 100)
         speed_class = (
@@ -1192,10 +1310,7 @@ def run_sequence_rollout_epoch(
 ) -> dict[str, float]:
     """Train on detached predictions carried across ordered session chunks."""
     model.train()
-    accumulator = ClassificationMetricAccumulator(
-        split_name,
-        control_encoding=config.model.control_encoding,
-    )
+    accumulator = _metric_accumulator(split_name, config)
     reversed_clips = 0
     clip_count = 0
     history_reset_count = 0
@@ -1279,12 +1394,6 @@ def run_sequence_rollout_epoch(
                 active_histories[session_id] = final_history.detach().clone()
         flat_images = images[valid_mask]
         flat_history = history_prompts[valid_mask]
-        angle_class = batch["angle_class_id"].to(device=device, non_blocking=True)[
-            valid_mask
-        ]
-        speed_class = batch["speed_class_id"].to(device=device, non_blocking=True)[
-            valid_mask
-        ]
         metric_batch = {
             key: value.to(device=device, non_blocking=True)[valid_mask]
             for key, value in batch.items()
@@ -1294,6 +1403,8 @@ def run_sequence_rollout_epoch(
                 "speed",
                 "angle_class_id",
                 "speed_class_id",
+                "angle_raw",
+                "speed_raw",
                 "horizontal_flipped",
                 "generation",
             }
@@ -1302,17 +1413,12 @@ def run_sequence_rollout_epoch(
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device.type, enabled=amp_enabled):
             outputs = model(flat_images, flat_history)
-            angle_loss = angle_criterion(outputs["angle_logits"], angle_class)
-            speed_loss = speed_criterion(outputs["speed_logits"], speed_class)
-            angle_emd = ordinal_emd_loss(outputs["angle_logits"], angle_class)
-            speed_emd = ordinal_emd_loss(outputs["speed_logits"], speed_class)
-            total_loss, emd_loss = combine_policy_losses(
-                angle_loss=angle_loss,
-                speed_loss=speed_loss,
-                angle_emd_loss=angle_emd,
-                speed_emd_loss=speed_emd,
-                speed_loss_weight=config.loss.speed_loss_weight,
-                emd_loss_weight=config.loss.emd_loss_weight,
+            total_loss, angle_loss, speed_loss, emd_loss = compute_policy_losses(
+                outputs=outputs,
+                batch=metric_batch,
+                config=config,
+                angle_criterion=angle_criterion,
+                speed_criterion=speed_criterion,
             )
         scaler.scale(total_loss).backward()
         if config.training.grad_clip > 0:
@@ -1353,6 +1459,75 @@ def run_sequence_rollout_epoch(
     return metrics
 
 
+def _metric_accumulator(
+    split_name: str,
+    config: TrainConfig,
+) -> ClassificationMetricAccumulator | RegressionMetricAccumulator:
+    if config.model.prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE:
+        return RegressionMetricAccumulator(split_name)
+    return ClassificationMetricAccumulator(
+        split_name,
+        control_encoding=config.model.control_encoding,
+    )
+
+
+def compute_policy_losses(
+    *,
+    outputs: Mapping[str, torch.Tensor],
+    batch: Mapping[str, object],
+    config: TrainConfig,
+    angle_criterion: nn.Module,
+    speed_criterion: nn.Module,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if config.model.prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE:
+        angle_prediction = outputs["angle_driver"].reshape(-1)
+        speed_prediction = outputs["speed"].reshape(-1)
+        device = angle_prediction.device
+        angle_target = _batch_tensor(batch["angle_raw"], device).float().reshape(-1)
+        speed_target = _batch_tensor(batch["speed_raw"], device).float().reshape(-1)
+        if angle_prediction.shape != angle_target.shape:
+            raise ValueError("regression angle output shape must match the target")
+        if speed_prediction.shape != speed_target.shape:
+            raise ValueError("regression speed output shape must match the target")
+        angle_loss = angle_criterion(
+            angle_prediction / 50.0,
+            angle_target / 100.0,
+        )
+        speed_loss = speed_criterion(
+            speed_prediction / 30.0,
+            speed_target / 30.0,
+        )
+        emd_loss = angle_loss.new_zeros(())
+        total_loss = angle_loss + config.loss.speed_loss_weight * speed_loss
+        return total_loss, angle_loss, speed_loss, emd_loss
+
+    angle_logits = outputs["angle_logits"]
+    speed_logits = outputs["speed_logits"]
+    angle_class = _batch_tensor(batch["angle_class_id"], angle_logits.device).long()
+    speed_class = _batch_tensor(batch["speed_class_id"], speed_logits.device).long()
+    angle_class = angle_class.reshape(-1)
+    speed_class = speed_class.reshape(-1)
+    angle_loss = angle_criterion(angle_logits, angle_class)
+    speed_loss = speed_criterion(speed_logits, speed_class)
+    angle_emd = ordinal_emd_loss(angle_logits, angle_class)
+    speed_emd = ordinal_emd_loss(speed_logits, speed_class)
+    total_loss, emd_loss = combine_policy_losses(
+        angle_loss=angle_loss,
+        speed_loss=speed_loss,
+        angle_emd_loss=angle_emd,
+        speed_emd_loss=speed_emd,
+        speed_loss_weight=config.loss.speed_loss_weight,
+        emd_loss_weight=config.loss.emd_loss_weight,
+    )
+    return total_loss, angle_loss, speed_loss, emd_loss
+
+
+def _batch_tensor(value: object, device: torch.device) -> torch.Tensor:
+    if isinstance(value, torch.Tensor):
+        return value.to(device=device, non_blocking=True)
+    return torch.as_tensor(value, device=device)
+
+
 def run_epoch(
     *,
     model: TaskTokenViTPolicy | AutoregressiveControlTokenViTPolicy,
@@ -1365,21 +1540,15 @@ def run_epoch(
     scaler: torch.amp.GradScaler,
     amp_enabled: bool,
     grad_clip: float,
-    speed_loss_weight: float,
-    emd_loss_weight: float,
+    config: TrainConfig,
 ) -> dict[str, float]:
     training = optimizer is not None
     model.train(training)
     control_encoding = getattr(model, "control_encoding", LEGACY_CONTROL_ENCODING)
-    accumulator = ClassificationMetricAccumulator(
-        split_name,
-        control_encoding=control_encoding,
-    )
+    accumulator = _metric_accumulator(split_name, config)
     progress = tqdm(loader, desc=split_name, leave=False)
     for batch in progress:
         images = batch["image_tensor"].to(device=device, non_blocking=True)
-        angle_class = batch["angle_class_id"].to(device=device, non_blocking=True)
-        speed_class = batch["speed_class_id"].to(device=device, non_blocking=True)
         if training:
             optimizer.zero_grad(set_to_none=True)
 
@@ -1398,17 +1567,14 @@ def run_epoch(
                     outputs = model(images, history_class_ids)
                 else:
                     outputs = model(images)
-                angle_loss = angle_criterion(outputs["angle_logits"], angle_class)
-                speed_loss = speed_criterion(outputs["speed_logits"], speed_class)
-                angle_emd = ordinal_emd_loss(outputs["angle_logits"], angle_class)
-                speed_emd = ordinal_emd_loss(outputs["speed_logits"], speed_class)
-                total_loss, emd_loss = combine_policy_losses(
-                    angle_loss=angle_loss,
-                    speed_loss=speed_loss,
-                    angle_emd_loss=angle_emd,
-                    speed_emd_loss=speed_emd,
-                    speed_loss_weight=speed_loss_weight,
-                    emd_loss_weight=emd_loss_weight,
+                total_loss, angle_loss, speed_loss, emd_loss = (
+                    compute_policy_losses(
+                        outputs=outputs,
+                        batch=batch,
+                        config=config,
+                        angle_criterion=angle_criterion,
+                        speed_criterion=speed_criterion,
+                    )
                 )
             if training:
                 scaler.scale(total_loss).backward()
@@ -1644,6 +1810,7 @@ def initialize_model_weights(
         "history_frames": config.model.history_frames,
         "control_token_type_embedding": config.model.control_token_type_embedding,
         "control_encoding": config.model.control_encoding,
+        "prediction_mode": config.model.prediction_mode,
     }
     actual = {
         "architecture": (
@@ -1666,8 +1833,26 @@ def initialize_model_weights(
             if isinstance(checkpoint_model, dict)
             else None
         ),
+        "prediction_mode": (
+            checkpoint_model.get("prediction_mode", CATEGORICAL_PREDICTION_MODE)
+            if isinstance(checkpoint_model, dict)
+            else None
+        ),
     }
-    if actual != expected:
+    shared_categorical_to_regression = (
+        actual["prediction_mode"] == CATEGORICAL_PREDICTION_MODE
+        and expected["prediction_mode"] == CONTINUOUS_REGRESSION_PREDICTION_MODE
+        and all(
+            actual[key] == expected[key]
+            for key in (
+                "architecture",
+                "history_frames",
+                "control_token_type_embedding",
+                "control_encoding",
+            )
+        )
+    )
+    if actual != expected and not shared_categorical_to_regression:
         raise ValueError(
             "initialization checkpoint model architecture differs from config"
         )
@@ -1700,12 +1885,33 @@ def initialize_model_weights(
     model_state = payload.get("model_state")
     if not isinstance(model_state, Mapping):
         raise ValueError("initialization checkpoint has no model_state")
-    model.load_state_dict(model_state, strict=True)
+    if shared_categorical_to_regression:
+        incompatible = model.load_state_dict(model_state, strict=False)
+        expected_missing = {
+            key
+            for key in model.state_dict()
+            if key.startswith("angle_regression_head.")
+            or key.startswith("speed_regression_head.")
+        }
+        expected_unexpected = {"angle_output_bias", "speed_output_bias"}
+        if (
+            set(incompatible.missing_keys) != expected_missing
+            or set(incompatible.unexpected_keys) != expected_unexpected
+        ):
+            raise ValueError(
+                "categorical checkpoint differs outside the regression output heads"
+            )
+        initialization_mode = "shared_model_weights_only"
+    else:
+        model.load_state_dict(model_state, strict=True)
+        initialization_mode = "model_weights_only"
     return {
-        "mode": "model_weights_only",
+        "mode": initialization_mode,
         "checkpoint": str(checkpoint_path),
         "checkpoint_sha256": sha256_file(checkpoint_path),
         "source_epoch": int(payload.get("epoch", 0)),
+        "source_prediction_mode": actual["prediction_mode"],
+        "target_prediction_mode": expected["prediction_mode"],
     }
 
 
@@ -1756,10 +1962,15 @@ def validate_resume_payload(
     if not isinstance(label_contract, dict):
         raise ValueError("resume checkpoint label contract is incompatible")
     if config.model.control_encoding == COMPACT_CONTROL_ENCODING:
-        expected_shapes = {
-            "angle_logits": [1, ANGLE_OUTPUT_CLASSES],
-            "speed_logits": [1, SPEED_OUTPUT_CLASSES],
-        }
+        expected_shapes = (
+            {"angle_driver": [1, 1], "speed": [1, 1]}
+            if config.model.prediction_mode
+            == CONTINUOUS_REGRESSION_PREDICTION_MODE
+            else {
+                "angle_logits": [1, ANGLE_OUTPUT_CLASSES],
+                "speed_logits": [1, SPEED_OUTPUT_CLASSES],
+            }
+        )
         if label_contract.get("output_shapes") != expected_shapes:
             raise ValueError("resume checkpoint compact output shapes are incompatible")
     elif label_contract.get("num_classes") != NUM_COMMAND_CLASSES:
@@ -1794,6 +2005,7 @@ def validate_resume_payload(
         "control_encoding": config.model.control_encoding,
         "history_initial_angle": config.model.history_initial_angle,
         "history_initial_speed": config.model.history_initial_speed,
+        "prediction_mode": config.model.prediction_mode,
     }
     checkpoint_model_contract = {
         "architecture": (
@@ -1823,6 +2035,11 @@ def validate_resume_payload(
         ),
         "history_initial_speed": (
             checkpoint_model.get("history_initial_speed", 25)
+            if isinstance(checkpoint_model, dict)
+            else None
+        ),
+        "prediction_mode": (
+            checkpoint_model.get("prediction_mode", CATEGORICAL_PREDICTION_MODE)
             if isinstance(checkpoint_model, dict)
             else None
         ),

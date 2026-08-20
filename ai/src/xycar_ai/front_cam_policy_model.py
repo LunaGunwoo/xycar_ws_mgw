@@ -25,6 +25,8 @@ from xycar_ai.front_cam_policy_data import NUM_COMMAND_CLASSES
 DEFAULT_MODEL_NAME = "vit_tiny_patch16_224.augreg_in21k_ft_in1k"
 TASK_TOKEN_ARCHITECTURE = "task_tokens"
 AR_CONTROL_TOKEN_ARCHITECTURE = "ar_control_tokens"
+CATEGORICAL_PREDICTION_MODE = "categorical"
+CONTINUOUS_REGRESSION_PREDICTION_MODE = "continuous_regression"
 
 
 class TaskTokenViTPolicy(nn.Module):
@@ -130,6 +132,7 @@ class AutoregressiveControlTokenViTPolicy(nn.Module):
         history_frames: int = 4,
         use_control_type_embedding: bool = False,
         control_encoding: str = LEGACY_CONTROL_ENCODING,
+        prediction_mode: str = CATEGORICAL_PREDICTION_MODE,
     ) -> None:
         super().__init__()
         if history_frames != 4:
@@ -141,11 +144,22 @@ class AutoregressiveControlTokenViTPolicy(nn.Module):
         self.history_frames = int(history_frames)
         self.use_control_type_embedding = bool(use_control_type_embedding)
         self.control_encoding = control_encoding
+        self.prediction_mode = prediction_mode
         if control_encoding not in {
             LEGACY_CONTROL_ENCODING,
             COMPACT_CONTROL_ENCODING,
         }:
             raise ValueError(f"unsupported control encoding: {control_encoding}")
+        if prediction_mode not in {
+            CATEGORICAL_PREDICTION_MODE,
+            CONTINUOUS_REGRESSION_PREDICTION_MODE,
+        }:
+            raise ValueError(f"unsupported prediction mode: {prediction_mode}")
+        if (
+            prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE
+            and control_encoding != COMPACT_CONTROL_ENCODING
+        ):
+            raise ValueError("continuous regression requires compact control encoding")
 
         backbone = timm.create_model(
             model_name,
@@ -197,7 +211,10 @@ class AutoregressiveControlTokenViTPolicy(nn.Module):
             ),
             persistent=False,
         )
-        if control_encoding == COMPACT_CONTROL_ENCODING:
+        if prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE:
+            self.angle_regression_head = _regression_head(embed_dim)
+            self.speed_regression_head = _regression_head(embed_dim)
+        elif control_encoding == COMPACT_CONTROL_ENCODING:
             self.angle_output_bias = nn.Parameter(
                 torch.zeros(ANGLE_OUTPUT_CLASSES)
             )
@@ -218,6 +235,17 @@ class AutoregressiveControlTokenViTPolicy(nn.Module):
     ) -> dict[str, torch.Tensor]:
         features = self.forward_features(images, history_class_ids)
         query_features = features[:, -2:]
+        if self.prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE:
+            angle_driver = torch.tanh(
+                self.angle_regression_head(query_features[:, 0])
+            ) * 50.0
+            speed = torch.sigmoid(
+                self.speed_regression_head(query_features[:, 1])
+            ) * 30.0
+            return {
+                "angle_driver": angle_driver,
+                "speed": speed,
+            }
         if self.control_encoding == COMPACT_CONTROL_ENCODING:
             angle_logits = F.linear(
                 query_features[:, 0],
@@ -321,6 +349,7 @@ def build_policy_model(
     history_frames: int = 0,
     control_token_type_embedding: bool = False,
     control_encoding: str = LEGACY_CONTROL_ENCODING,
+    prediction_mode: str = CATEGORICAL_PREDICTION_MODE,
 ) -> TaskTokenViTPolicy | AutoregressiveControlTokenViTPolicy:
     if architecture == TASK_TOKEN_ARCHITECTURE:
         return TaskTokenViTPolicy(
@@ -336,8 +365,19 @@ def build_policy_model(
             history_frames=history_frames,
             use_control_type_embedding=control_token_type_embedding,
             control_encoding=control_encoding,
+            prediction_mode=prediction_mode,
         )
     raise ValueError(f"unsupported policy architecture: {architecture}")
+
+
+def _regression_head(embed_dim: int) -> nn.Sequential:
+    return nn.Sequential(
+        nn.LayerNorm(embed_dim),
+        nn.Linear(embed_dim, 128),
+        nn.GELU(),
+        nn.Dropout(0.3),
+        nn.Linear(128, 1),
+    )
 
 
 def _serializable_data_config(

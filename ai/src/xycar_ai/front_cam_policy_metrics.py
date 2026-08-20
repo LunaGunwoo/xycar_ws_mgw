@@ -269,6 +269,178 @@ class ClassificationMetricAccumulator:
         return metrics
 
 
+@dataclass
+class RegressionMetricAccumulator:
+    """Accumulate scalar regression metrics in runtime command units."""
+
+    split_name: str
+    sample_count: int = 0
+    total_loss_sum: float = 0.0
+    angle_loss_sum: float = 0.0
+    speed_loss_sum: float = 0.0
+    angle_driver_abs_error_sum: float = 0.0
+    speed_abs_error_sum: float = 0.0
+    angle_within_5_count: int = 0
+    angle_within_10_count: int = 0
+    speed_within_5_count: int = 0
+    speed_within_10_count: int = 0
+    angle_sign_match_count: int = 0
+    angle_prediction_sum: float = 0.0
+    angle_prediction_square_sum: float = 0.0
+    angle_target_sum: float = 0.0
+    angle_target_square_sum: float = 0.0
+    speed_prediction_sum: float = 0.0
+    speed_prediction_square_sum: float = 0.0
+    speed_target_sum: float = 0.0
+    speed_target_square_sum: float = 0.0
+    horizontal_flip_count: int = 0
+    bucket_counts: dict[str, int] = field(default_factory=dict)
+    bucket_abs_error_sums: dict[str, float] = field(default_factory=dict)
+    bucket_within_10_counts: dict[str, int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for bucket in ANGLE_BUCKETS:
+            self.bucket_counts.setdefault(bucket, 0)
+            self.bucket_abs_error_sums.setdefault(bucket, 0.0)
+            self.bucket_within_10_counts.setdefault(bucket, 0)
+
+    @torch.no_grad()
+    def update(
+        self,
+        *,
+        outputs: dict[str, torch.Tensor],
+        batch: dict[str, object],
+        total_loss: torch.Tensor,
+        angle_loss: torch.Tensor,
+        speed_loss: torch.Tensor,
+        emd_loss: torch.Tensor,
+    ) -> None:
+        angle_prediction = outputs["angle_driver"].reshape(-1)
+        speed_prediction = outputs["speed"].reshape(-1)
+        device = angle_prediction.device
+        angle_target = _tensor(batch["angle_raw"], device).float().reshape(-1) * 0.5
+        speed_target = _tensor(batch["speed_raw"], device).float().reshape(-1)
+        if angle_prediction.shape != angle_target.shape:
+            raise ValueError("regression angle output shape must match the target")
+        if speed_prediction.shape != speed_target.shape:
+            raise ValueError("regression speed output shape must match the target")
+        if not bool(torch.isfinite(angle_prediction).all()) or not bool(
+            torch.isfinite(speed_prediction).all()
+        ):
+            raise ValueError("regression output contains a non-finite value")
+
+        driver_error = (angle_prediction - angle_target).abs()
+        normalized_error = driver_error / NORMALIZED_TO_DRIVER_SCALE
+        speed_error = (speed_prediction - speed_target).abs()
+        normalized_target = angle_target / NORMALIZED_TO_DRIVER_SCALE
+        horizontal_flipped = _tensor(
+            batch.get("horizontal_flipped", False), device
+        ).bool()
+        batch_size = int(angle_target.numel())
+
+        self.sample_count += batch_size
+        self.total_loss_sum += float(total_loss.detach().cpu()) * batch_size
+        self.angle_loss_sum += float(angle_loss.detach().cpu()) * batch_size
+        self.speed_loss_sum += float(speed_loss.detach().cpu()) * batch_size
+        self.angle_driver_abs_error_sum += float(driver_error.sum().cpu())
+        self.speed_abs_error_sum += float(speed_error.sum().cpu())
+        self.angle_within_5_count += int((normalized_error <= 5).sum())
+        self.angle_within_10_count += int((normalized_error <= 10).sum())
+        self.speed_within_5_count += int((speed_error <= 5).sum())
+        self.speed_within_10_count += int((speed_error <= 10).sum())
+        self.angle_sign_match_count += int(
+            (torch.sign(angle_prediction) == torch.sign(angle_target)).sum()
+        )
+        self.horizontal_flip_count += int(horizontal_flipped.sum())
+        for prediction, target, prefix in (
+            (angle_prediction, angle_target, "angle"),
+            (speed_prediction, speed_target, "speed"),
+        ):
+            setattr(
+                self,
+                f"{prefix}_prediction_sum",
+                getattr(self, f"{prefix}_prediction_sum")
+                + float(prediction.sum().cpu()),
+            )
+            setattr(
+                self,
+                f"{prefix}_prediction_square_sum",
+                getattr(self, f"{prefix}_prediction_square_sum")
+                + float(prediction.square().sum().cpu()),
+            )
+            setattr(
+                self,
+                f"{prefix}_target_sum",
+                getattr(self, f"{prefix}_target_sum") + float(target.sum().cpu()),
+            )
+            setattr(
+                self,
+                f"{prefix}_target_square_sum",
+                getattr(self, f"{prefix}_target_square_sum")
+                + float(target.square().sum().cpu()),
+            )
+        for bucket, (low, high) in ANGLE_BUCKETS.items():
+            mask = (normalized_target >= low) & (normalized_target <= high)
+            bucket_count = int(mask.sum())
+            self.bucket_counts[bucket] += bucket_count
+            if bucket_count:
+                self.bucket_abs_error_sums[bucket] += float(
+                    normalized_error[mask].sum().cpu()
+                )
+                self.bucket_within_10_counts[bucket] += int(
+                    (normalized_error[mask] <= 10).sum()
+                )
+
+    def compute(self) -> dict[str, float]:
+        count = max(self.sample_count, 1)
+        prefix = self.split_name
+        driver_mae = self.angle_driver_abs_error_sum / count
+        metrics = {
+            f"{prefix}_sample_count": float(self.sample_count),
+            f"{prefix}_horizontal_flip_rate": self.horizontal_flip_count / count,
+            f"{prefix}_loss": self.total_loss_sum / count,
+            f"{prefix}_angle_loss": self.angle_loss_sum / count,
+            f"{prefix}_speed_loss": self.speed_loss_sum / count,
+            f"{prefix}_emd_loss": 0.0,
+            f"{prefix}_angle_exact_acc": 0.0,
+            f"{prefix}_speed_exact_acc": 0.0,
+            f"{prefix}_angle_within_5_acc": self.angle_within_5_count / count,
+            f"{prefix}_speed_within_5_acc": self.speed_within_5_count / count,
+            f"{prefix}_angle_within_10_acc": self.angle_within_10_count / count,
+            f"{prefix}_speed_within_10_acc": self.speed_within_10_count / count,
+            f"{prefix}_angle_mae": driver_mae / NORMALIZED_TO_DRIVER_SCALE,
+            f"{prefix}_angle_driver_mae": driver_mae,
+            f"{prefix}_speed_mae": self.speed_abs_error_sum / count,
+            f"{prefix}_angle_sign_acc": self.angle_sign_match_count / count,
+            f"{prefix}_angle_prediction_std": self._std("angle", "prediction"),
+            f"{prefix}_angle_target_std": self._std("angle", "target"),
+            f"{prefix}_speed_prediction_std": self._std("speed", "prediction"),
+            f"{prefix}_speed_target_std": self._std("speed", "target"),
+        }
+        for bucket in ANGLE_BUCKETS:
+            bucket_count = self.bucket_counts[bucket]
+            bucket_prefix = f"{prefix}_angle_bucket_{bucket}"
+            metrics[f"{bucket_prefix}_count"] = float(bucket_count)
+            metrics[f"{bucket_prefix}_mae"] = (
+                self.bucket_abs_error_sums[bucket] / bucket_count
+                if bucket_count
+                else 0.0
+            )
+            metrics[f"{bucket_prefix}_within_10_acc"] = (
+                self.bucket_within_10_counts[bucket] / bucket_count
+                if bucket_count
+                else 0.0
+            )
+        return metrics
+
+    def _std(self, output: str, role: str) -> float:
+        count = max(self.sample_count, 1)
+        value_sum = getattr(self, f"{output}_{role}_sum")
+        square_sum = getattr(self, f"{output}_{role}_square_sum")
+        variance = max(square_sum / count - (value_sum / count) ** 2, 0.0)
+        return variance**0.5
+
+
 def selection_score(
     metrics: dict[str, float],
     *,

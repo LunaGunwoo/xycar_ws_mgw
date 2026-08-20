@@ -46,13 +46,19 @@ class _TinyARPolicy(nn.Module):
         history_frames: int,
         use_control_type_embedding: bool,
         control_encoding: str = "legacy_command_201",
+        prediction_mode: str = "categorical",
     ) -> None:
         super().__init__()
         del model_name, pretrained, image_size, use_control_type_embedding
         self.history_frames = history_frames
         compact = control_encoding == "driver_compact_v2"
-        self.angle_bias = nn.Parameter(torch.zeros(101 if compact else 201))
-        self.speed_bias = nn.Parameter(torch.ones(31 if compact else 201))
+        self.prediction_mode = prediction_mode
+        if prediction_mode == "continuous_regression":
+            self.angle_bias = nn.Parameter(torch.zeros(1))
+            self.speed_bias = nn.Parameter(torch.ones(1))
+        else:
+            self.angle_bias = nn.Parameter(torch.zeros(101 if compact else 201))
+            self.speed_bias = nn.Parameter(torch.ones(31 if compact else 201))
 
     def forward(
         self,
@@ -61,6 +67,11 @@ class _TinyARPolicy(nn.Module):
     ) -> dict[str, torch.Tensor]:
         batch_size = images.shape[0]
         history_signal = history_class_ids[:, -1, :].to(images.dtype)
+        if self.prediction_mode == "continuous_regression":
+            return {
+                "angle_driver": self.angle_bias.expand(batch_size, -1),
+                "speed": self.speed_bias.expand(batch_size, -1) * 15.0,
+            }
         return {
             "angle_logits": self.angle_bias.expand(batch_size, -1)
             + history_signal[:, :1],
@@ -522,3 +533,102 @@ def test_export_compact_ar_checkpoint_writes_schema_v5(
     assert tuple(angle.shape) == (1, 101)
     assert tuple(speed.shape) == (1, 31)
     assert int(speed.argmax(dim=1).item()) == (15 if angle_only else 0)
+
+
+def test_export_regression_checkpoint_writes_schema_v6(
+    monkeypatch,
+    tmp_path: Path,
+):
+    monkeypatch.setattr(
+        export_module,
+        "AutoregressiveControlTokenViTPolicy",
+        _TinyARPolicy,
+    )
+    checkpoint_path = tmp_path / "regression.pt"
+    model = _TinyARPolicy(
+        model_name="tiny",
+        pretrained=False,
+        image_size=16,
+        history_frames=4,
+        use_control_type_embedding=False,
+        control_encoding="driver_compact_v2",
+        prediction_mode="continuous_regression",
+    )
+    label_contract = {
+        "schema_version": 4,
+        "control_encoding": "driver_compact_v2",
+        "prediction_mode": "continuous_regression",
+        "output_shapes": {"angle_driver": [1, 1], "speed": [1, 1]},
+        "angle": {
+            "unit": "driver_angle",
+            "range": [-50.0, 50.0],
+            "runtime_normalized_mapping": "angle_driver * 2",
+        },
+        "speed": {"unit": "motor_speed", "range": [0.0, 30.0]},
+        "history": {
+            "initialization": "canonical_initial_command",
+            "initial_command": [0, 25],
+            "initial_token_ids": [50, 75],
+        },
+    }
+    torch.save(
+        {
+            "epoch": 2,
+            "config": {
+                "model": {
+                    "name": "tiny",
+                    "image_size": 16,
+                    "architecture": "ar_control_tokens",
+                    "control_encoding": "driver_compact_v2",
+                    "prediction_mode": "continuous_regression",
+                    "history_frames": 4,
+                    "control_token_type_embedding": False,
+                    "history_initial_angle": 0,
+                    "history_initial_speed": 25,
+                },
+                "data": {
+                    "required_steering_contract": "normalized_percent_v2"
+                },
+            },
+            "model_state": model.state_dict(),
+            "preprocessing": {
+                "geometry": "full_frame_bicubic_resize",
+                "image_size": 16,
+                "mean": [0.5, 0.5, 0.5],
+                "std": [0.5, 0.5, 0.5],
+            },
+            "label_contract": label_contract,
+            "training_objective": {
+                "mode": "joint_angle_speed_regression",
+                "speed_output_trained": True,
+                "speed_loss_weight": 0.5,
+                "validation_speed_mae_weight": 0.25,
+                "loss": "smooth_l1_normalized",
+                "angle_normalization": 50.0,
+                "speed_normalization": 30.0,
+                "angle_beta": 0.1,
+                "speed_beta": 1.0 / 30.0,
+            },
+        },
+        checkpoint_path,
+    )
+
+    artifact = export_checkpoint(
+        checkpoint_path=checkpoint_path,
+        artifact_id="regression-policy",
+        output_root=tmp_path / "models",
+        require_schema_version=6,
+    )
+    manifest = yaml.safe_load((artifact / "manifest.yaml").read_text())
+    assert manifest["schema_version"] == 6
+    assert manifest["model"]["prediction_mode"] == "continuous_regression"
+    assert manifest["model"]["output"]["order"] == ["angle_driver", "speed"]
+    assert manifest["model"]["output"]["shapes"] == [[1, 1], [1, 1]]
+    assert manifest["history"]["initial_token_ids"] == [50, 75]
+    model_ts = torch.jit.load(str(artifact / "model.ts"), map_location="cpu")
+    angle, speed = model_ts(
+        torch.zeros(1, 3, 16, 16),
+        torch.tensor([[[50, 75]] * 4], dtype=torch.long),
+    )
+    assert angle.item() == pytest.approx(0.0)
+    assert speed.item() == pytest.approx(15.0)

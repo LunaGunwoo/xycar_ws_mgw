@@ -143,6 +143,11 @@ GPU server는 network와 hardware device 없이 실행되고, host Humble node�
 `0600` Unix socket으로만 통신한다. server 단절·timeout·artifact/device mismatch는
 CPU fallback 없이 motion OFF와 `[0,0]`으로 처리한다.
 
+schema v6 회귀 runtime은 별도 `xycar/ai-drive:jp6.2.1-pytorch25.06-schema6` tag로
+빌드한다. 기존 `xycar/ai-drive:jp6.2.1-pytorch25.06` image와 schema v5 분류
+artifact는 rollback용으로 삭제하지 않는다. 일반 policy launch의 `speed_cap` 기본값은
+`30`이며 nice_adaptive 분류/회귀 A/B 명령에서는 반드시 `25`를 명시한다.
+
 ## Competition bundle wrapper
 
 `xycar-ai-competition`은 Base, signal과 shortcut model을 하나의 CUDA container에

@@ -6,12 +6,14 @@ import torch
 from xycar_ai.compact_control import COMPACT_CONTROL_ENCODING
 from xycar_ai.front_cam_policy_metrics import (
     ClassificationMetricAccumulator,
+    RegressionMetricAccumulator,
     combine_policy_losses,
     ordinal_emd_loss,
     selection_score,
 )
 from xycar_ai.front_cam_policy_model import (
     AutoregressiveControlTokenViTPolicy,
+    CONTINUOUS_REGRESSION_PREDICTION_MODE,
     TaskTokenViTPolicy,
 )
 
@@ -137,6 +139,53 @@ def test_compact_ar_uses_unknown_tokens_and_unequal_shared_outputs():
     assert model.query_token_ids.tolist() == [103, 104]
     with pytest.raises(ValueError, match="invalid token id"):
         model(images[:1], torch.tensor([[[0, 49]] * 4], dtype=torch.long))
+
+
+def test_compact_ar_continuous_regression_outputs_scalar_ranges():
+    model = AutoregressiveControlTokenViTPolicy(
+        model_name="vit_tiny_patch16_224.augreg_in21k_ft_in1k",
+        pretrained=False,
+        image_size=32,
+        history_frames=4,
+        control_encoding=COMPACT_CONTROL_ENCODING,
+        prediction_mode=CONTINUOUS_REGRESSION_PREDICTION_MODE,
+    ).eval()
+    history = torch.tensor([[[50, 75]] * 4] * 2, dtype=torch.long)
+    with torch.no_grad():
+        outputs = model(torch.zeros(2, 3, 32, 32), history)
+
+    assert set(outputs) == {"angle_driver", "speed"}
+    assert tuple(outputs["angle_driver"].shape) == (2, 1)
+    assert tuple(outputs["speed"].shape) == (2, 1)
+    assert bool((outputs["angle_driver"].abs() <= 50.0).all())
+    assert bool(((0.0 <= outputs["speed"]) & (outputs["speed"] <= 30.0)).all())
+    assert isinstance(model.angle_regression_head[0], torch.nn.LayerNorm)
+    assert model.angle_regression_head[1].out_features == 128
+    assert model.angle_regression_head[3].p == pytest.approx(0.3)
+
+
+def test_regression_metrics_use_driver_and_normalized_angle_units():
+    accumulator = RegressionMetricAccumulator("test")
+    accumulator.update(
+        outputs={
+            "angle_driver": torch.tensor([[-40.0], [45.0]]),
+            "speed": torch.tensor([[20.0], [24.0]]),
+        },
+        batch={
+            "angle_raw": torch.tensor([-100.0, 100.0]),
+            "speed_raw": torch.tensor([20.0, 25.0]),
+        },
+        total_loss=torch.tensor(1.0),
+        angle_loss=torch.tensor(0.5),
+        speed_loss=torch.tensor(1.0),
+        emd_loss=torch.tensor(0.0),
+    )
+    metrics = accumulator.compute()
+
+    assert metrics["test_angle_driver_mae"] == pytest.approx(7.5)
+    assert metrics["test_angle_mae"] == pytest.approx(15.0)
+    assert metrics["test_speed_mae"] == pytest.approx(0.5)
+    assert metrics["test_angle_sign_acc"] == 1.0
 
 
 def test_compact_metrics_decode_angle_back_to_normalized_units():

@@ -16,6 +16,7 @@ def generate_launch_description():
     use_camera = LaunchConfiguration('use_camera')
     use_gamepad = LaunchConfiguration('use_gamepad')
     allow_motion = LaunchConfiguration('allow_motion')
+    speed_cap = LaunchConfiguration('speed_cap')
     device_id = LaunchConfiguration('device_id')
     inference_rpc_timeout_sec = LaunchConfiguration(
         'inference_rpc_timeout_sec'
@@ -56,6 +57,11 @@ def generate_launch_description():
                 description='Allow A-button toggles to command motion.',
             ),
             DeclareLaunchArgument(
+                'speed_cap',
+                default_value='30.0',
+                description='Hard ceiling applied before motor publish and history.',
+            ),
+            DeclareLaunchArgument(
                 'device_id',
                 default_value='0',
                 description='SDL game-controller device index.',
@@ -73,6 +79,7 @@ def generate_launch_description():
                     ['use_camera:=', use_camera],
                     ['use_gamepad:=', use_gamepad],
                     ['allow_motion:=', allow_motion],
+                    ['speed_cap:=', speed_cap],
                     ['device_id:=', device_id],
                     [
                         'inference_rpc_timeout_sec:=',

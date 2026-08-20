@@ -10,12 +10,17 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from xycar_ai_drive.artifact import RoadWarpParameters, load_policy_artifact
-from xycar_ai_drive.artifact import COMPACT_CONTROL_ENCODING
+from xycar_ai_drive.artifact import (
+    COMPACT_CONTROL_ENCODING,
+    CONTINUOUS_REGRESSION_PREDICTION_MODE,
+    RoadWarpParameters,
+    load_policy_artifact,
+)
 from xycar_ai_drive.control import (
     DriveCommand,
     decode_class_ids,
     decode_compact_output_ids,
+    decode_regression_outputs,
 )
 from xycar_ai_drive.road_warp import warp_road_image
 
@@ -164,17 +169,31 @@ class TorchScriptPolicy:
                         outputs = self._model(tensor, history)
                 inference_ms = (time.perf_counter() - started) * 1000.0
                 angle_logits, speed_logits = self._validate_outputs(outputs)
-                angle_class_id = int(
-                    self._torch.argmax(angle_logits, dim=1).item()
-                )
-                speed_class_id = int(
-                    self._torch.argmax(speed_logits, dim=1).item()
-                )
+                if (
+                    self.artifact.prediction_mode
+                    == CONTINUOUS_REGRESSION_PREDICTION_MODE
+                ):
+                    command = decode_regression_outputs(
+                        float(angle_logits.item()),
+                        float(speed_logits.item()),
+                    )
+                    angle_class_id = speed_class_id = None
+                else:
+                    angle_class_id = int(
+                        self._torch.argmax(angle_logits, dim=1).item()
+                    )
+                    speed_class_id = int(
+                        self._torch.argmax(speed_logits, dim=1).item()
+                    )
                 if (
                     self._history_class_ids is not None
                     and self.artifact.history is not None
                     and self.artifact.history.update == 'predicted_argmax'
                 ):
+                    if angle_class_id is None or speed_class_id is None:
+                        raise PolicyRuntimeError(
+                            'regression artifacts require external history'
+                        )
                     self._history_class_ids = [
                         *self._history_class_ids[1:],
                         [angle_class_id, speed_class_id],
@@ -188,13 +207,15 @@ class TorchScriptPolicy:
             raise PolicyRuntimeError(
                 f'TorchScript inference failed: {exc}'
             ) from exc
-        decoder = (
-            decode_compact_output_ids
-            if self.artifact.control_encoding == COMPACT_CONTROL_ENCODING
-            else decode_class_ids
-        )
+        if self.artifact.prediction_mode != CONTINUOUS_REGRESSION_PREDICTION_MODE:
+            decoder = (
+                decode_compact_output_ids
+                if self.artifact.control_encoding == COMPACT_CONTROL_ENCODING
+                else decode_class_ids
+            )
+            command = decoder(angle_class_id, speed_class_id)
         return InferenceResult(
-            command=decoder(angle_class_id, speed_class_id),
+            command=command,
             inference_ms=inference_ms,
         )
 
@@ -245,6 +266,17 @@ class TorchScriptPolicy:
                 )
             if not bool(self._torch.isfinite(logits).all()):
                 raise PolicyRuntimeError(f'{name} contains a non-finite value')
+        if (
+            self.artifact.prediction_mode
+            == CONTINUOUS_REGRESSION_PREDICTION_MODE
+        ):
+            try:
+                decode_regression_outputs(
+                    float(angle_logits.item()),
+                    float(speed_logits.item()),
+                )
+            except ValueError as exc:
+                raise PolicyRuntimeError(str(exc)) from exc
         return angle_logits, speed_logits
 
 

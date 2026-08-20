@@ -537,6 +537,59 @@ model·history·steering 계약의 speed 학습 설정에서 raw checkpoint를
 학습한다. 입력 speed label을 고정값으로 바꿀 때는 차량 원본이나 checksum 검증한
 raw mirror를 수정하지 않고 별도 파생 dataset과 변환 manifest를 만든다.
 
+### nice_adaptive angle+speed 연속 회귀 A/B
+
+기존 schema v5 joint 분류 artifact는 기준선으로 보존한다. 회귀 후보는 같은
+`nice_adaptive_data_raw` 63세션·69,107표본과 기존 시간순 49/7/7 split을 사용하고,
+train angle에만 session 경계를 넘지 않는 centered window 5 평균을 적용한다.
+validation/test angle과 모든 speed target은 원본 연속값이다. 모델 입력은 compact
+AR4 실행 history를 유지하고 출력만 driver angle `-50..50`과 speed `0..30`의
+float scalar로 바꾼다.
+
+두 회귀 head는 각각 `LayerNorm → Linear(128) → GELU → Dropout(0.3) → Linear(1)`이며
+angle은 `tanh × 50`, speed는 `sigmoid × 30`으로 범위를 제한한다. 학습 loss와
+checkpoint 선택식은 다음과 같다.
+
+```text
+loss = SmoothL1(angle_driver / 50, target_driver / 50; beta=0.1)
+     + 0.5 * SmoothL1(speed / 30, target_speed / 30; beta=1/30)
+best = 2 * val_driver_angle_MAE + 0.25 * val_speed_MAE
+```
+
+categorical label smoothing, class weighting과 EMD는 회귀 모드에서 금지한다. sequence
+rollout은 연속 angle/speed 예측을 각각 `[-50,50]`, `[0,30]`으로 clamp한 뒤
+round·detach하여 다음 compact history token으로 넣고, session 시작에만
+`(angle=0,speed=25)×4`, 즉 `[50,75]×4`로 초기화한다. 실차 runtime에서는 예측값이
+아니라 speed cap까지 적용해 실제 발행한 명령만 history에 기록한다.
+
+ignored workflow config와 실행 순서는 다음과 같다. Stage 1은 기존 joint 분류
+sequence checkpoint에서 backbone과 control/query embedding만 가져오고 새 회귀
+head와 optimizer를 초기화한다. Stage 2는 Stage 1 model weight만 이어받는다.
+
+```bash
+cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
+BASELINE=artifacts/runs/front_cam_policy/vit_small_ar4_v2_nice_adaptive_joint_sequence_init25_20260821/best.pt
+FRAME_CONFIG=artifacts/workflows/nice_adaptive_regression_20260821/frame.yaml
+SEQUENCE_CONFIG=artifacts/workflows/nice_adaptive_regression_20260821/sequence.yaml
+FRAME_RUN=artifacts/runs/front_cam_policy/vit_small_ar4_v2_nice_adaptive_joint_regression_frame_init25_window5_20260821
+
+uv run --locked xycar-train --config "${FRAME_CONFIG}" --validate-only
+uv run --locked xycar-train --config "${SEQUENCE_CONFIG}" --validate-only
+sha256sum "${BASELINE}"
+uv run --locked xycar-train \
+  --config "${FRAME_CONFIG}" --initialize-from "${BASELINE}"
+uv run --locked xycar-train \
+  --config "${SEQUENCE_CONFIG}" --initialize-from "${FRAME_RUN}/best.pt"
+```
+
+최종 schema v6 artifact ID는
+`front-cam-policy-vit-small-ar4-v2-nice-adaptive-joint-regression-sequence-init25-window5-20260821`이다.
+schema v6는 `history_token_ids [1,4,2]`와 float `[1,1]` 두 개를 사용하며 eager,
+trace, reload, 범위 및 checksum을 모두 확인한다. 기존 schema v1/v2/v3/v5는 그대로
+지원한다. offline 지표가 기준선보다 나빠도 NaN/shape/checksum/runtime 검증을
+통과하면 실제 A/B 후보로 보존하며, 실차 비교에서는 두 artifact 모두
+`speed_cap:=25.0`을 명시한다.
+
 ### 기존 AR control token 재현 (rollback 전용)
 
 이 절은 과거 결과 재현과 rollback 검증에만 사용한다. 새 stateless dataset과
@@ -917,7 +970,9 @@ legacy AR exporter는 같은 input shape에 실제 실행 history를 요구하�
 `[1,31]`과 UNKNOWN 또는 canonical `(0,dataset mean speed)×4` 초기화를 명시하는
 schema v5를 생성한다. angle-only checkpoint는 고정 speed dataset과 history 계약을
 검증한 뒤 angle logits는 보존하고 speed logits의 argmax만 고정 class로 만든다.
-v1/v2/v3 runtime 호환은 유지한다.
+연속 회귀 compact AR checkpoint는 driver angle과 speed scalar가 각각 `[1,1]`인
+schema v6를 생성하고 단위, 범위, runtime `angle_driver × 2` 변환과 canonical
+`[50,75]×4` history를 manifest에 기록한다. v1/v2/v3/v5 runtime 호환은 유지한다.
 
 G1 이상 run은 아래 명령에 같은 run의
 `--promotion-report artifacts/runs/front_cam_policy/<stateless-run>/promotion_gate.json`
