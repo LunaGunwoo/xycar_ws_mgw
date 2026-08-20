@@ -560,7 +560,7 @@ def test_normalized_collection_templates_are_versioned_and_strict(tmp_path):
     ).read_text(encoding='utf-8')
 
     assert config['max_forward_speed'] == 25.0
-    assert config['max_reverse_speed'] == 15.0
+    assert config['max_reverse_speed'] == 10.0
     assert config['lidar_topic'] == '/scan'
     assert config['lidar_timeout_sec'] == pytest.approx(0.30)
     assert config['max_lidar_skew_sec'] == pytest.approx(0.20)

@@ -21,7 +21,7 @@ gamepad_teleop:
     trigger_axis_mode: negative
     invert_steering: true
     max_angle: 100.0
-    max_reverse_speed: 15.0
+    max_reverse_speed: 10.0
     max_forward_speed: 25.0
     publish_rate_hz: 20.0
     joy_timeout_sec: 0.25

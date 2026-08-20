@@ -327,7 +327,8 @@ class AsyncSessionWriter:
             if not lidar_relative:
                 if session.lidar_dir is None:
                     raise RuntimeError("LiDAR storage was not initialized")
-                lidar_relative = f"Lidar/{lidar.sequence:06d}.npz"
+                session_lidar_index = len(session.saved_lidar_paths) + 1
+                lidar_relative = f"Lidar/{session_lidar_index:06d}.npz"
                 self._write_lidar(session.temp_dir / lidar_relative, lidar)
                 session.saved_lidar_paths[lidar.sequence] = lidar_relative
             session.lidar_linked_count += 1

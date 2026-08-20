@@ -2,6 +2,7 @@
 # Licensed under the Apache License, Version 2.0
 
 import csv
+from dataclasses import replace
 from datetime import datetime
 import re
 import time
@@ -17,6 +18,7 @@ from xycar_data.class_image_writer import (
 from xycar_data.session_writer import (
     AsyncSessionWriter,
     CameraSample,
+    LidarSnapshot,
     _unique_path,
 )
 
@@ -34,6 +36,34 @@ def _sample(index: int) -> CameraSample:
         input_key='gamepad',
         lidar=None,
         lidar_skew_sec=None,
+    )
+
+
+def _lidar(sequence: int) -> LidarSnapshot:
+    return LidarSnapshot(
+        sequence=sequence,
+        ranges=np.asarray([1.0, 2.0, 3.0], dtype=np.float32),
+        intensities=np.asarray([10.0, 20.0, 30.0], dtype=np.float32),
+        angle_min=-1.0,
+        angle_max=1.0,
+        angle_increment=1.0,
+        time_increment=0.01,
+        scan_time=0.1,
+        range_min=0.1,
+        range_max=16.0,
+        frame_id='laser_frame',
+        stamp_sec=100 + sequence,
+        stamp_nanosec=sequence,
+        received_monotonic=float(sequence),
+        received_wall_time_ns=1000 + sequence,
+    )
+
+
+def _sample_with_lidar(index: int, lidar: LidarSnapshot) -> CameraSample:
+    return replace(
+        _sample(index),
+        lidar=lidar,
+        lidar_skew_sec=0.05,
     )
 
 
@@ -136,6 +166,54 @@ def test_jpeg_session_writes_jpg_paths_that_opencv_can_read(tmp_path):
         ) as stream:
             rows = list(csv.DictReader(stream))
         assert [row['image'] for row in rows] == ['Images/1.jpg']
+    finally:
+        writer.shutdown()
+
+
+def test_lidar_filenames_restart_at_one_for_each_session(tmp_path):
+    writer = _writer(tmp_path / 'teleop')
+    try:
+        first_scan = _lidar(625)
+        second_scan = _lidar(626)
+        token = writer.start_session({'control_mode': 'gamepad'})
+        assert token is not None
+        assert writer.submit(token, _sample_with_lidar(1, first_scan))
+        assert writer.submit(token, _sample_with_lidar(2, first_scan))
+        assert writer.submit(token, _sample_with_lidar(3, second_scan))
+        assert writer.finish(token, 'b_button')
+
+        first_result = _wait_for_result(writer)
+        assert first_result.path is not None
+        with (first_result.path / 'samples.csv').open(
+            encoding='utf-8',
+            newline='',
+        ) as stream:
+            first_rows = list(csv.DictReader(stream))
+        assert [row['lidar'] for row in first_rows] == [
+            'Lidar/000001.npz',
+            'Lidar/000001.npz',
+            'Lidar/000002.npz',
+        ]
+        assert [row['lidar_sequence'] for row in first_rows] == [
+            '625',
+            '625',
+            '626',
+        ]
+
+        token = writer.start_session({'control_mode': 'gamepad'})
+        assert token is not None
+        assert writer.submit(token, _sample_with_lidar(4, _lidar(900)))
+        assert writer.finish(token, 'b_button')
+
+        second_result = _wait_for_result(writer)
+        assert second_result.path is not None
+        with (second_result.path / 'samples.csv').open(
+            encoding='utf-8',
+            newline='',
+        ) as stream:
+            second_rows = list(csv.DictReader(stream))
+        assert second_rows[0]['lidar'] == 'Lidar/000001.npz'
+        assert second_rows[0]['lidar_sequence'] == '900'
     finally:
         writer.shutdown()
 

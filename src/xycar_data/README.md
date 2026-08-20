@@ -41,10 +41,10 @@ Remote Gamepad 휴대폰 앱과 PC 앱을 먼저 연결한다. 차량 바퀴를 
 
 새 stateless generation 0 수집은 설치 시 한 번 생성되는 외부 profile을 사용한다.
 `install_runtime.sh`는 이 파일이 이미 있으면 덮어쓰지 않는다. profile의 기본
-전진 최고속도는 `25`, 후진 최고속도 절댓값은 `15`, 저장 root는
+전진 최고속도는 `25`, 후진 최고속도 절댓값은 `10`, 저장 root는
 `/home/xytron/xycar_data/stateless_manual`이다. 각 session metadata에는 profile의
 절대 경로와 SHA-256, 실제 적용된 gamepad·recording·timeout 값이 기록된다.
-기존 외부 profile은 배포 전에 SHA-256 이름으로 백업한 뒤 25/15와
+기존 외부 profile은 배포 전에 SHA-256 이름으로 백업한 뒤 25/10과
 `lidar_topic`, `lidar_timeout_sec`, `max_lidar_skew_sec`를 별도로 반영해야 한다.
 차량의 tracked seed 파일을 현장에서 수정해 대신하지 않는다.
 Gamepad camera frame은 Jetson에서 30 Hz를 지속 저장할 수 있도록 기본 JPEG 품질
@@ -52,12 +52,14 @@ Gamepad camera frame은 Jetson에서 30 Hz를 지속 저장할 수 있도록 기
 
 ```bash
 ros2 launch xycar_data gamepad_teleop.launch.py \
-  params_file:=/home/xytron/.config/xycar/gamepad_stateless_manual_normalized_v1.yaml
+  params_file:=/home/xytron/.config/xycar/gamepad_stateless_manual_normalized_v1.yaml \
+  use_camera:=true \
+  use_lidar:=true
 ```
 
 아래 인자 없는 명령도 normalized v1 generic profile과 기존
 `/home/xytron/xycar_data/teleop` 저장 root를 사용한다. Generic profile은 기존
-전진 `7`/후진 `-5`를 유지하며, 아래 입력 표와 25/15 값은 위 stateless manual
+전진 `7`/후진 `-5`를 유지하며, 아래 입력 표와 25/10 값은 위 stateless manual
 profile 기준이다.
 
 ```bash
@@ -76,7 +78,7 @@ Gamepad profile이 controller와 teleop에 그대로 적용된다. 입력과 출
 | Gamepad 입력 | 변환 | 범위 |
 | --- | --- | --- |
 | 왼쪽 스틱 좌우 `axes[0]` | `angle = -100 * axes[0]` | `-100 ~ 100` |
-| LT `axes[4]` | `speed -= 15 * depth` | `0 ~ -15` |
+| LT `axes[4]` | `speed -= 10 * depth` | `0 ~ -10` |
 | RT `axes[5]` | `speed += 25 * depth` | `0 ~ 25` |
 | A `buttons[0]` | 양수 속도 녹화 대기·시작 | — |
 | B `buttons[1]` | 현재 세션 정상 저장 | — |
@@ -85,7 +87,7 @@ Gamepad profile이 controller와 teleop에 그대로 적용된다. 입력과 출
 LT는 `axes[4]`, RT는 `axes[5]`다. 따라서 `trigger_axis_mode: negative`가
 기본값이고 각 depth는 `-raw_axis`다. raw `0`, `-0.5`, `-1`은 각각
 depth `0`, `0.5`, `1`로 변환된다. LT와 RT는 합산하므로 둘을 끝까지 누르면
-speed는 `10`이다. 두 트리거가 모두 `0`이면 speed만 0이 되고 angle은 왼쪽
+speed는 `15`다. 두 트리거가 모두 `0`이면 speed만 0이 되고 angle은 왼쪽
 스틱을 계속 따라간다.
 
 A를 누르고 있는 동안 녹화를 대기한다. 실제 `/xycar_motor`에 `speed > 0`이
@@ -144,7 +146,7 @@ trigger가 `0`에서 `+1`로 움직이는 controller는 별도 YAML에서 `posit
 `+1`에서 `-1`로 전체 축 범위를 쓰는 controller는 `signed`로 설정하고
 `params_file` launch 인자로 전달한다. 차량에서는 LT/RT 축 번호와 `0`에서
 `-1`로 변하는 raw 입력을 확인했다.
-조향 `±100`, 전진 `25`, 후진 `-15`의 실제 회전과 motor scale, release·stale·종료
+조향 `±100`, 전진 `25`, 후진 `-10`의 실제 회전과 motor scale, release·stale·종료
 정지는 raised-car 상태에서 아직 검증되지 않았다. 첫 실차 시험은 낮은 trigger
 깊이부터 시작한다.
 
@@ -167,11 +169,18 @@ ros2 launch xycar_data teleop_sensors.launch.py use_lidar:=false
 중복 실행하지 않는다.
 
 기본 Gamepad launch는 camera와 LiDAR를 직접 포함하므로 별도의 sensor launch가
-필요하지 않다. `use_camera:=false` 또는 `use_lidar:=false`로 실행했다면 각각
-`/image_raw` 또는 `/scan`을 기존 node에서 받아야 한다. camera가 없거나 중간에
-끊기면 gamepad 주행과 녹화 상태는 유지되고 해당 구간의 frame만 저장되지 않는다.
+필요하지 않다. 새 수집은 위 통합 명령의 `use_camera:=true use_lidar:=true`를
+사용한다. `use_camera:=false` 또는 `use_lidar:=false`는 각각 기존 `/image_raw`
+또는 `/scan` publisher가 실제로 동작 중임을 확인한 경우에만 사용한다. camera가
+없거나 중간에 끊기면 camera-primary sample이 하나도 생성되지 않으므로 session과
+LiDAR NPZ도 저장되지 않는다. 주행과 녹화 상태 자체는 유지된다.
 LiDAR가 없거나 `0.30`초 timeout 또는 `0.20`초 최대 skew를 넘으면 camera frame은
 계속 저장하되 `lidar_valid=false`로 남긴다.
+
+2026-08-20 Jetson 실장치 점검에서는 `/image_raw`와 `/scan` driver를 함께 실행한
+격리 writer 시험에서 camera sample 59개 모두 LiDAR가 연결됐고, 누락 0개와
+재사용 가능한 NPZ 20개를 확인했다. 각 scan은 `laser_frame`의 range 500개였으며
+첫 camera-scan skew는 약 0.098초였다.
 
 ## 데이터 형식
 
@@ -193,7 +202,9 @@ YYYYMMDD_HHMMSS_mmm_session/
 실제 이미지 상대 경로와 확장자는 `image` 열이 기준이다. Gamepad 기본은 JPEG
 품질 95이고 과거 PNG session도 같은 CSV 계약으로 읽는다.
 유효한 LiDAR가 있으면 `lidar` 경로와 scan timestamp·skew도 기록하며, 하나의
-LiDAR scan이 여러 camera frame에 대응할 때 NPZ 파일을 재사용한다. NPZ에는
+LiDAR scan이 여러 camera frame에 대응할 때 NPZ 파일을 재사용한다. NPZ 파일명은
+각 session에서 `000001.npz`부터 시작하고, node 전체 scan 순번은 CSV의
+`lidar_sequence`에 별도로 보존한다. NPZ에는
 전체 `ranges`, `intensities`, LaserScan geometry·timing·frame metadata가 담긴다.
 Gamepad sample은 `input_key=gamepad`와 `metadata.yaml`의
 `control_mode=gamepad`로 기록된다. 유효 scan 연결 여부는 각 행의
