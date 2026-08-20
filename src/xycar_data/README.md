@@ -2,8 +2,9 @@
 
 `xycar_data`는 게임패드로 Xycar를 조종하고 카메라 기반 behavior-cloning 모델
 학습용 데이터를 수집하는 패키지다. 카메라 frame마다 그 순간 실제 발행한 연속형
-`angle`, `speed`를 label로 저장한다. 게임패드 주행은 카메라가 없어도 유지되며
-녹화 중 누락된 camera frame만 건너뛴다.
+`angle`, `speed`를 label로 저장하고, 시간상 가장 가까운 선행 LiDAR scan을 선택적
+NPZ metadata로 연결한다. 게임패드 주행은 카메라나 LiDAR가 없어도 유지되며,
+camera가 없으면 frame을 건너뛰고 LiDAR가 없으면 `lidar_valid=false`로 저장한다.
 
 새 수집의 `/xycar_motor` angle은 물리 driver 단위가 아니라 normalized percent
 `-100..100`이다. ROS 1 safety adapter가 이를 `×0.4`로 변환해
@@ -40,9 +41,12 @@ Remote Gamepad 휴대폰 앱과 PC 앱을 먼저 연결한다. 차량 바퀴를 
 
 새 stateless generation 0 수집은 설치 시 한 번 생성되는 외부 profile을 사용한다.
 `install_runtime.sh`는 이 파일이 이미 있으면 덮어쓰지 않는다. profile의 기본
-전진 최고속도는 `7`, 저장 root는
+전진 최고속도는 `25`, 후진 최고속도 절댓값은 `15`, 저장 root는
 `/home/xytron/xycar_data/stateless_manual`이다. 각 session metadata에는 profile의
 절대 경로와 SHA-256, 실제 적용된 gamepad·recording·timeout 값이 기록된다.
+기존 외부 profile은 배포 전에 SHA-256 이름으로 백업한 뒤 25/15와
+`lidar_topic`, `lidar_timeout_sec`, `max_lidar_skew_sec`를 별도로 반영해야 한다.
+차량의 tracked seed 파일을 현장에서 수정해 대신하지 않는다.
 Gamepad camera frame은 Jetson에서 30 Hz를 지속 저장할 수 있도록 기본 JPEG 품질
 95로 저장한다. 이미지 형식과 품질은 외부 profile에서 조정할 수 있다.
 
@@ -52,23 +56,27 @@ ros2 launch xycar_data gamepad_teleop.launch.py \
 ```
 
 아래 인자 없는 명령도 normalized v1 generic profile과 기존
-`/home/xytron/xycar_data/teleop` 저장 root를 사용한다.
+`/home/xytron/xycar_data/teleop` 저장 root를 사용한다. Generic profile은 기존
+전진 `7`/후진 `-5`를 유지하며, 아래 입력 표와 25/15 값은 위 stateless manual
+profile 기준이다.
 
 ```bash
 ros2 launch xycar_data gamepad_teleop.launch.py
 ```
 
-이 한 명령은 camera driver, ROS 2 공식 `joy/game_controller_node`,
+이 한 명령은 camera와 LiDAR driver, ROS 2 공식 `joy/game_controller_node`,
 `gamepad_teleop`을 함께 시작한다. 따라서 게임패드 입력, 차량 주행, camera 기반
-데이터 수집을 별도 terminal 없이 모두 수행한다. launch도 각 child process에
+데이터와 선택적 LiDAR scan 수집을 별도 terminal 없이 모두 수행한다. controller와
+teleop은 전용 `/gamepad_teleop/joy`만 사용하므로, 별도로 남아 있는 `/joy`
+publisher의 축 배열과 명령이 섞이지 않는다. launch도 각 child process에
 `ROS_LOCALHOST_ONLY=1`을 강제해 같은 Wi-Fi의 다른 ROS 2 participant를 발견하지
 않는다. 입력과 출력은 다음과 같다.
 
 | Gamepad 입력 | 변환 | 범위 |
 | --- | --- | --- |
 | 왼쪽 스틱 좌우 `axes[0]` | `angle = -100 * axes[0]` | `-100 ~ 100` |
-| LT `axes[4]` | `speed -= 5 * depth` | `0 ~ -5` |
-| RT `axes[5]` | `speed += 7 * depth` | `0 ~ 7` |
+| LT `axes[4]` | `speed -= 15 * depth` | `0 ~ -15` |
+| RT `axes[5]` | `speed += 25 * depth` | `0 ~ 25` |
 | A `buttons[0]` | 양수 속도 녹화 대기·시작 | — |
 | B `buttons[1]` | 현재 세션 정상 저장 | — |
 
@@ -76,7 +84,7 @@ ros2 launch xycar_data gamepad_teleop.launch.py
 LT는 `axes[4]`, RT는 `axes[5]`다. 따라서 `trigger_axis_mode: negative`가
 기본값이고 각 depth는 `-raw_axis`다. raw `0`, `-0.5`, `-1`은 각각
 depth `0`, `0.5`, `1`로 변환된다. LT와 RT는 합산하므로 둘을 끝까지 누르면
-speed는 `2`다. 두 트리거가 모두 `0`이면 speed만 0이 되고 angle은 왼쪽
+speed는 `10`이다. 두 트리거가 모두 `0`이면 speed만 0이 되고 angle은 왼쪽
 스틱을 계속 따라간다.
 
 A를 누르고 있는 동안 녹화를 대기한다. 실제 `/xycar_motor`에 `speed > 0`이
@@ -90,7 +98,7 @@ A를 누르고 있는 동안 녹화를 대기한다. 실제 `/xycar_motor`에 `s
 있다. B 또는 speed 종료 후 A를 계속 누르고 있어도 자동 재시작하지 않으며,
 A를 한 번 놓았다가 다시 눌러야 새 세션을 시작한다.
 
-`/joy`가 0.25초 이상 끊기거나, 축 배열이 잘못됐거나, motor subscriber가 없거나,
+전용 `/gamepad_teleop/joy`가 0.25초 이상 끊기거나, 축 배열이 잘못됐거나, motor subscriber가 없거나,
 다른 motor publisher가 발견되면 `[0, 0]`을 발행한다. Fast DDS가 로컬 ROS 1
 motor bridge 이름을 `UNKNOWN`으로 표시할 때는 동일 DDS participant GID의 이름
 없는 publisher/subscriber 쌍만 필수 relay로 인정한다. 이름 있는 다른 publisher,
@@ -98,18 +106,20 @@ motor bridge 이름을 `UNKNOWN`으로 표시할 때는 동일 DDS participant G
 종료할 때도 정지 명령을 5회 발행한다. 시작할 때와 위 안전 정지에서 복구할 때는
 LT와 RT가 모두
 `neutral_trigger_threshold` 이하인 입력을 한 번 확인해야 다시 주행할 수 있다.
-연결이 유효하고 `/joy`가 갱신되는 동안 마지막 유효 명령은 20 Hz로 반복된다.
+연결이 유효하고 전용 Joy topic이 갱신되는 동안 마지막 유효 명령은 20 Hz로 반복된다.
 
-휴대폰 연결이 끊겨도 PC의 가상 controller가 마지막 `/joy`를 계속 갱신하면 이
+휴대폰 연결이 끊겨도 PC의 가상 controller가 마지막 Joy 값을 계속 갱신하면 이
 node는 실제 Remote 앱 단절과 정상적인 고정 입력을 구분할 수 없다. 이 동작은
 실차 주행 전에 별도로 확인해야 하며, 마지막 값이 계속 갱신되는 환경은 앱
 heartbeat 또는 별도 deadman 없이는 단절 안전이 검증된 것으로 보지 않는다.
 
 이미 `/image_raw` camera가 실행 중이면 중복 장치 접근을 피하도록 camera 자동
-시작을 끌 수 있다.
+시작을 끌 수 있다. 이미 `/scan`이 실행 중이면 같은 방식으로 LiDAR 자동 시작을
+끈다.
 
 ```bash
 ros2 launch xycar_data gamepad_teleop.launch.py use_camera:=false
+ros2 launch xycar_data gamepad_teleop.launch.py use_lidar:=false
 ```
 
 `/joy`도 이미 다른 승인된 `Joy` node에서 발행 중일 때는 teleop만 단독 실행할
@@ -133,7 +143,7 @@ trigger가 `0`에서 `+1`로 움직이는 controller는 별도 YAML에서 `posit
 `+1`에서 `-1`로 전체 축 범위를 쓰는 controller는 `signed`로 설정하고
 `params_file` launch 인자로 전달한다. 차량에서는 LT/RT 축 번호와 `0`에서
 `-1`로 변하는 raw 입력을 확인했다.
-조향 `±100`, 전진 `7`, 후진 `-5`의 실제 회전과 motor scale, release·stale·종료
+조향 `±100`, 전진 `25`, 후진 `-15`의 실제 회전과 motor scale, release·stale·종료
 정지는 raised-car 상태에서 아직 검증되지 않았다. 첫 실차 시험은 낮은 trigger
 깊이부터 시작한다.
 
@@ -155,11 +165,12 @@ ros2 launch xycar_data teleop_sensors.launch.py use_lidar:=false
 이미 `/image_raw`와 `/scan`이 다른 승인된 node에서 publish 중이면 이 launch를
 중복 실행하지 않는다.
 
-기본 Gamepad launch는 camera를 직접 포함하므로 별도의 sensor launch가 필요하지
-않다. `use_camera:=false`로 실행했다면 `/image_raw`를 기존 camera node에서 받아야
-한다. camera가 없거나 중간에 끊기면 gamepad 주행과 녹화 상태는 유지되고 해당
-구간의 frame만 저장되지 않는다. camera가 복구되면 같은 세션에서 새 frame 저장을
-계속한다.
+기본 Gamepad launch는 camera와 LiDAR를 직접 포함하므로 별도의 sensor launch가
+필요하지 않다. `use_camera:=false` 또는 `use_lidar:=false`로 실행했다면 각각
+`/image_raw` 또는 `/scan`을 기존 node에서 받아야 한다. camera가 없거나 중간에
+끊기면 gamepad 주행과 녹화 상태는 유지되고 해당 구간의 frame만 저장되지 않는다.
+LiDAR가 없거나 `0.30`초 timeout 또는 `0.20`초 최대 skew를 넘으면 camera frame은
+계속 저장하되 `lidar_valid=false`로 남긴다.
 
 ## 데이터 형식
 
@@ -183,8 +194,9 @@ YYYYMMDD_HHMMSS_mmm_session/
 유효한 LiDAR가 있으면 `lidar` 경로와 scan timestamp·skew도 기록하며, 하나의
 LiDAR scan이 여러 camera frame에 대응할 때 NPZ 파일을 재사용한다. NPZ에는
 전체 `ranges`, `intensities`, LaserScan geometry·timing·frame metadata가 담긴다.
-Gamepad sample은 `input_key=gamepad`, `lidar_valid=false`와
-`metadata.yaml`의 `control_mode=gamepad`로 기록된다.
+Gamepad sample은 `input_key=gamepad`와 `metadata.yaml`의
+`control_mode=gamepad`로 기록된다. 유효 scan 연결 여부는 각 행의
+`lidar_valid`와 metadata의 `lidar_linked_count`, `lidar_missing_count`로 확인한다.
 
 정상 B 종료 또는 speed 0 이하 종료는 임시 `_recording_...` directory를
 `YYYYMMDD_HHMMSS_mmm_session`으로 atomic rename한다. 쓰기 실패나 경쟁 motor
@@ -202,7 +214,7 @@ tracked seed는 `config/gamepad_stateless_manual_normalized_v1.yaml`이다. 계�
 없는 기존 profile과 raw session은 legacy/reference로 보존하며 새 학습에 넣지
 않는다.
 
-- camera, Joy와 motor topic
+- camera, LiDAR, Joy와 motor topic 및 LiDAR timeout/skew
 - gamepad axis·button mapping, trigger 부호 profile, 중립 재활성 임계값과
   출력 한계
 - Joy freshness, graph 확인 주기, 20 Hz publish rate와 stop 반복 횟수

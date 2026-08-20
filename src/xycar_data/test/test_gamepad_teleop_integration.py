@@ -4,13 +4,15 @@
 import csv
 import time
 
+import numpy as np
 import pytest
 import rclpy
 import yaml
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
-from sensor_msgs.msg import Image, Joy
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Image, Joy, LaserScan
 from std_msgs.msg import Float32MultiArray
 
 from xycar_data.gamepad_teleop import (
@@ -22,6 +24,7 @@ from xycar_data.gamepad_teleop import (
 JOY_TOPIC = '/xycar_data_test/gamepad/joy'
 MOTOR_TOPIC = '/xycar_data_test/gamepad/motor'
 CAMERA_TOPIC = '/xycar_data_test/gamepad/camera'
+LIDAR_TOPIC = '/xycar_data_test/gamepad/lidar'
 
 
 def _joy_message(
@@ -50,6 +53,23 @@ def _image_message(sequence: int) -> Image:
     message.is_bigendian = False
     message.step = message.width * 3
     message.data = bytes([sequence % 256] * (message.step * message.height))
+    return message
+
+
+def _lidar_message(sequence: int) -> LaserScan:
+    message = LaserScan()
+    message.header.stamp.sec = sequence
+    message.header.stamp.nanosec = sequence * 1000
+    message.header.frame_id = 'laser_frame'
+    message.angle_min = -1.0
+    message.angle_max = 1.0
+    message.angle_increment = 1.0
+    message.time_increment = 0.01
+    message.scan_time = 0.10
+    message.range_min = 0.10
+    message.range_max = 16.0
+    message.ranges = [1.0, 2.0, 3.0]
+    message.intensities = [10.0, 20.0, 30.0]
     return message
 
 
@@ -96,6 +116,9 @@ def ros_harness(monkeypatch, tmp_path):
         Parameter('joy_topic', value=JOY_TOPIC),
         Parameter('motor_topic', value=MOTOR_TOPIC),
         Parameter('camera_topic', value=CAMERA_TOPIC),
+        Parameter('lidar_topic', value=LIDAR_TOPIC),
+        Parameter('lidar_timeout_sec', value=0.30),
+        Parameter('max_lidar_skew_sec', value=0.20),
         Parameter('steering_contract', value='normalized_percent_v1'),
         Parameter('publish_rate_hz', value=20.0),
         Parameter('joy_timeout_sec', value=0.25),
@@ -126,6 +149,11 @@ def ros_harness(monkeypatch, tmp_path):
 
     joy_publisher = peer.create_publisher(Joy, JOY_TOPIC, 10)
     camera_publisher = peer.create_publisher(Image, CAMERA_TOPIC, 10)
+    lidar_publisher = peer.create_publisher(
+        LaserScan,
+        LIDAR_TOPIC,
+        qos_profile_sensor_data,
+    )
 
     def on_motor(message):
         received_commands.append(tuple(message.data))
@@ -146,12 +174,14 @@ def ros_harness(monkeypatch, tmp_path):
         'peer': peer,
         'joy_publisher': joy_publisher,
         'camera_publisher': camera_publisher,
+        'lidar_publisher': lidar_publisher,
         'motor_subscription': motor_subscription,
         'on_motor': on_motor,
         'received_commands': received_commands,
         'recording_root': tmp_path / 'teleop',
     }
     assert teleop.motor_topic == MOTOR_TOPIC
+    assert teleop.lidar_topic == LIDAR_TOPIC
     assert teleop.config.trigger_axis_mode == 'negative'
     yield harness
 
@@ -357,6 +387,88 @@ def test_a_waits_for_forward_and_b_saves_all_frames_without_stopping(
         'motor_topic': MOTOR_TOPIC,
         'driver_topic': '/xycar_motor_safe',
     }
+
+
+def test_lidar_links_to_camera_samples_and_missing_scans_do_not_stop(
+    ros_harness,
+):
+    harness = ros_harness
+    teleop = harness['teleop']
+    forward = _joy_message(rt=1.0, a=True)
+
+    _spin_for(harness, 0.15, _joy_message())
+    _spin_for(harness, 0.15, forward)
+    assert teleop._recording_gate.state == RecordingState.RECORDING
+
+    # Camera remains primary: a frame before any scan is retained as missing.
+    harness['camera_publisher'].publish(_image_message(1))
+    _spin_for(harness, 0.03, forward)
+
+    # One 10 Hz scan may be linked by multiple faster camera frames.
+    harness['lidar_publisher'].publish(_lidar_message(7))
+    _spin_for(harness, 0.03, forward)
+    for sequence in (2, 3):
+        harness['camera_publisher'].publish(_image_message(sequence))
+        _spin_for(harness, 0.03, forward)
+
+    # A stale scan produces lidar_valid=false without stopping the command.
+    harness['received_commands'].clear()
+    _spin_for(harness, 0.23, forward)
+    harness['camera_publisher'].publish(_image_message(4))
+    _spin_for(harness, 0.05, forward)
+    assert any(
+        command[1] == pytest.approx(7.0)
+        for command in harness['received_commands']
+    )
+
+    _spin_for(harness, 0.15, _joy_message(rt=1.0, b=True))
+    assert _spin_until(
+        harness,
+        lambda: teleop._recording_gate.state == RecordingState.IDLE,
+        2.0,
+        _joy_message(rt=1.0),
+    )
+
+    sessions = list(harness['recording_root'].glob('*_session*'))
+    assert len(sessions) == 1
+    session = sessions[0]
+    with (session / 'samples.csv').open(
+        encoding='utf-8',
+        newline='',
+    ) as stream:
+        rows = list(csv.DictReader(stream))
+    assert [row['lidar_valid'] for row in rows] == [
+        'false',
+        'true',
+        'true',
+        'false',
+    ]
+    assert rows[1]['lidar'] == rows[2]['lidar'] == 'Lidar/000001.npz'
+    assert rows[1]['lidar_sequence'] == rows[2]['lidar_sequence'] == '1'
+
+    lidar_path = session / rows[1]['lidar']
+    assert lidar_path.is_file()
+    with np.load(lidar_path) as lidar:
+        np.testing.assert_allclose(lidar['ranges'], [1.0, 2.0, 3.0])
+        np.testing.assert_allclose(
+            lidar['intensities'],
+            [10.0, 20.0, 30.0],
+        )
+        assert lidar['frame_id'].item() == 'laser_frame'
+        assert lidar['stamp_sec'].item() == 7
+
+    metadata = yaml.safe_load(
+        (session / 'metadata.yaml').read_text(encoding='utf-8')
+    )
+    assert metadata['lidar_is_optional'] is True
+    assert metadata['topics']['lidar_topic'] == LIDAR_TOPIC
+    assert metadata['sensors'] == {
+        'lidar_timeout_sec': pytest.approx(0.30),
+        'max_lidar_skew_sec': pytest.approx(0.20),
+    }
+    assert metadata['sample_count'] == 4
+    assert metadata['lidar_linked_count'] == 2
+    assert metadata['lidar_missing_count'] == 2
 
 
 def test_nonpositive_speed_discards_fifteen_and_keeps_driving(

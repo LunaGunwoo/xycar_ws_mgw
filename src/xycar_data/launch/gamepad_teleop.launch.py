@@ -25,8 +25,11 @@ def generate_launch_description():
     )
     params_file = LaunchConfiguration('params_file')
     device_id = LaunchConfiguration('device_id')
+    joy_topic = LaunchConfiguration('joy_topic')
     use_camera = LaunchConfiguration('use_camera')
+    use_lidar = LaunchConfiguration('use_lidar')
     camera_share = get_package_share_directory('xycar_cam')
+    lidar_share = get_package_share_directory('xycar_lidar')
 
     return LaunchDescription(
         [
@@ -42,9 +45,22 @@ def generate_launch_description():
                 description='SDL game-controller device index.',
             ),
             DeclareLaunchArgument(
+                'joy_topic',
+                default_value='/gamepad_teleop/joy',
+                description=(
+                    'Dedicated Joy topic shared only by this launch controller '
+                    'and teleop node.'
+                ),
+            ),
+            DeclareLaunchArgument(
                 'use_camera',
                 default_value='true',
                 description='Start the camera driver for dataset recording.',
+            ),
+            DeclareLaunchArgument(
+                'use_lidar',
+                default_value='true',
+                description='Start the LiDAR driver for optional scan capture.',
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -55,6 +71,23 @@ def generate_launch_description():
                     )
                 ),
                 condition=IfCondition(use_camera),
+            ),
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(
+                        lidar_share,
+                        'launch',
+                        'xycar_lidar.launch.py',
+                    )
+                ),
+                launch_arguments={
+                    'params_file': os.path.join(
+                        lidar_share,
+                        'params',
+                        'ydlidar.yaml',
+                    )
+                }.items(),
+                condition=IfCondition(use_lidar),
             ),
             Node(
                 package='joy',
@@ -71,7 +104,7 @@ def generate_launch_description():
                         )
                     },
                 ],
-                remappings=[('joy', '/joy')],
+                remappings=[('joy', joy_topic)],
             ),
             Node(
                 package='xycar_data',
@@ -85,7 +118,11 @@ def generate_launch_description():
                         'collection_profile_path': ParameterValue(
                             params_file,
                             value_type=str,
-                        )
+                        ),
+                        'joy_topic': ParameterValue(
+                            joy_topic,
+                            value_type=str,
+                        ),
                     },
                 ],
             ),

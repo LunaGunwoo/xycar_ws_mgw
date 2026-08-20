@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import yaml
 
@@ -21,11 +22,14 @@ from xycar_data.gamepad_teleop import (
     _PendingRecordingFinish,
     _is_paired_unnamed_relay,
     _validate_collection_profile,
+    _validate_lidar_parameters,
     _validate_recording_parameters,
     _validate_runtime_parameters,
     is_input_fresh,
     map_joy_axes,
+    matching_lidar_snapshot,
 )
+from xycar_data.session_writer import LidarSnapshot
 
 
 def _endpoint(participant: bytes, entity: bytes, *, named: bool = False):
@@ -33,6 +37,26 @@ def _endpoint(participant: bytes, entity: bytes, *, named: bool = False):
         endpoint_gid=list(participant + entity),
         node_name='publisher' if named else '_NODE_NAME_UNKNOWN_',
         node_namespace='/' if named else '_NODE_NAMESPACE_UNKNOWN_',
+    )
+
+
+def _lidar_snapshot(received_monotonic: float) -> LidarSnapshot:
+    return LidarSnapshot(
+        sequence=1,
+        ranges=np.asarray([1.0, 2.0], dtype=np.float32),
+        intensities=np.asarray([3.0, 4.0], dtype=np.float32),
+        angle_min=-1.0,
+        angle_max=1.0,
+        angle_increment=0.1,
+        time_increment=0.001,
+        scan_time=0.1,
+        range_min=0.1,
+        range_max=16.0,
+        frame_id='laser_frame',
+        stamp_sec=10,
+        stamp_nanosec=20,
+        received_monotonic=received_monotonic,
+        received_wall_time_ns=30,
     )
 
 
@@ -241,6 +265,53 @@ def test_input_freshness_timeout():
     assert not is_input_fresh(9.9, 10.0, 0.25)
 
 
+def test_lidar_matching_accepts_only_recent_preceding_scans():
+    lidar = _lidar_snapshot(10.0)
+
+    matched, skew = matching_lidar_snapshot(
+        10.19,
+        lidar,
+        lidar_timeout_sec=0.30,
+        max_lidar_skew_sec=0.20,
+    )
+    assert matched is lidar
+    assert skew == pytest.approx(0.19)
+
+    for camera_time in (9.99, 10.21, 10.31):
+        assert matching_lidar_snapshot(
+            camera_time,
+            lidar,
+            lidar_timeout_sec=0.30,
+            max_lidar_skew_sec=0.20,
+        ) == (None, None)
+    assert matching_lidar_snapshot(
+        10.0,
+        None,
+        lidar_timeout_sec=0.30,
+        max_lidar_skew_sec=0.20,
+    ) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ('topic', 'timeout_sec', 'max_skew_sec'),
+    [
+        ('', 0.30, 0.20),
+        ('/scan', 0.0, 0.20),
+        ('/scan', math.nan, 0.20),
+        ('/scan', 0.30, 0.0),
+        ('/scan', 0.30, math.inf),
+        ('/scan', 0.20, 0.30),
+    ],
+)
+def test_invalid_lidar_parameters_are_rejected(
+    topic,
+    timeout_sec,
+    max_skew_sec,
+):
+    with pytest.raises(ValueError):
+        _validate_lidar_parameters(topic, timeout_sec, max_skew_sec)
+
+
 def test_recording_gate_waits_for_positive_published_speed():
     gate = RecordingGate()
 
@@ -419,12 +490,22 @@ def test_normalized_collection_templates_are_versioned_and_strict(tmp_path):
         package_root / 'launch' / 'gamepad_teleop.launch.py'
     ).read_text(encoding='utf-8')
 
-    assert config['max_forward_speed'] == 7.0
+    assert config['max_forward_speed'] == 25.0
+    assert config['max_reverse_speed'] == 15.0
+    assert config['lidar_topic'] == '/scan'
+    assert config['lidar_timeout_sec'] == pytest.approx(0.30)
+    assert config['max_lidar_skew_sec'] == pytest.approx(0.20)
     assert config['recording_root_dir'].endswith('/stateless_manual')
     assert config['recording_image_format'] == 'jpeg'
     assert config['recording_jpeg_quality'] == 95
     assert config['steering_contract'] == 'normalized_percent_v1'
     assert "'collection_profile_path': ParameterValue(" in launch_text
+    assert "default_value='/gamepad_teleop/joy'" in launch_text
+    assert "remappings=[('joy', joy_topic)]" in launch_text
+    assert "'joy_topic': ParameterValue(" in launch_text
+    assert "'use_lidar'" in launch_text
+    assert "default_value='true'" in launch_text
+    assert "'xycar_lidar.launch.py'" in launch_text
     _validate_collection_profile(
         str(
             package_root

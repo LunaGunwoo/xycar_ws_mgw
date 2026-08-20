@@ -11,6 +11,9 @@ gamepad_teleop:
     joy_topic: /joy
     motor_topic: /xycar_motor
     camera_topic: /image_raw
+    lidar_topic: /scan
+    lidar_timeout_sec: 0.30
+    max_lidar_skew_sec: 0.20
     steering_contract: normalized_percent_v1
     steering_axis: 0
     lt_axis: 4
@@ -18,8 +21,8 @@ gamepad_teleop:
     trigger_axis_mode: negative
     invert_steering: true
     max_angle: 100.0
-    max_reverse_speed: 5.0
-    max_forward_speed: 7.0
+    max_reverse_speed: 15.0
+    max_forward_speed: 25.0
     publish_rate_hz: 20.0
     joy_timeout_sec: 0.25
     graph_check_period_sec: 0.5

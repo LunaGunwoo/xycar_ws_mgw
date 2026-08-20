@@ -23,12 +23,15 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
-from sensor_msgs.msg import Image, Joy
+from sensor_msgs.msg import Image, Joy, LaserScan
 from std_msgs.msg import Float32MultiArray
 
-from xycar_data.session_writer import AsyncSessionWriter, CameraSample
+from xycar_data.session_writer import (
+    AsyncSessionWriter,
+    CameraSample,
+    LidarSnapshot,
+)
 from xycar_data.steering_contract import (
-    STEERING_CONTRACT_NAME,
     require_steering_contract_name,
     session_steering_contract,
 )
@@ -336,6 +339,25 @@ def is_input_fresh(
     return 0.0 <= age <= timeout_sec
 
 
+def matching_lidar_snapshot(
+    camera_received_monotonic: float,
+    lidar: Optional[LidarSnapshot],
+    *,
+    lidar_timeout_sec: float,
+    max_lidar_skew_sec: float,
+) -> tuple[Optional[LidarSnapshot], Optional[float]]:
+    """Return the newest preceding LiDAR scan when it is fresh enough."""
+    if lidar is None:
+        return None, None
+    age = camera_received_monotonic - lidar.received_monotonic
+    if age < 0.0 or age > lidar_timeout_sec:
+        return None, None
+    skew = abs(age)
+    if skew > max_lidar_skew_sec:
+        return None, None
+    return lidar, skew
+
+
 def _clamp(value: float, minimum: float, maximum: float) -> float:
     return min(maximum, max(minimum, value))
 
@@ -417,6 +439,24 @@ def _validate_runtime_parameters(
         raise ValueError('stop_publish_count must be at least 1')
 
 
+def _validate_lidar_parameters(
+    lidar_topic: str,
+    lidar_timeout_sec: float,
+    max_lidar_skew_sec: float,
+) -> None:
+    if not lidar_topic:
+        raise ValueError('lidar_topic must not be empty')
+    _validate_finite_positive('lidar_timeout_sec', lidar_timeout_sec)
+    _validate_finite_positive(
+        'max_lidar_skew_sec',
+        max_lidar_skew_sec,
+    )
+    if max_lidar_skew_sec > lidar_timeout_sec:
+        raise ValueError(
+            'max_lidar_skew_sec must not exceed lidar_timeout_sec'
+        )
+
+
 def _validate_recording_parameters(
     *,
     camera_topic: str,
@@ -469,6 +509,9 @@ class GamepadTeleopNode(Node):
         self.declare_parameter('joy_topic', '/joy')
         self.declare_parameter('motor_topic', '/xycar_motor')
         self.declare_parameter('camera_topic', '/image_raw')
+        self.declare_parameter('lidar_topic', '/scan')
+        self.declare_parameter('lidar_timeout_sec', 0.30)
+        self.declare_parameter('max_lidar_skew_sec', 0.20)
         self.declare_parameter('collection_profile_path', '')
         self.declare_parameter('steering_contract', '')
         self.declare_parameter('steering_axis', 0)
@@ -506,6 +549,13 @@ class GamepadTeleopNode(Node):
         self.joy_topic = str(self.get_parameter('joy_topic').value)
         self.motor_topic = str(self.get_parameter('motor_topic').value)
         self.camera_topic = str(self.get_parameter('camera_topic').value)
+        self.lidar_topic = str(self.get_parameter('lidar_topic').value)
+        self.lidar_timeout_sec = float(
+            self.get_parameter('lidar_timeout_sec').value
+        )
+        self.max_lidar_skew_sec = float(
+            self.get_parameter('max_lidar_skew_sec').value
+        )
         self.collection_profile_path = str(
             self.get_parameter('collection_profile_path').value
         )
@@ -608,6 +658,9 @@ class GamepadTeleopNode(Node):
         )
         self._recording_tail: deque[CameraSample] = deque()
         self._camera_sequence = 0
+        self._lidar_sequence = 0
+        self._lidar: Optional[LidarSnapshot] = None
+        self._last_lidar_missing_warning_monotonic = -math.inf
         self._session_token: Optional[int] = None
         self._finishing_token: Optional[int] = None
         self._pending_recording_finish: Optional[
@@ -642,6 +695,12 @@ class GamepadTeleopNode(Node):
             self._on_camera,
             qos_profile_sensor_data,
         )
+        self.lidar_subscription = self.create_subscription(
+            LaserScan,
+            self.lidar_topic,
+            self._on_lidar,
+            qos_profile_sensor_data,
+        )
         self.control_timer = self.create_timer(
             1.0 / self.publish_rate_hz,
             self._on_control_timer,
@@ -674,7 +733,9 @@ class GamepadTeleopNode(Node):
             f'trigger_axis_mode={self.config.trigger_axis_mode}'
         )
         self.get_logger().info(
-            f'camera={self.camera_topic}, '
+            f'camera={self.camera_topic}, lidar={self.lidar_topic} '
+            f'(optional, timeout={self.lidar_timeout_sec:g}s, '
+            f'max_skew={self.max_lidar_skew_sec:g}s), '
             f'dataset_root={self.recording_root_dir}, '
             f'A=buttons[{self.record_start_button}], '
             f'B=buttons[{self.record_stop_button}], '
@@ -706,6 +767,11 @@ class GamepadTeleopNode(Node):
             self.graph_check_period_sec,
             self.neutral_trigger_threshold,
             self.stop_publish_count,
+        )
+        _validate_lidar_parameters(
+            self.lidar_topic,
+            self.lidar_timeout_sec,
+            self.max_lidar_skew_sec,
         )
         _validate_recording_parameters(
             camera_topic=self.camera_topic,
@@ -860,7 +926,7 @@ class GamepadTeleopNode(Node):
                 else 'camera_first_teleop_behavior_cloning'
             ),
             'camera_is_primary': True,
-            'lidar_is_optional': False,
+            'lidar_is_optional': True,
             'control_mode': (
                 'gamepad_mission_sequence' if mission_sequence else 'gamepad'
             ),
@@ -869,8 +935,13 @@ class GamepadTeleopNode(Node):
             ),
             'topics': {
                 'camera_topic': self.camera_topic,
+                'lidar_topic': self.lidar_topic,
                 'motor_topic': self.motor_topic,
                 'joy_topic': self.joy_topic,
+            },
+            'sensors': {
+                'lidar_timeout_sec': self.lidar_timeout_sec,
+                'max_lidar_skew_sec': self.max_lidar_skew_sec,
             },
             'gamepad': {
                 **asdict(self.config),
@@ -932,6 +1003,8 @@ class GamepadTeleopNode(Node):
             or self._session_token is None
         ):
             return
+        received_monotonic = time.monotonic()
+        received_wall_time_ns = time.time_ns()
         try:
             image = self.bridge.imgmsg_to_cv2(
                 message,
@@ -952,18 +1025,36 @@ class GamepadTeleopNode(Node):
             return
         self._camera_sequence += 1
         stamp = message.header.stamp
+        lidar, lidar_skew_sec = matching_lidar_snapshot(
+            received_monotonic,
+            self._lidar,
+            lidar_timeout_sec=self.lidar_timeout_sec,
+            max_lidar_skew_sec=self.max_lidar_skew_sec,
+        )
+        if lidar is None and (
+            received_monotonic
+            - self._last_lidar_missing_warning_monotonic
+            >= 2.0
+        ):
+            self._last_lidar_missing_warning_monotonic = (
+                received_monotonic
+            )
+            self.get_logger().warning(
+                'LiDAR is unavailable or too old for this camera frame; '
+                'saving the camera sample with lidar_valid=false.'
+            )
         sample = CameraSample(
             image=np.ascontiguousarray(image).copy(),
             camera_sequence=self._camera_sequence,
             camera_stamp_sec=int(stamp.sec),
             camera_stamp_nanosec=int(stamp.nanosec),
-            camera_received_monotonic=time.monotonic(),
-            camera_received_wall_time_ns=time.time_ns(),
+            camera_received_monotonic=received_monotonic,
+            camera_received_wall_time_ns=received_wall_time_ns,
             angle=command.angle,
             speed=command.speed,
             input_key='gamepad',
-            lidar=None,
-            lidar_skew_sec=None,
+            lidar=lidar,
+            lidar_skew_sec=lidar_skew_sec,
         )
         self._recording_tail.append(sample)
         self._flush_recording_prefix()
@@ -975,6 +1066,32 @@ class GamepadTeleopNode(Node):
                 'dataset writer queue remained full; recording backlog limit '
                 'was exceeded'
             )
+
+    def _on_lidar(self, message: LaserScan) -> None:
+        received_monotonic = time.monotonic()
+        received_wall_time_ns = time.time_ns()
+        self._lidar_sequence += 1
+        stamp = message.header.stamp
+        self._lidar = LidarSnapshot(
+            sequence=self._lidar_sequence,
+            ranges=np.asarray(message.ranges, dtype=np.float32).copy(),
+            intensities=np.asarray(
+                message.intensities,
+                dtype=np.float32,
+            ).copy(),
+            angle_min=float(message.angle_min),
+            angle_max=float(message.angle_max),
+            angle_increment=float(message.angle_increment),
+            time_increment=float(message.time_increment),
+            scan_time=float(message.scan_time),
+            range_min=float(message.range_min),
+            range_max=float(message.range_max),
+            frame_id=str(message.header.frame_id),
+            stamp_sec=int(stamp.sec),
+            stamp_nanosec=int(stamp.nanosec),
+            received_monotonic=received_monotonic,
+            received_wall_time_ns=received_wall_time_ns,
+        )
 
     def _flush_recording_prefix(self) -> None:
         token = self._session_token
@@ -1064,7 +1181,10 @@ class GamepadTeleopNode(Node):
                 )
                 self.get_logger().info(
                     f'Gamepad session saved: {path_text}; '
-                    f'samples={result.sample_count}; reason={result.reason}'
+                    f'samples={result.sample_count}; '
+                    f'lidar_linked={result.lidar_linked_count}; '
+                    f'lidar_missing={result.lidar_missing_count}; '
+                    f'reason={result.reason}'
                 )
             else:
                 self.get_logger().error(
