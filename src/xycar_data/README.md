@@ -70,7 +70,8 @@ ros2 launch xycar_data gamepad_teleop.launch.py
 teleop은 전용 `/gamepad_teleop/joy`만 사용하므로, 별도로 남아 있는 `/joy`
 publisher의 축 배열과 명령이 섞이지 않는다. launch도 각 child process에
 `ROS_LOCALHOST_ONLY=1`을 강제해 같은 Wi-Fi의 다른 ROS 2 participant를 발견하지
-않는다. 입력과 출력은 다음과 같다.
+않는다. LiDAR include의 `params_file`은 별도 scope에 격리되므로 위에 전달한
+Gamepad profile이 controller와 teleop에 그대로 적용된다. 입력과 출력은 다음과 같다.
 
 | Gamepad 입력 | 변환 | 범위 |
 | --- | --- | --- |

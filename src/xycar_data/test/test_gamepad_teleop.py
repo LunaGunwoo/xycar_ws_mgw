@@ -1,10 +1,15 @@
 # Copyright 2026 Gunwoo Moon
 # Licensed under the Apache License, Version 2.0
 
+import importlib.util
 import math
 from pathlib import Path
 from types import SimpleNamespace
 
+import ament_index_python.packages
+from launch import LaunchDescription, LaunchService
+from launch.actions import SetLaunchConfiguration
+from launch_ros.actions import Node
 import numpy as np
 import pytest
 import yaml
@@ -524,3 +529,75 @@ def test_normalized_collection_templates_are_versioned_and_strict(tmp_path):
     )
     with pytest.raises(ValueError, match='steering_contract'):
         _validate_collection_profile(str(invalid))
+
+
+def test_lidar_include_keeps_teleop_params_file_scoped(monkeypatch):
+    package_root = Path(__file__).parents[1]
+    source_root = package_root.parent
+    profile = (
+        package_root
+        / 'config'
+        / 'gamepad_stateless_manual_normalized_v1.yaml'
+    )
+    lidar_params = (
+        source_root
+        / 'xycar_device'
+        / 'xycar_lidar'
+        / 'params'
+        / 'ydlidar.yaml'
+    )
+    package_shares = {
+        'xycar_data': package_root,
+        'xycar_cam': source_root / 'xycar_device' / 'xycar_cam',
+        'xycar_lidar': source_root / 'xycar_device' / 'xycar_lidar',
+    }
+
+    monkeypatch.setattr(
+        ament_index_python.packages,
+        'get_package_share_directory',
+        lambda name: str(package_shares[name]),
+    )
+    launch_path = package_root / 'launch' / 'gamepad_teleop.launch.py'
+    spec = importlib.util.spec_from_file_location(
+        'gamepad_teleop_launch_scope_test',
+        launch_path,
+    )
+    assert spec is not None and spec.loader is not None
+    launch_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launch_module)
+    monkeypatch.setattr(
+        launch_module,
+        'get_package_share_directory',
+        lambda name: str(package_shares[name]),
+    )
+
+    expanded_parameter_files = {}
+
+    def inspect_node_without_starting_process(node, context):
+        node._perform_substitutions(context)
+        expanded_parameter_files[node.node_executable] = [
+            path
+            for path, is_file in node._Node__expanded_parameter_arguments
+            if is_file
+        ]
+        return None
+
+    monkeypatch.setattr(Node, 'execute', inspect_node_without_starting_process)
+    root_description = LaunchDescription(
+        [
+            SetLaunchConfiguration('params_file', str(profile)),
+            SetLaunchConfiguration('use_camera', 'false'),
+            SetLaunchConfiguration('use_lidar', 'true'),
+            launch_module.generate_launch_description(),
+        ]
+    )
+    launch_service = LaunchService()
+    launch_service.include_launch_description(root_description)
+
+    assert launch_service.run() == 0
+    assert expanded_parameter_files['xycar_lidar_node'][0] == str(
+        lidar_params
+    )
+    for executable in ('game_controller_node', 'gamepad_teleop'):
+        assert expanded_parameter_files[executable][0] == str(profile)
+        assert str(lidar_params) not in expanded_parameter_files[executable]

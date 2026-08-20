@@ -7,6 +7,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    GroupAction,
     IncludeLaunchDescription,
     SetEnvironmentVariable,
 )
@@ -72,21 +73,26 @@ def generate_launch_description():
                 ),
                 condition=IfCondition(use_camera),
             ),
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    os.path.join(
-                        lidar_share,
-                        'launch',
-                        'xycar_lidar.launch.py',
+            GroupAction(
+                actions=[
+                    IncludeLaunchDescription(
+                        PythonLaunchDescriptionSource(
+                            os.path.join(
+                                lidar_share,
+                                'launch',
+                                'xycar_lidar.launch.py',
+                            )
+                        ),
                     )
-                ),
-                launch_arguments={
+                ],
+                scoped=True,
+                launch_configurations={
                     'params_file': os.path.join(
                         lidar_share,
                         'params',
                         'ydlidar.yaml',
                     )
-                }.items(),
+                },
                 condition=IfCondition(use_lidar),
             ),
             Node(
