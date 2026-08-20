@@ -82,6 +82,7 @@ profile은 수정하지 않고 rollback/reference로 보존한다.
 ```text
 ~/.config/xycar/gamepad_stateless_manual_normalized_v2.yaml
 ~/.config/xycar/guided_stateless_collection_normalized_v2.yaml
+~/.config/xycar/guided_policy_collection_normalized_v2.yaml
 ~/.config/xycar/competition_mission_collection_normalized_v2.yaml
 ```
 
@@ -128,8 +129,8 @@ cd /home/xytron/xycar_ws_mgw
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch xycar_ai_drive jetson_guided_collection.launch.py \
-  params_file:=/home/xytron/.config/xycar/guided_stateless_collection_normalized_v2.yaml \
-  artifact_id:=<normalized-schema-v1-stateless-artifact-id> \
+  params_file:=/home/xytron/.config/xycar/guided_policy_collection_normalized_v2.yaml \
+  artifact_id:=<normalized-policy-artifact-id> \
   curriculum_generation:=1 speed_cap:=30.0 \
   use_camera:=true use_gamepad:=true allow_motion:=true
 ```

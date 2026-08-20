@@ -42,7 +42,7 @@ guided_policy_collector:
     inference_rpc_timeout_sec: 0.20
     torch_num_threads: 8
     warmup_count: 3
-    recording_root_dir: /home/xytron/xycar_data/teleop
+    recording_root_dir: /home/xytron/xycar_data/teleop_15
     tail_discard_frames: 10
     recording_image_format: jpeg
     recording_jpeg_quality: 95

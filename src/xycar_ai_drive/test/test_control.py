@@ -529,7 +529,7 @@ def test_x_discards_guided_session_before_forcing_drive_off():
     ]
 
 
-def test_stateless_external_collection_templates_and_launch_contract():
+def test_external_collection_templates_and_launch_contract():
     package_root = Path(__file__).parents[1]
     profile_paths = (
         package_root
@@ -555,6 +555,7 @@ def test_stateless_external_collection_templates_and_launch_contract():
         for path in profile_paths
     ]
     profile = profiles[0]
+    ar_profile = profiles[1]
     launch_text = (
         package_root / 'launch' / 'jetson_guided_collection.launch.py'
     ).read_text(encoding='utf-8')
@@ -568,6 +569,7 @@ def test_stateless_external_collection_templates_and_launch_contract():
     ).read_text(encoding='utf-8')
 
     assert profile['recording_root_dir'].endswith('/stateless_guided')
+    assert ar_profile['recording_root_dir'].endswith('/teleop_15')
     assert profile['speed_cap'] == 30.0
     assert "DeclareLaunchArgument('speed_cap', default_value='30.0')" in (
         generic_launch_text
@@ -587,6 +589,7 @@ def test_stateless_external_collection_templates_and_launch_contract():
     assert profile['recording_image_format'] == 'jpeg'
     assert profile['recording_jpeg_quality'] == 95
     assert "['params_file:=', params_file]" in launch_text
+    assert 'guided_policy_collection_normalized_v2.yaml' in launch_text
     assert 'OpaqueFunction(function=_require_params_file)' in launch_text
     assert 'validate_collection_profile(str(configured))' in launch_text
     assert launch_text.index('OpaqueFunction(function=_require_params_file)') < (

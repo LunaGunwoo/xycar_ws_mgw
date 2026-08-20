@@ -59,6 +59,12 @@ if [ ! -e "${profile_dir}/guided_stateless_collection_normalized_v2.yaml" ] \
         "${repo_root}/src/xycar_ai_drive/config/guided_stateless_collection_normalized_v2.yaml" \
         "${profile_dir}/guided_stateless_collection_normalized_v2.yaml"
 fi
+if [ ! -e "${profile_dir}/guided_policy_collection_normalized_v2.yaml" ] \
+    && [ ! -L "${profile_dir}/guided_policy_collection_normalized_v2.yaml" ]; then
+    install -m 0644 \
+        "${repo_root}/src/xycar_ai_drive/config/guided_policy_collection_normalized_v2.yaml" \
+        "${profile_dir}/guided_policy_collection_normalized_v2.yaml"
+fi
 if [ ! -e "${profile_dir}/competition_mission_collection_normalized_v2.yaml" ] \
     && [ ! -L "${profile_dir}/competition_mission_collection_normalized_v2.yaml" ]; then
     install -m 0644 \

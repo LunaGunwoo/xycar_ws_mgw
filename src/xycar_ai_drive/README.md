@@ -210,12 +210,13 @@ RT/LT `+2/-5`를 적용하면 첫 round의 실행 범위는 10~17이지만 30까
 `speed_cap`은 해당 라운드에서
 사람과 모델이 합성한 전진 명령의 상한이다. 두 값은 launch 인자로 지정한다.
 외부 base profile
-`/home/xytron/.config/xycar/guided_stateless_collection_normalized_v2.yaml`에는
+`/home/xytron/.config/xycar/guided_policy_collection_normalized_v2.yaml`에는
 `max_steering_angle`, `steering_takeover_button`, trigger 증감, deadzone, 버튼, timeout과
-기본 저장 root를 둔다. 실제 수집은 이 파일을 collection ID별 외부 profile로
-복사하면서 `recording_root_dir`만
-`/home/xytron/xycar_data/stateless_guided/generation_<N>/<collection-id>`로 바꿔
-사용한다. 같은 generation이라도 새 수집 묶음이면 새 collection ID를 쓴다.
+AR4용 기본 저장 root `/home/xytron/xycar_data/teleop_15`를 둔다. session 순서와
+`initial_history_token_ids`, frame별 실제 실행 angle/speed가 함께 저장되므로 학습 시
+네 개의 실행 명령 history를 복원할 수 있다. 기존
+`guided_stateless_collection_normalized_v2.yaml`과 `stateless_guided` root는
+stateless curriculum rollback/reference로만 보존한다.
 session metadata는
 profile 경로·SHA-256과 최종 적용된 보정, inference, recording, 안전 parameter를
 기록한다. 수집 이미지는 30 Hz camera보다 충분한 writer 처리량을 확보하도록 기본
@@ -248,7 +249,7 @@ test -f "${PROFILE}"
 grep -Fqx '    steering_takeover_button: 10' "${PROFILE}"
 ros2 launch xycar_ai_drive jetson_guided_collection.launch.py \
   params_file:="${PROFILE}" \
-  artifact_id:=<schema-v1-stateless-artifact-id> \
+  artifact_id:=<versioned-policy-artifact-id> \
   curriculum_generation:="${GENERATION}" speed_cap:=30.0 \
   use_camera:=true use_gamepad:=true allow_motion:=true
 ```
@@ -266,7 +267,7 @@ CUDA container 없이 host CPU inference를 점검할 때의 일반 launch는 �
 ```bash
 ros2 launch xycar_ai_drive guided_policy_collection.launch.py \
   params_file:="${PROFILE}" \
-  artifact_id:=<schema-v1-stateless-artifact-id> \
+  artifact_id:=<versioned-policy-artifact-id> \
   curriculum_generation:="${GENERATION}" speed_cap:=30.0 allow_motion:=false \
   inference_backend:=local inference_device:=cpu
 ```

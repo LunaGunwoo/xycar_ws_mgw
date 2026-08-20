@@ -32,13 +32,13 @@ def generate_launch_description():
                 'params_file',
                 default_value=(
                     '/home/xytron/.config/xycar/'
-                    'guided_stateless_collection_normalized_v2.yaml'
+                    'guided_policy_collection_normalized_v2.yaml'
                 ),
                 description='External guided collection parameter YAML.',
             ),
             DeclareLaunchArgument(
                 'artifact_id',
-                description='Schema v1 stateless artifact ID.',
+                description='Versioned policy artifact ID.',
             ),
             DeclareLaunchArgument(
                 'artifact_root',
