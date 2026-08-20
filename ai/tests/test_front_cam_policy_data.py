@@ -75,6 +75,8 @@ def test_sequence_dataset_carries_one_session_augmentation_across_chunks(
     assert first["session_id"] == names[0]
     assert first["sequence_reversed"] is True
     assert first["angle"].tolist() == [-20, -10]
+    assert first["angle_raw"].tolist() == pytest.approx([-20.0, -10.0])
+    assert first["speed_raw"].tolist() == pytest.approx([25.0, 25.0])
     assert first["horizontal_flipped"].tolist() == [True, True]
     assert first["valid_mask"].tolist() == [True, True]
     assert first["starts_session"] is True
@@ -83,6 +85,7 @@ def test_sequence_dataset_carries_one_session_augmentation_across_chunks(
     final = dataset[1]
     assert final["session_id"] == names[0]
     assert final["angle"].tolist() == [0, 0]
+    assert final["angle_raw"].tolist() == pytest.approx([0.0, 0.0])
     assert final["horizontal_flipped"].tolist() == [True, True]
     assert final["valid_mask"].tolist() == [True, False]
     assert final["starts_session"] is False

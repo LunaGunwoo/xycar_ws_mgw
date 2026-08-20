@@ -1068,6 +1068,12 @@ class FrontCamPolicySequenceDataset(Dataset):
         items.extend([items[-1]] * (self.sequence_length - valid_length))
         return {
             "image_tensor": torch.stack([item["image_tensor"] for item in items]),
+            "angle_raw": torch.tensor(
+                [item["angle_raw"] for item in items], dtype=torch.float32
+            ),
+            "speed_raw": torch.tensor(
+                [item["speed_raw"] for item in items], dtype=torch.float32
+            ),
             "angle": torch.tensor([item["angle"] for item in items]),
             "speed": torch.tensor([item["speed"] for item in items]),
             "angle_class_id": torch.tensor(
