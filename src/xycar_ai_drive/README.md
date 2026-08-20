@@ -30,8 +30,9 @@ adapter가 `×0.5`로 변환한 driver command `-50..50`만
   추론 실패 또는 성공한 추론 사이가 0.25초 이상 벌어지면 초기 history로 reset한다.
 - A hold로 ON이 되는 순간에도 AR history와 저장된 예측을 reset한다. reset 뒤
   새 camera frame의 첫 예측이 완료될 때까지 motor output은 `[0, 0]`을 유지한다.
-- 새 증분 수집 기본은 schema v1 stateless artifact다. AR schema v2/v3 경로는
-  rollback 호환성을 유지하고 schema v5는 ARTrackV2-inspired AR4 실차 평가에 쓴다.
+- 새 stateless 증분 수집 기본은 schema v1 artifact다. 이 수집 curriculum은
+  nice_adaptive 기본 주행 정책과 별도다. AR schema v2/v3 경로와 schema v5 분류형은
+  rollback 호환성만 유지하고, nice_adaptive 일반 주행은 schema v6 회귀형을 쓴다.
 - schema v1/v2/v3 angle은 `angle_class_id - 100`이다. speed는
   `max(0, speed_class_id - 100)`이므로 reverse는 금지하지만 양수 예측에는 별도
   cap을 적용하지 않아 label 계약의 최대 `100`까지 전달한다. schema v5 angle은
@@ -411,8 +412,8 @@ cd /home/xytron/xycar_ws_mgw
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch xycar_ai_drive jetson_gpu_policy.launch.py \
-  artifact_id:=<schema-v1-stateless-artifact-id> \
-  speed_cap:=30.0 \
+  artifact_id:=front-cam-policy-vit-small-ar4-v2-nice-adaptive-joint-regression-sequence-init25-window5-20260821 \
+  speed_cap:=25.0 \
   use_camera:=true use_gamepad:=true allow_motion:=true
 ```
 
@@ -424,10 +425,13 @@ container도 함께 정리한다. 이미 camera나 gamepad publisher가 있으�
 `use_camera:=false` 또는 `use_gamepad:=false`를 지정한다. 기존 `xycar-ai-gpu`
 wrapper와 `ARTIFACT_ID=<id>` 방식도 호환을 위해 계속 지원한다.
 
-nice_adaptive 분류/회귀 A/B에서는 다른 조건을 같게 만들기 위해 두 artifact 모두
-`speed_cap:=25.0`을 명시한다. cap은 prediction debug topic이 아니라 실제 motor
-publish와 external history에 적용된다. 같은 코스를 두 번 이상 교차 순서로 실행하고
-완주, 조향 진동, 커브 복원, 속도 변화와 사람 개입 횟수를 기록한다.
+nice_adaptive 기본 정책은 2026-08-21 실차 A/B에서 채택한 schema v6 joint 회귀
+artifact
+`front-cam-policy-vit-small-ar4-v2-nice-adaptive-joint-regression-sequence-init25-window5-20260821`
+이다. angle과 speed를 모두 float scalar로 출력하고 `speed_cap:=25.0`을 명시한다.
+cap은 prediction debug topic이 아니라 실제 motor publish와 external history에
+적용된다. schema v5 분류 artifact는 삭제하지 않지만 명시적 rollback에만 사용하고,
+정상 운용에서 회귀형과 자동 교대하거나 CPU로 fallback하지 않는다.
 
 wrapper는 camera를 열기 전에 host NumPy 1.x, OpenCV와 `cv_bridge` import를
 검사한다. user site-packages의 NumPy 2.x가 ROS Humble ABI를 가리면 즉시 종료하며

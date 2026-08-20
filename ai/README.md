@@ -537,9 +537,15 @@ model·history·steering 계약의 speed 학습 설정에서 raw checkpoint를
 학습한다. 입력 speed label을 고정값으로 바꿀 때는 차량 원본이나 checksum 검증한
 raw mirror를 수정하지 않고 별도 파생 dataset과 변환 manifest를 만든다.
 
-### nice_adaptive angle+speed 연속 회귀 A/B
+### nice_adaptive angle+speed 연속 회귀 기본 정책
 
-기존 schema v5 joint 분류 artifact는 기준선으로 보존한다. 회귀 후보는 같은
+2026-08-21 실차 A/B에서 운전자가 연속 회귀형의 주행이 분류형보다 현저히 좋다고
+판정해 schema v6 joint 회귀 artifact를 기본 nice_adaptive 정책으로 승격했다. 기존
+schema v5 joint 분류 artifact와 categorical 구현은 checkpoint 초기화, 과거 실험
+재현과 명시적 rollback에만 보존한다. 새 nice_adaptive 주행 후보는 angle과 speed를
+모두 연속 회귀로 학습하며 categorical head를 배포 기본값으로 되돌리지 않는다.
+
+회귀 정책은 같은
 `nice_adaptive_data_raw` 63세션·69,107표본과 기존 시간순 49/7/7 split을 사용하고,
 train angle에만 session 경계를 넘지 않는 centered window 5 평균을 적용한다.
 validation/test angle과 모든 speed target은 원본 연속값이다. 모델 입력은 compact
@@ -564,7 +570,11 @@ round·detach하여 다음 compact history token으로 넣고, session 시작에
 
 ignored workflow config와 실행 순서는 다음과 같다. Stage 1은 기존 joint 분류
 sequence checkpoint에서 backbone과 control/query embedding만 가져오고 새 회귀
-head와 optimizer를 초기화한다. Stage 2는 Stage 1 model weight만 이어받는다.
+head와 optimizer를 초기화한다. Stage 2는 Stage 1 model weight만 이어받는다. 현재
+artifact의 Stage 1은 변경 전 patience 5로 완료됐고, 최종 Stage 2는 patience 3으로
+epoch 8에서 조기 종료되어 epoch 5 `best.pt`를 채택했다. 후속 동일 계열 학습은
+최대 20 epochs, patience 3을 기본으로 하며 optimizer, scheduler와 early-stopping
+상태를 stage 사이에 계승하지 않는다.
 
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
@@ -586,8 +596,10 @@ uv run --locked xycar-train \
 `front-cam-policy-vit-small-ar4-v2-nice-adaptive-joint-regression-sequence-init25-window5-20260821`이다.
 schema v6는 `history_token_ids [1,4,2]`와 float `[1,1]` 두 개를 사용하며 eager,
 trace, reload, 범위 및 checksum을 모두 확인한다. 기존 schema v1/v2/v3/v5는 그대로
-지원한다. offline 지표가 기준선보다 나빠도 NaN/shape/checksum/runtime 검증을
-통과하면 실제 A/B 후보로 보존하며, 실차 비교에서는 두 artifact 모두
+지원하되 기본 artifact 선택에는 사용하지 않는다. 이 실험에서는 분류형의 offline
+전체 MAE가 더 낮았지만 실차 주행 품질은 회귀형이 더 좋았으므로 offline MAE만으로
+회귀 정책을 강등하지 않는다. 후속 승격은 checksum/runtime 검증과 실차 주행 판단을
+함께 기록한다. 기본 실차 명령은 항상 위 schema v6 artifact와
 `speed_cap:=25.0`을 명시한다.
 
 ### 기존 AR control token 재현 (rollback 전용)
