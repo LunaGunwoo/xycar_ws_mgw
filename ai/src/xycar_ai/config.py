@@ -121,6 +121,7 @@ class TrainingConfig:
     history_training_source: str = "runtime_default"
     sequence_length: int = 0
     sequence_reverse_probability: float = 0.0
+    sequence_rollout_fixed_speed: int | None = None
 
 
 @dataclass(frozen=True)
@@ -255,6 +256,7 @@ def load_train_config(path: str | Path) -> TrainConfig:
             "history_training_source",
             "sequence_length",
             "sequence_reverse_probability",
+            "sequence_rollout_fixed_speed",
         },
     )
     _expect_keys(
@@ -320,9 +322,7 @@ def load_train_config(path: str | Path) -> TrainConfig:
             root=(
                 None
                 if schema_version == 3
-                else _resolve_project_path(
-                    project_root, _string(data_payload, "root")
-                )
+                else _resolve_project_path(project_root, _string(data_payload, "root"))
             ),
             split_manifest=_resolve_project_path(
                 project_root, _string(data_payload, "split_manifest")
@@ -495,6 +495,11 @@ def load_train_config(path: str | Path) -> TrainConfig:
                 if "sequence_reverse_probability" in training_payload
                 else 0.0
             ),
+            sequence_rollout_fixed_speed=(
+                _integer(training_payload, "sequence_rollout_fixed_speed")
+                if "sequence_rollout_fixed_speed" in training_payload
+                else None
+            ),
         ),
         loss=LossConfig(
             angle_label_smoothing=_number(loss_payload, "angle_label_smoothing"),
@@ -552,14 +557,10 @@ def _validate(config: TrainConfig) -> None:
     else:
         if config.model.history_frames != 4:
             raise ValueError("ar_control_tokens model.history_frames must be 4")
-        if (
-            config.model.control_encoding == LEGACY_CONTROL_ENCODING
-            and (
-                config.model.history_initial_angle,
-                config.model.history_initial_speed,
-            )
-            != (0, 25)
-        ):
+        if config.model.control_encoding == LEGACY_CONTROL_ENCODING and (
+            config.model.history_initial_angle,
+            config.model.history_initial_speed,
+        ) != (0, 25):
             raise ValueError(
                 "ar_control_tokens initial history command must be (0, 25)"
             )
@@ -567,16 +568,12 @@ def _validate(config: TrainConfig) -> None:
             config.model.control_encoding == COMPACT_CONTROL_ENCODING
             and config.model.history_update != "externally_executed_commands"
         ):
-            raise ValueError(
-                "compact AR control requires externally executed history"
-            )
+            raise ValueError("compact AR control requires externally executed history")
         if (
             config.model.control_encoding == COMPACT_CONTROL_ENCODING
             and not 0 <= config.model.history_initial_speed <= 30
         ):
-            raise ValueError(
-                "compact AR initial history speed must be in [0, 30]"
-            )
+            raise ValueError("compact AR initial history speed must be in [0, 30]")
     if config.data.num_workers < 0:
         raise ValueError("data.num_workers must be >= 0")
     if config.data.sources:
@@ -607,9 +604,7 @@ def _validate(config: TrainConfig) -> None:
                     f"data.sources.{source.source_id}.fixed_generation cannot "
                     "exceed current_generation"
                 )
-        sources_by_id = {
-            source.source_id: source for source in config.data.sources
-        }
+        sources_by_id = {source.source_id: source for source in config.data.sources}
         if set(sources_by_id) != {"manual", "guided"}:
             raise ValueError(
                 "multi-source stateless data requires manual and guided sources"
@@ -657,9 +652,7 @@ def _validate(config: TrainConfig) -> None:
             config.data.manual_anchor_split_manifest is not None
             or config.data.current_generation_session_counts
         ):
-            raise ValueError(
-                "manual anchor fields require data.source_sampling_masses"
-            )
+            raise ValueError("manual anchor fields require data.source_sampling_masses")
         if (
             config.model.name != STATELESS_EMA_MODEL
             or config.model.architecture != "task_tokens"
@@ -685,9 +678,7 @@ def _validate(config: TrainConfig) -> None:
             or config.data.manual_anchor_split_manifest is not None
             or config.data.current_generation_session_counts
         ):
-            raise ValueError(
-                "source anchor fields require multi-source data.sources"
-            )
+            raise ValueError("source anchor fields require multi-source data.sources")
         if config.data.root is None:
             raise ValueError("single-source data.root is required")
         if bool(config.data.control_mode) == bool(config.data.control_modes):
@@ -732,9 +723,7 @@ def _validate(config: TrainConfig) -> None:
     if optimizer.weight_decay < 0:
         raise ValueError("optimizer.weight_decay must be >= 0")
     if optimizer.backbone_learning_rate_multiplier <= 0:
-        raise ValueError(
-            "optimizer.backbone_learning_rate_multiplier must be > 0"
-        )
+        raise ValueError("optimizer.backbone_learning_rate_multiplier must be > 0")
     scheduler = config.scheduler
     if scheduler.name != "cosine":
         raise ValueError("scheduler.name must be cosine")
@@ -754,9 +743,7 @@ def _validate(config: TrainConfig) -> None:
         not math.isfinite(training.validation_speed_mae_weight)
         or training.validation_speed_mae_weight < 0
     ):
-        raise ValueError(
-            "training.validation_speed_mae_weight must be finite and >= 0"
-        )
+        raise ValueError("training.validation_speed_mae_weight must be finite and >= 0")
     if training.sequence_length < 0:
         raise ValueError("training.sequence_length must be >= 0")
     if training.history_training_source not in HISTORY_TRAINING_SOURCES:
@@ -785,26 +772,18 @@ def _validate(config: TrainConfig) -> None:
             )
     if training.history_training_source == "teacher_forced_executed_commands":
         if config.model.architecture != "ar_control_tokens":
-            raise ValueError(
-                "teacher-forced history requires ar_control_tokens"
-            )
+            raise ValueError("teacher-forced history requires ar_control_tokens")
         if config.model.history_update != "externally_executed_commands":
             raise ValueError(
                 "teacher-forced history requires externally executed history"
             )
         if training.sequence_length:
-            raise ValueError(
-                "teacher-forced history is a frame-level warm-up mode"
-            )
+            raise ValueError("teacher-forced history is a frame-level warm-up mode")
     if not 0 <= training.sequence_reverse_probability <= 1:
-        raise ValueError(
-            "training.sequence_reverse_probability must be in [0, 1]"
-        )
+        raise ValueError("training.sequence_reverse_probability must be in [0, 1]")
     if training.sequence_length:
         if config.model.architecture != "ar_control_tokens":
-            raise ValueError(
-                "sequence rollout training requires ar_control_tokens"
-            )
+            raise ValueError("sequence rollout training requires ar_control_tokens")
         if config.model.history_update != "externally_executed_commands":
             raise ValueError(
                 "sequence rollout artifacts require externally executed history"
@@ -821,9 +800,7 @@ def _validate(config: TrainConfig) -> None:
                 "training.sequence_length must exceed model.history_frames"
             )
         if training.batch_size < training.sequence_length:
-            raise ValueError(
-                "training.batch_size must be at least sequence_length"
-            )
+            raise ValueError("training.batch_size must be at least sequence_length")
         if config.data.ema_sampling and (
             config.data.sources
             or config.data.current_generation != config.data.legacy_generation
@@ -834,9 +811,27 @@ def _validate(config: TrainConfig) -> None:
                 "EMA sampling"
             )
     elif training.sequence_reverse_probability:
-        raise ValueError(
-            "sequence_reverse_probability requires sequence_length"
+        raise ValueError("sequence_reverse_probability requires sequence_length")
+    if training.sequence_rollout_fixed_speed is not None:
+        if not training.sequence_length:
+            raise ValueError(
+                "training.sequence_rollout_fixed_speed requires sequence_length"
+            )
+        if training.history_training_source != "canonical_initial_command":
+            raise ValueError(
+                "fixed-speed sequence rollout requires canonical initial history"
+            )
+        maximum_speed = (
+            30 if config.model.control_encoding == COMPACT_CONTROL_ENCODING else 100
         )
+        if not 0 <= training.sequence_rollout_fixed_speed <= maximum_speed:
+            raise ValueError(
+                f"training.sequence_rollout_fixed_speed must be in [0, {maximum_speed}]"
+            )
+        if config.model.history_initial_speed != training.sequence_rollout_fixed_speed:
+            raise ValueError(
+                "fixed-speed sequence rollout must match model.history_initial_speed"
+            )
     if scheduler.warmup_epochs < 0 or scheduler.warmup_epochs > training.epochs:
         raise ValueError("scheduler.warmup_epochs must be in [0, training.epochs]")
     loss = config.loss
@@ -1044,9 +1039,7 @@ def _parse_source_sampling_masses(
                 "data.source_sampling_masses keys must be non-empty strings"
             )
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise TypeError(
-                f"data.source_sampling_masses.{source_id} must be numeric"
-            )
+            raise TypeError(f"data.source_sampling_masses.{source_id} must be numeric")
         masses[source_id] = float(value)
     return masses
 

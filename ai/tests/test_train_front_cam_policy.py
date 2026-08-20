@@ -72,6 +72,27 @@ def test_sequence_rollout_reuses_detached_clamped_predictions():
     assert final_history[0, -1].tolist() == [111, 100]
 
 
+def test_compact_sequence_rollout_can_fix_speed_history():
+    model = _DeterministicRolloutPolicy()
+    model.control_encoding = "driver_compact_v2"
+    images = torch.zeros((1, 2, 3, 8, 8))
+    valid_mask = torch.tensor([[True, True]])
+    initial = torch.tensor([[[50, 73]] * 4], dtype=torch.long)
+
+    prompts, final_history = rollout_predicted_histories(
+        model=model,
+        images=images,
+        valid_mask=valid_mask,
+        initial_history=initial,
+        amp_enabled=False,
+        fixed_speed=23,
+    )
+
+    assert prompts[0, 0].tolist() == [[50, 73]] * 4
+    assert prompts[0, 1, -1].tolist() == [100, 73]
+    assert final_history[0, -1].tolist() == [100, 73]
+
+
 def test_ab_configs_only_change_flip_and_run_name():
     project_root = Path(__file__).parents[1]
     candidate = yaml.safe_load(
@@ -415,9 +436,7 @@ def test_source_anchored_validation_score_uses_same_half_and_half_mass():
         metrics, sessions=sessions, config=config
     ) == pytest.approx(10.75)
     angle_only_config = copy.deepcopy(config)
-    object.__setattr__(
-        angle_only_config.training, "validation_speed_mae_weight", 0.0
-    )
+    object.__setattr__(angle_only_config.training, "validation_speed_mae_weight", 0.0)
     assert validation_selection_score(
         metrics, sessions=sessions, config=angle_only_config
     ) == pytest.approx(10.0)
@@ -733,6 +752,46 @@ def test_sequence_rollout_config_records_self_prediction_contract(tmp_path: Path
     assert history["compute_chunk_resets_history"] is False
     assert history["augmentation_scope"] == "whole_session_per_epoch"
     assert history["edge_padding"] == "masked_repeat_last_frame"
+
+
+def test_compact_fixed_speed_sequence_contract(tmp_path: Path):
+    config_path = _write_config(
+        tmp_path,
+        tmp_path / "config" / "split.yaml",
+        epochs=1,
+        autoregressive=True,
+    )
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["model"].update(
+        {
+            "history_update": "externally_executed_commands",
+            "control_encoding": "driver_compact_v2",
+            "history_initial_speed": 23,
+        }
+    )
+    payload["training"].update(
+        {
+            "history_training_source": "canonical_initial_command",
+            "batch_size": 8,
+            "sequence_length": 8,
+            "sequence_rollout_fixed_speed": 23,
+        }
+    )
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    config = load_train_config(config_path)
+    history = build_label_contract(config)["history"]
+
+    assert config.training.sequence_rollout_fixed_speed == 23
+    assert history["initial_command"] == [0, 23]
+    assert history["initial_token_ids"] == [50, 73]
+    assert history["train_source"] == (
+        "self_predicted_angle_fixed_speed_sequence_rollout"
+    )
+    assert history["train_prediction_execution"]["fixed_speed"] == 23
+    assert history["evaluation_source"] == (
+        "predicted_argmax_angle_fixed_speed_rollout"
+    )
 
 
 def test_frame_pretraining_records_unknown_non_teacher_forced_history(

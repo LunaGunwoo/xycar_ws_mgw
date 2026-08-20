@@ -575,23 +575,40 @@ def build_label_contract(config: TrainConfig) -> dict[str, object]:
                 "known_train_label_leakage": False,
             }
             if config.training.sequence_length:
+                fixed_speed = config.training.sequence_rollout_fixed_speed
+                prediction_execution: dict[str, object] = {
+                    "angle_output_class_clamp": [0, 100],
+                    "speed_output_class_clamp": [0, 30],
+                    "angle_history_token_mapping": "class_id",
+                    "speed_history_token_mapping": "class_id + 50",
+                    "gradient": "detached_before_history_update",
+                }
+                if fixed_speed is not None:
+                    prediction_execution.update(
+                        {
+                            "speed_source": "fixed_command",
+                            "fixed_speed": fixed_speed,
+                        }
+                    )
                 history_contract.update(
                     {
-                        "train_source": "self_predicted_argmax_sequence_rollout",
-                        "train_prediction_execution": {
-                            "angle_output_class_clamp": [0, 100],
-                            "speed_output_class_clamp": [0, 30],
-                            "angle_history_token_mapping": "class_id",
-                            "speed_history_token_mapping": "class_id + 50",
-                            "gradient": "detached_before_history_update",
-                        },
+                        "train_source": (
+                            "self_predicted_argmax_sequence_rollout"
+                            if fixed_speed is None
+                            else "self_predicted_angle_fixed_speed_sequence_rollout"
+                        ),
+                        "train_prediction_execution": prediction_execution,
                         "sequence_length": config.training.sequence_length,
                         "sequence_boundaries": (
                             "session_start_reset_non_overlapping_compute_chunks_"
                             "carry_predicted_history"
                         ),
                         "sequence_reverse_probability": 0.0,
-                        "evaluation_source": "predicted_argmax_rollout",
+                        "evaluation_source": (
+                            "predicted_argmax_rollout"
+                            if fixed_speed is None
+                            else "predicted_argmax_angle_fixed_speed_rollout"
+                        ),
                         "session_history_initialization": compact_initialization,
                         "compute_chunk_resets_history": False,
                         "augmentation_scope": "whole_session_per_epoch",
@@ -690,15 +707,28 @@ def build_label_contract(config: TrainConfig) -> dict[str, object]:
             ],
         }
         if config.training.sequence_length:
+            fixed_speed = config.training.sequence_rollout_fixed_speed
+            prediction_execution = {
+                "angle_class_clamp": [0, 200],
+                "speed_class_clamp": [100, 200],
+                "gradient": "detached_before_history_update",
+            }
+            if fixed_speed is not None:
+                prediction_execution.update(
+                    {
+                        "speed_source": "fixed_command",
+                        "fixed_speed": fixed_speed,
+                    }
+                )
             history_contract.update(
                 {
                     "update": "externally_executed_commands",
-                    "train_source": "self_predicted_argmax_sequence_rollout",
-                    "train_prediction_execution": {
-                        "angle_class_clamp": [0, 200],
-                        "speed_class_clamp": [100, 200],
-                        "gradient": "detached_before_history_update",
-                    },
+                    "train_source": (
+                        "self_predicted_argmax_sequence_rollout"
+                        if fixed_speed is None
+                        else "self_predicted_angle_fixed_speed_sequence_rollout"
+                    ),
+                    "train_prediction_execution": prediction_execution,
                     "sequence_length": config.training.sequence_length,
                     "sequence_boundaries": (
                         "session_start_reset_non_overlapping_compute_chunks_"
@@ -707,7 +737,11 @@ def build_label_contract(config: TrainConfig) -> dict[str, object]:
                     "sequence_reverse_probability": (
                         config.training.sequence_reverse_probability
                     ),
-                    "evaluation_source": "predicted_argmax_rollout",
+                    "evaluation_source": (
+                        "predicted_argmax_rollout"
+                        if fixed_speed is None
+                        else "predicted_argmax_angle_fixed_speed_rollout"
+                    ),
                     "session_history_initialization": ("canonical_initial_command"),
                     "compute_chunk_resets_history": False,
                     "augmentation_scope": "whole_session_per_epoch",
@@ -758,16 +792,13 @@ def build_label_contract(config: TrainConfig) -> dict[str, object]:
 def build_training_objective_contract(config: TrainConfig) -> dict[str, object]:
     speed_output_trained = config.loss.speed_loss_weight > 0
     angle_only = (
-        not speed_output_trained
-        and config.training.validation_speed_mae_weight == 0
+        not speed_output_trained and config.training.validation_speed_mae_weight == 0
     )
     return {
         "mode": "angle_only" if angle_only else "joint_angle_speed",
         "speed_output_trained": speed_output_trained,
         "speed_loss_weight": config.loss.speed_loss_weight,
-        "validation_speed_mae_weight": (
-            config.training.validation_speed_mae_weight
-        ),
+        "validation_speed_mae_weight": (config.training.validation_speed_mae_weight),
     }
 
 
@@ -1054,6 +1085,7 @@ def run_rollout_evaluation(
                 predicted_pair = predicted_executed_class_pair(
                     outputs,
                     control_encoding=config.model.control_encoding,
+                    fixed_speed=config.training.sequence_rollout_fixed_speed,
                 )
                 history = torch.cat(
                     (history[:, 1:], predicted_pair.unsqueeze(1)),
@@ -1073,17 +1105,26 @@ def predicted_executed_class_pair(
     outputs: Mapping[str, torch.Tensor],
     *,
     control_encoding: str = LEGACY_CONTROL_ENCODING,
+    fixed_speed: int | None = None,
 ) -> torch.Tensor:
     """Decode the class pair that the no-reverse runtime can publish."""
     if control_encoding == COMPACT_CONTROL_ENCODING:
         angle_class = outputs["angle_logits"].argmax(dim=1).clamp(0, 100)
-        speed_class = outputs["speed_logits"].argmax(dim=1).clamp(0, 30)
+        speed_class = (
+            outputs["speed_logits"].argmax(dim=1).clamp(0, 30)
+            if fixed_speed is None
+            else torch.full_like(angle_class, fixed_speed)
+        )
         return torch.stack(
             (angle_class, speed_class + 50),
             dim=1,
         ).detach()
     angle_class = outputs["angle_logits"].argmax(dim=1).clamp(0, 200)
-    speed_class = outputs["speed_logits"].argmax(dim=1).clamp(100, 200)
+    speed_class = (
+        outputs["speed_logits"].argmax(dim=1).clamp(100, 200)
+        if fixed_speed is None
+        else torch.full_like(angle_class, fixed_speed + 100)
+    )
     return torch.stack((angle_class, speed_class), dim=1).detach()
 
 
@@ -1094,6 +1135,7 @@ def rollout_predicted_histories(
     valid_mask: torch.Tensor,
     initial_history: torch.Tensor,
     amp_enabled: bool,
+    fixed_speed: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Collect detached self-predicted prompts for one session-local clip."""
     if images.ndim != 5:
@@ -1123,6 +1165,7 @@ def rollout_predicted_histories(
                         "control_encoding",
                         LEGACY_CONTROL_ENCODING,
                     ),
+                    fixed_speed=fixed_speed,
                 )
                 updated = torch.cat(
                     (history[:, 1:], predicted_pair.unsqueeze(1)), dim=1
@@ -1222,6 +1265,7 @@ def run_sequence_rollout_epoch(
             valid_mask=valid_mask,
             initial_history=initial_history,
             amp_enabled=amp_enabled,
+            fixed_speed=config.training.sequence_rollout_fixed_speed,
         )
         for session_id, ends, final_history in zip(
             session_ids,

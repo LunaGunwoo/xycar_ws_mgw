@@ -516,6 +516,16 @@ speed EMD를 total loss에서 제거하고, 후자는 best checkpoint와 early s
 validation angle MAE만으로 결정한다. `validation_speed_mae_weight`를 생략한 기존
 설정은 하위 호환 기본값 `0.25`를 사용한다.
 
+고정 속도 angle-only sequence 학습은 위 두 값을 `0.0`으로 설정하고
+`model.history_initial_speed`와 `training.sequence_rollout_fixed_speed`를 같은 속도로
+지정한다. 이때 session 시작 history뿐 아니라 train/validation self-rollout에서 다음
+frame으로 전달하는 speed token도 해당 속도로 고정된다. angle token만 model argmax를
+clamp·detach해 전달하므로, 학습되지 않은 speed head가 조향 history를 오염시키지 않는다.
+이 옵션은 `training.sequence_length`와
+`training.history_training_source: canonical_initial_command`가 필요하다. compact v2의
+허용 속도는 `0..30`이며 초기 속도와 rollout 고정 속도가 다르면 config validation이
+실패한다.
+
 Angle-only checkpoint의 `training_objective.speed_output_trained`는 `false`이며 raw
 speed head 출력은 추론이나 배포에 사용하면 안 된다. 다만 exporter는 compact AR,
 zero speed weights, 전체 dataset의 단일 speed와 canonical history speed가 모두
