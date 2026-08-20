@@ -15,6 +15,7 @@ from xycar_ai.front_cam_policy_data import PolicySample, PolicySession
 from xycar_ai.train_front_cam_policy import (
     build_label_contract,
     build_preprocessing_contract,
+    build_training_objective_contract,
     class_weights,
     early_stopping_triggered,
     initialize_model_weights,
@@ -148,6 +149,7 @@ def test_small_config_uses_minimum_speed_and_flip():
     assert config.data.min_forward_speed == 20.0
     assert config.augmentation.horizontal_flip_probability == 0.5
     assert config.training.batch_size == 128
+    assert config.training.validation_speed_mae_weight == 0.25
     assert config.output.run_name == "vit_small_hflip_p05_seed20260810"
     assert config.preprocessing.road_warp_config is None
     assert config.data.train_angle_mean_window == 1
@@ -412,6 +414,13 @@ def test_source_anchored_validation_score_uses_same_half_and_half_mass():
     assert validation_selection_score(
         metrics, sessions=sessions, config=config
     ) == pytest.approx(10.75)
+    angle_only_config = copy.deepcopy(config)
+    object.__setattr__(
+        angle_only_config.training, "validation_speed_mae_weight", 0.0
+    )
+    assert validation_selection_score(
+        metrics, sessions=sessions, config=angle_only_config
+    ) == pytest.approx(10.0)
     assert (
         source_weighted_metric(
             metrics,
@@ -781,6 +790,43 @@ def test_compact_canonical_history_records_zero_angle_mean_speed_tokens(
     assert history["known_train_label_leakage"] is False
 
 
+def test_angle_only_objective_disables_speed_training_and_selection(
+    tmp_path: Path,
+):
+    config_path = _write_config(
+        tmp_path,
+        tmp_path / "config" / "split.yaml",
+        epochs=1,
+        autoregressive=True,
+    )
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["model"].update(
+        {
+            "history_update": "externally_executed_commands",
+            "control_encoding": "driver_compact_v2",
+            "history_initial_speed": 15,
+        }
+    )
+    payload["training"].update(
+        {
+            "history_training_source": "canonical_initial_command",
+            "validation_speed_mae_weight": 0.0,
+        }
+    )
+    payload["loss"]["speed_loss_weight"] = 0.0
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    config = load_train_config(config_path)
+    objective = build_training_objective_contract(config)
+
+    assert objective == {
+        "mode": "angle_only",
+        "speed_output_trained": False,
+        "speed_loss_weight": 0.0,
+        "validation_speed_mae_weight": 0.0,
+    }
+
+
 @pytest.mark.parametrize("initial_speed", [-1, 31])
 def test_compact_history_rejects_speed_outside_output_range(
     tmp_path: Path,
@@ -901,6 +947,12 @@ def test_one_epoch_training_and_resume(tmp_path: Path):
     )
     assert checkpoint["split_manifest"]["dataset_snapshot"] == "synthetic"
     assert checkpoint["source"]["uv_lock_sha256"] == "unknown"
+    assert checkpoint["training_objective"] == {
+        "mode": "joint_angle_speed",
+        "speed_output_trained": True,
+        "speed_loss_weight": 0.5,
+        "validation_speed_mae_weight": 0.25,
+    }
     assert "optimizer_state" in checkpoint
     assert "scheduler_state" in checkpoint
     assert "scaler_state" in checkpoint

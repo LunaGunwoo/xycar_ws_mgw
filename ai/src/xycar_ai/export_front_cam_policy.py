@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 import os
 import re
 import shutil
@@ -69,6 +70,23 @@ class _TupleOutputARPolicy(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         outputs = self.policy(images, history_class_ids)
         return outputs["angle_logits"], outputs["speed_logits"]
+
+
+class _FixedSpeedTupleOutputARPolicy(nn.Module):
+    def __init__(self, policy: nn.Module, fixed_speed_class_id: int) -> None:
+        super().__init__()
+        self.policy = policy
+        self.fixed_speed_class_id = fixed_speed_class_id
+
+    def forward(
+        self,
+        images: torch.Tensor,
+        history_class_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        outputs = self.policy(images, history_class_ids)
+        fixed_speed_logits = torch.full_like(outputs["speed_logits"], -100.0)
+        fixed_speed_logits[:, self.fixed_speed_class_id] = 100.0
+        return outputs["angle_logits"], fixed_speed_logits
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -184,6 +202,13 @@ def export_checkpoint(
     if not isinstance(model_state, Mapping):
         raise PolicyExportError("checkpoint.model_state must be a mapping")
 
+    training_objective, fixed_speed_class_id = _training_objective_contract(
+        checkpoint=checkpoint,
+        label_contract=label_contract,
+        architecture=architecture,
+        control_encoding=control_encoding,
+    )
+
     history_frames = int(model_config.get("history_frames", 0))
     use_type_embedding = bool(model_config.get("control_token_type_embedding", False))
     if architecture == AR_CONTROL_TOKEN_ARCHITECTURE:
@@ -220,7 +245,11 @@ def export_checkpoint(
     policy.eval()
     image_sample = torch.zeros(1, 3, image_size, image_size, dtype=torch.float32)
     if architecture == AR_CONTROL_TOKEN_ARCHITECTURE:
-        wrapper = _TupleOutputARPolicy(policy).eval()
+        wrapper = (
+            _TupleOutputARPolicy(policy)
+            if fixed_speed_class_id is None
+            else _FixedSpeedTupleOutputARPolicy(policy, fixed_speed_class_id)
+        ).eval()
         if control_encoding == COMPACT_CONTROL_ENCODING:
             initial_angle, initial_speed, _ = _compact_history_initialization(
                 label_contract
@@ -248,6 +277,8 @@ def export_checkpoint(
         traced_outputs = traced(*sample_inputs)
     _validate_outputs(eager_outputs, expected_shapes=expected_shapes)
     _validate_outputs(traced_outputs, expected_shapes=expected_shapes)
+    _validate_fixed_speed_output(eager_outputs, fixed_speed_class_id)
+    _validate_fixed_speed_output(traced_outputs, fixed_speed_class_id)
     for eager, exported in zip(eager_outputs, traced_outputs, strict=True):
         if not torch.allclose(eager, exported, atol=1e-5, rtol=1e-5):
             raise PolicyExportError("TorchScript output differs from eager output")
@@ -264,6 +295,7 @@ def export_checkpoint(
         with torch.inference_mode():
             reloaded_outputs = reloaded(*sample_inputs)
         _validate_outputs(reloaded_outputs, expected_shapes=expected_shapes)
+        _validate_fixed_speed_output(reloaded_outputs, fixed_speed_class_id)
         for eager, exported in zip(eager_outputs, reloaded_outputs, strict=True):
             if not torch.allclose(eager, exported, atol=1e-5, rtol=1e-5):
                 raise PolicyExportError(
@@ -279,6 +311,8 @@ def export_checkpoint(
             architecture=architecture,
             model_config=model_config,
             promotion=promotion,
+            training_objective=training_objective,
+            fixed_speed_class_id=fixed_speed_class_id,
         )
         manifest_path = temporary_dir / MANIFEST_FILENAME
         manifest_path.write_text(
@@ -365,6 +399,7 @@ def verify_artifact(
             "artifact schema_version differs from required "
             f"{require_schema_version}"
         )
+    _validate_manifest_training_objective(manifest)
 
 
 def sha256_file(path: Path) -> str:
@@ -385,6 +420,8 @@ def _build_manifest(
     architecture: str,
     model_config: Mapping[str, Any],
     promotion: Mapping[str, object] | None,
+    training_objective: Mapping[str, object] | None,
+    fixed_speed_class_id: int | None,
 ) -> dict[str, object]:
     preprocessing = _mapping(checkpoint, "preprocessing", "checkpoint")
     label_contract = _mapping(checkpoint, "label_contract", "checkpoint")
@@ -501,9 +538,151 @@ def _build_manifest(
     }
     if history_contract is not None:
         manifest["history"] = history_contract
+    if training_objective is not None:
+        manifest["training_objective"] = dict(training_objective)
+    if fixed_speed_class_id is not None:
+        manifest["speed_output"] = {
+            "mode": "fixed_class",
+            "command": fixed_speed_class_id,
+            "class_id": fixed_speed_class_id,
+            "checkpoint_head_trained": False,
+        }
     if promotion is not None:
         manifest["promotion"] = dict(promotion)
     return manifest
+
+
+def _training_objective_contract(
+    *,
+    checkpoint: Mapping[str, Any],
+    label_contract: Mapping[str, Any],
+    architecture: str,
+    control_encoding: str,
+) -> tuple[dict[str, object] | None, int | None]:
+    raw_objective = checkpoint.get("training_objective")
+    if raw_objective is None:
+        return None, None
+    if not isinstance(raw_objective, Mapping):
+        raise PolicyExportError("checkpoint.training_objective must be a mapping")
+    mode = _string(raw_objective, "mode", "checkpoint.training_objective")
+    speed_output_trained = raw_objective.get("speed_output_trained")
+    if not isinstance(speed_output_trained, bool):
+        raise PolicyExportError(
+            "checkpoint.training_objective.speed_output_trained must be a boolean"
+        )
+    speed_loss_weight = _finite_number(
+        raw_objective,
+        "speed_loss_weight",
+        "checkpoint.training_objective",
+    )
+    validation_speed_mae_weight = _finite_number(
+        raw_objective,
+        "validation_speed_mae_weight",
+        "checkpoint.training_objective",
+    )
+    objective = {
+        "mode": mode,
+        "speed_output_trained": speed_output_trained,
+        "speed_loss_weight": speed_loss_weight,
+        "validation_speed_mae_weight": validation_speed_mae_weight,
+    }
+    if speed_output_trained:
+        return objective, None
+    if (
+        mode != "angle_only"
+        or speed_loss_weight != 0.0
+        or validation_speed_mae_weight != 0.0
+    ):
+        raise PolicyExportError(
+            "untrained speed output requires angle_only mode and zero speed weights"
+        )
+    if (
+        architecture != AR_CONTROL_TOKEN_ARCHITECTURE
+        or control_encoding != COMPACT_CONTROL_ENCODING
+    ):
+        raise PolicyExportError(
+            "angle-only export requires compact AR control encoding"
+        )
+
+    dataset_stats = _mapping(checkpoint, "dataset_stats", "checkpoint")
+    all_stats = _mapping(dataset_stats, "all", "checkpoint.dataset_stats")
+    sample_count = all_stats.get("sample_count")
+    if (
+        not isinstance(sample_count, int)
+        or isinstance(sample_count, bool)
+        or sample_count <= 0
+    ):
+        raise PolicyExportError(
+            "angle-only dataset sample_count must be a positive integer"
+        )
+    speed_range = all_stats.get("speed_range")
+    if (
+        not isinstance(speed_range, list)
+        or len(speed_range) != 2
+        or any(isinstance(value, bool) for value in speed_range)
+        or not all(isinstance(value, (int, float)) for value in speed_range)
+        or not all(math.isfinite(float(value)) for value in speed_range)
+        or float(speed_range[0]) != float(speed_range[1])
+    ):
+        raise PolicyExportError(
+            "angle-only dataset speed_range must contain one fixed speed"
+        )
+    fixed_speed = float(speed_range[0])
+    fixed_speed_class_id = round(fixed_speed)
+    if (
+        fixed_speed != fixed_speed_class_id
+        or not 0 <= fixed_speed_class_id < SPEED_OUTPUT_CLASSES
+    ):
+        raise PolicyExportError(
+            "angle-only fixed speed must map exactly to a compact speed class"
+        )
+
+    history = _mapping(label_contract, "history", "checkpoint.label_contract")
+    initial_command = history.get("initial_command")
+    if (
+        history.get("initialization") != "canonical_initial_command"
+        or not isinstance(initial_command, list)
+        or len(initial_command) != 2
+        or isinstance(initial_command[1], bool)
+        or not isinstance(initial_command[1], (int, float))
+        or float(initial_command[1]) != fixed_speed
+    ):
+        raise PolicyExportError(
+            "angle-only canonical history speed must match dataset fixed speed"
+        )
+    return objective, fixed_speed_class_id
+
+
+def _validate_manifest_training_objective(
+    manifest: Mapping[str, Any],
+) -> None:
+    objective = manifest.get("training_objective")
+    if objective is None:
+        return
+    if not isinstance(objective, Mapping):
+        raise PolicyExportError("artifact training_objective must be a mapping")
+    speed_output_trained = objective.get("speed_output_trained")
+    if not isinstance(speed_output_trained, bool):
+        raise PolicyExportError(
+            "artifact training_objective speed_output_trained must be a boolean"
+        )
+    if speed_output_trained:
+        return
+    speed_output = manifest.get("speed_output")
+    if not isinstance(speed_output, Mapping):
+        raise PolicyExportError(
+            "angle-only artifact must declare its fixed speed output"
+        )
+    class_id = speed_output.get("class_id")
+    if (
+        speed_output.get("mode") != "fixed_class"
+        or speed_output.get("checkpoint_head_trained") is not False
+        or not isinstance(class_id, int)
+        or isinstance(class_id, bool)
+        or not 0 <= class_id < SPEED_OUTPUT_CLASSES
+        or speed_output.get("command") != class_id
+    ):
+        raise PolicyExportError("angle-only artifact fixed speed contract is invalid")
 
 
 def _validated_promotion_report(
@@ -642,6 +821,19 @@ def _integer(payload: Mapping[str, Any], key: str, context: str) -> int:
     return value
 
 
+def _finite_number(
+    payload: Mapping[str, Any], key: str, context: str
+) -> float:
+    value = payload.get(key)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
+        raise PolicyExportError(f"{context}.{key} must be a finite number")
+    return float(value)
+
+
 def _validate_outputs(
     outputs: object,
     *,
@@ -664,6 +856,24 @@ def _validate_outputs(
             )
         if not torch.isfinite(output).all():
             raise PolicyExportError(f"{name} contains a non-finite value")
+
+
+def _validate_fixed_speed_output(
+    outputs: object,
+    fixed_speed_class_id: int | None,
+) -> None:
+    if fixed_speed_class_id is None:
+        return
+    if not isinstance(outputs, tuple) or len(outputs) != 2:
+        raise PolicyExportError("policy output must be a two-tensor tuple")
+    speed_logits = outputs[1]
+    if not isinstance(speed_logits, torch.Tensor):
+        raise PolicyExportError("speed_logits must be a tensor")
+    predicted = torch.argmax(speed_logits, dim=1)
+    if not torch.all(predicted == fixed_speed_class_id):
+        raise PolicyExportError(
+            "angle-only artifact did not produce its declared fixed speed"
+        )
 
 
 def _validate_artifact_id(artifact_id: str) -> None:

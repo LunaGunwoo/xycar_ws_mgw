@@ -179,6 +179,24 @@ class AutoregressiveControlTokenViTPolicy(nn.Module):
         self.control_type_embedding = (
             nn.Embedding(2, embed_dim) if self.use_control_type_embedding else None
         )
+        query_pair = (
+            [ANGLE_QUERY_TOKEN_ID, SPEED_QUERY_TOKEN_ID]
+            if self.control_encoding == COMPACT_CONTROL_ENCODING
+            else [self.num_classes, self.num_classes + 1]
+        )
+        self.register_buffer(
+            "query_token_ids",
+            torch.tensor(query_pair, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "control_type_ids",
+            torch.tensor(
+                [0, 1] * (self.history_frames + 1),
+                dtype=torch.long,
+            ),
+            persistent=False,
+        )
         if control_encoding == COMPACT_CONTROL_ENCODING:
             self.angle_output_bias = nn.Parameter(
                 torch.zeros(ANGLE_OUTPUT_CLASSES)
@@ -267,20 +285,7 @@ class AutoregressiveControlTokenViTPolicy(nn.Module):
         visual_tokens = torch.cat((cls_token, image_tokens), dim=1)
         visual_tokens = visual_tokens + backbone.pos_embed
 
-        query_pair = (
-            [ANGLE_QUERY_TOKEN_ID, SPEED_QUERY_TOKEN_ID]
-            if self.control_encoding == COMPACT_CONTROL_ENCODING
-            else [self.num_classes, self.num_classes + 1]
-        )
-        query_ids = (
-            torch.tensor(
-                query_pair,
-                dtype=torch.long,
-                device=history_class_ids.device,
-            )
-            .unsqueeze(0)
-            .expand(batch_size, -1)
-        )
+        query_ids = self.query_token_ids.unsqueeze(0).expand(batch_size, -1)
         control_ids = torch.cat(
             (history_class_ids.reshape(batch_size, -1), query_ids),
             dim=1,
@@ -288,15 +293,7 @@ class AutoregressiveControlTokenViTPolicy(nn.Module):
         control_tokens = self.control_token_embedding(control_ids)
         control_tokens = control_tokens + self.control_slot_pos_embed
         if self.control_type_embedding is not None:
-            type_ids = (
-                torch.tensor(
-                    [0, 1] * (self.history_frames + 1),
-                    dtype=torch.long,
-                    device=history_class_ids.device,
-                )
-                .unsqueeze(0)
-                .expand(batch_size, -1)
-            )
+            type_ids = self.control_type_ids.unsqueeze(0).expand(batch_size, -1)
             control_tokens = control_tokens + self.control_type_embedding(type_ids)
 
         tokens = torch.cat((visual_tokens, control_tokens), dim=1)

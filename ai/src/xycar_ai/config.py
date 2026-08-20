@@ -117,6 +117,7 @@ class TrainingConfig:
     device: str
     amp: bool
     deterministic: bool
+    validation_speed_mae_weight: float = 0.25
     history_training_source: str = "runtime_default"
     sequence_length: int = 0
     sequence_reverse_probability: float = 0.0
@@ -250,6 +251,7 @@ def load_train_config(path: str | Path) -> TrainConfig:
         "training",
         optional={
             "early_stopping_patience",
+            "validation_speed_mae_weight",
             "history_training_source",
             "sequence_length",
             "sequence_reverse_probability",
@@ -473,6 +475,11 @@ def load_train_config(path: str | Path) -> TrainConfig:
             device=_string(training_payload, "device"),
             amp=_boolean(training_payload, "amp"),
             deterministic=_boolean(training_payload, "deterministic"),
+            validation_speed_mae_weight=(
+                _number(training_payload, "validation_speed_mae_weight")
+                if "validation_speed_mae_weight" in training_payload
+                else 0.25
+            ),
             history_training_source=(
                 _string(training_payload, "history_training_source")
                 if "history_training_source" in training_payload
@@ -743,6 +750,13 @@ def _validate(config: TrainConfig) -> None:
         raise ValueError("training.batch_size must be > 0")
     if training.grad_clip < 0:
         raise ValueError("training.grad_clip must be >= 0")
+    if (
+        not math.isfinite(training.validation_speed_mae_weight)
+        or training.validation_speed_mae_weight < 0
+    ):
+        raise ValueError(
+            "training.validation_speed_mae_weight must be finite and >= 0"
+        )
     if training.sequence_length < 0:
         raise ValueError("training.sequence_length must be >= 0")
     if training.history_training_source not in HISTORY_TRAINING_SOURCES:

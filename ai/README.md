@@ -507,6 +507,26 @@ full-session rollout의 angle MAE `≤12`, within-10 `≥70%`, speed MAE `≤1`,
 baseline 개선을 요구한다. 32-frame clip별 첫 4 frame과 그중
 `|normalized angle|≥11`인 회전 시작 표본에도 angle gate를 별도로 적용한다.
 
+### Angle-only AR4 frame warm-up
+
+조향 표현을 먼저 학습하고 speed를 후속 단계에서 학습할 때는
+`loss.speed_loss_weight: 0.0`과
+`training.validation_speed_mae_weight: 0.0`을 함께 사용한다. 전자는 speed CE와
+speed EMD를 total loss에서 제거하고, 후자는 best checkpoint와 early stopping을
+validation angle MAE만으로 결정한다. `validation_speed_mae_weight`를 생략한 기존
+설정은 하위 호환 기본값 `0.25`를 사용한다.
+
+Angle-only checkpoint의 `training_objective.speed_output_trained`는 `false`이며 raw
+speed head 출력은 추론이나 배포에 사용하면 안 된다. 다만 exporter는 compact AR,
+zero speed weights, 전체 dataset의 단일 speed와 canonical history speed가 모두
+일치할 때에만 speed logits를 그 고정 class로 교체한 제한 운용 artifact를 만들 수
+있다. 이 artifact는 manifest의 `speed_output.mode: fixed_class`와
+`checkpoint_head_trained: false`로 학습된 speed와 구분한다. 이후 동일한
+model·history·steering 계약의 speed 학습 설정에서 raw checkpoint를
+`--initialize-from`으로 사용해 model weight만 가져오고 새 optimizer와 scheduler로
+학습한다. 입력 speed label을 고정값으로 바꿀 때는 차량 원본이나 checksum 검증한
+raw mirror를 수정하지 않고 별도 파생 dataset과 변환 manifest를 만든다.
+
 ### 기존 AR control token 재현 (rollback 전용)
 
 이 절은 과거 결과 재현과 rollback 검증에만 사용한다. 새 stateless dataset과
@@ -884,9 +904,10 @@ artifact ID는 덮어쓰지 않는다. stateless schema v1은 image `[1,3,224,22
 받고 기존 AR schema v2는 image와 predicted history `[1,4,2]`를 함께 받는다.
 legacy AR exporter는 같은 input shape에 실제 실행 history를 요구하는 schema v3를
 생성한다. compact AR exporter는 `history_token_ids [1,4,2]`, angle `[1,101]`, speed
-`[1,31]`과 UNKNOWN 또는 canonical `(0,25)×4` 초기화를 명시하는 schema v5를
-생성한다. v1/v2/v3 runtime 호환은
-유지한다.
+`[1,31]`과 UNKNOWN 또는 canonical `(0,dataset mean speed)×4` 초기화를 명시하는
+schema v5를 생성한다. angle-only checkpoint는 고정 speed dataset과 history 계약을
+검증한 뒤 angle logits는 보존하고 speed logits의 argmax만 고정 class로 만든다.
+v1/v2/v3 runtime 호환은 유지한다.
 
 G1 이상 run은 아래 명령에 같은 run의
 `--promotion-report artifacts/runs/front_cam_policy/<stateless-run>/promotion_gate.json`
@@ -902,11 +923,12 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
   --require-schema-version 1
 ```
 
-exporter는 checkpoint model state를 strict load하고 eager/trace/reload 결과와 두
-`[1,201]` 출력을 확인한 뒤 `model.ts`, `manifest.yaml`, `SHA256SUMS`를 atomic하게
-생성한다. manifest에는 checkpoint/source/dataset, RGB input, timm preprocessing,
-label decode, `normalized_percent_v2`, CPU thread와 warm-up 계약이 포함된다. 차량 배포와 실행 방법은
-`src/xycar_ai_drive/README.md`를 따른다.
+exporter는 checkpoint model state를 strict load하고 eager/trace/reload 결과와 schema별
+출력 shape를 확인한 뒤 `model.ts`, `manifest.yaml`, `SHA256SUMS`를 atomic하게
+생성한다. angle-only artifact는 세 단계 모두에서 선언한 fixed speed argmax도
+확인한다. manifest에는 checkpoint/source/dataset, RGB input, timm preprocessing,
+label decode, `normalized_percent_v2`, training objective, CPU thread와 warm-up 계약이
+포함된다. 차량 배포와 실행 방법은 `src/xycar_ai_drive/README.md`를 따른다.
 
 ## 대회 신호등·지름길 temporal pipeline
 

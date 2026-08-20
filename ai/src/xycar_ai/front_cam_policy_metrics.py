@@ -269,9 +269,15 @@ class ClassificationMetricAccumulator:
         return metrics
 
 
-def selection_score(metrics: dict[str, float], *, split_name: str = "val") -> float:
+def selection_score(
+    metrics: dict[str, float],
+    *,
+    split_name: str = "val",
+    speed_mae_weight: float = 0.25,
+) -> float:
     return (
-        metrics[f"{split_name}_angle_mae"] + 0.25 * metrics[f"{split_name}_speed_mae"]
+        metrics[f"{split_name}_angle_mae"]
+        + speed_mae_weight * metrics[f"{split_name}_speed_mae"]
     )
 
 

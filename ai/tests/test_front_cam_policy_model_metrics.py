@@ -79,6 +79,10 @@ def test_ar_control_token_vit_output_shapes_and_shared_projection(
     assert torch.equal(outputs["angle_logits"], expected[:, 0])
     assert torch.equal(outputs["speed_logits"], expected[:, 1])
     assert (model.control_type_embedding is not None) is use_type_embedding
+    assert model.query_token_ids.tolist() == [201, 202]
+    assert model.control_type_ids.tolist() == [0, 1] * 5
+    assert "query_token_ids" not in model.state_dict()
+    assert "control_type_ids" not in model.state_dict()
 
 
 def test_ar_control_token_vit_rejects_invalid_history():
@@ -130,6 +134,7 @@ def test_compact_ar_uses_unknown_tokens_and_unequal_shared_outputs():
     assert tuple(outputs["speed_logits"].shape) == (2, 31)
     assert torch.equal(outputs["angle_logits"], expected_angle)
     assert torch.equal(outputs["speed_logits"], expected_speed)
+    assert model.query_token_ids.tolist() == [103, 104]
     with pytest.raises(ValueError, match="invalid token id"):
         model(images[:1], torch.tensor([[[0, 49]] * 4], dtype=torch.long))
 
@@ -187,10 +192,22 @@ def test_ordinal_emd_tracks_class_distance_and_combines_losses():
     assert emd.item() == pytest.approx(14.0)
     assert total.item() == pytest.approx(6.8)
 
+    angle_only_total, angle_only_emd = combine_policy_losses(
+        angle_loss=torch.tensor(2.0),
+        speed_loss=torch.tensor(4.0),
+        angle_emd_loss=torch.tensor(10.0),
+        speed_emd_loss=torch.tensor(8.0),
+        speed_loss_weight=0.0,
+        emd_loss_weight=0.2,
+    )
+    assert angle_only_emd.item() == pytest.approx(10.0)
+    assert angle_only_total.item() == pytest.approx(4.0)
+
 
 def test_selection_score_prioritizes_angle():
     metrics = {"val_angle_mae": 4.0, "val_speed_mae": 8.0}
     assert selection_score(metrics) == pytest.approx(6.0)
+    assert selection_score(metrics, speed_mae_weight=0.0) == pytest.approx(4.0)
 
 
 def test_angle_bucket_metrics_and_horizontal_flip_rate():

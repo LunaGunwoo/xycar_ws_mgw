@@ -393,10 +393,11 @@ def test_export_ar_checkpoint_writes_v3_external_history_contract(
 
 
 @pytest.mark.parametrize(
-    ("initialization", "initial_ids", "initial_command"),
+    ("initialization", "initial_ids", "initial_command", "angle_only"),
     [
-        ("learned_unknown_tokens", [101, 102], None),
-        ("canonical_initial_command", [50, 65], [0, 15]),
+        ("learned_unknown_tokens", [101, 102], None, False),
+        ("canonical_initial_command", [50, 65], [0, 15], False),
+        ("canonical_initial_command", [50, 65], [0, 15], True),
     ],
 )
 def test_export_compact_ar_checkpoint_writes_schema_v5(
@@ -405,6 +406,7 @@ def test_export_compact_ar_checkpoint_writes_schema_v5(
     initialization: str,
     initial_ids: list[int],
     initial_command: list[int] | None,
+    angle_only: bool,
 ):
     monkeypatch.setattr(
         export_module,
@@ -444,33 +446,41 @@ def test_export_compact_ar_checkpoint_writes_schema_v5(
     }
     if initial_command is not None:
         label_contract["history"]["initial_command"] = initial_command
-    torch.save(
-        {
-            "epoch": 1,
-            "config": {
-                "model": {
-                    "name": "tiny",
-                    "image_size": 16,
-                    "architecture": "ar_control_tokens",
-                    "control_encoding": "driver_compact_v2",
-                    "history_frames": 4,
-                    "control_token_type_embedding": False,
-                },
-                "data": {
-                    "required_steering_contract": "normalized_percent_v2"
-                },
-            },
-            "model_state": model.state_dict(),
-            "preprocessing": {
-                "geometry": "full_frame_bicubic_resize",
+    checkpoint = {
+        "epoch": 1,
+        "config": {
+            "model": {
+                "name": "tiny",
                 "image_size": 16,
-                "mean": [0.5, 0.5, 0.5],
-                "std": [0.5, 0.5, 0.5],
+                "architecture": "ar_control_tokens",
+                "control_encoding": "driver_compact_v2",
+                "history_frames": 4,
+                "control_token_type_embedding": False,
             },
-            "label_contract": label_contract,
+            "data": {
+                "required_steering_contract": "normalized_percent_v2"
+            },
         },
-        checkpoint_path,
-    )
+        "model_state": model.state_dict(),
+        "preprocessing": {
+            "geometry": "full_frame_bicubic_resize",
+            "image_size": 16,
+            "mean": [0.5, 0.5, 0.5],
+            "std": [0.5, 0.5, 0.5],
+        },
+        "label_contract": label_contract,
+    }
+    if angle_only:
+        checkpoint["training_objective"] = {
+            "mode": "angle_only",
+            "speed_output_trained": False,
+            "speed_loss_weight": 0.0,
+            "validation_speed_mae_weight": 0.0,
+        }
+        checkpoint["dataset_stats"] = {
+            "all": {"sample_count": 24_675, "speed_range": [15.0, 15.0]}
+        }
+    torch.save(checkpoint, checkpoint_path)
 
     artifact = export_checkpoint(
         checkpoint_path=checkpoint_path,
@@ -488,6 +498,22 @@ def test_export_compact_ar_checkpoint_writes_schema_v5(
     assert manifest["history"]["initialization"] == initialization
     assert manifest["history"]["initial_token_ids"] == initial_ids
     assert manifest["history"]["update"] == "externally_executed_commands"
+    if angle_only:
+        assert manifest["training_objective"] == {
+            "mode": "angle_only",
+            "speed_output_trained": False,
+            "speed_loss_weight": 0.0,
+            "validation_speed_mae_weight": 0.0,
+        }
+        assert manifest["speed_output"] == {
+            "mode": "fixed_class",
+            "command": 15,
+            "class_id": 15,
+            "checkpoint_head_trained": False,
+        }
+    else:
+        assert "training_objective" not in manifest
+        assert "speed_output" not in manifest
     model_ts = torch.jit.load(str(artifact / "model.ts"), map_location="cpu")
     angle, speed = model_ts(
         torch.zeros(1, 3, 16, 16),
@@ -495,3 +521,4 @@ def test_export_compact_ar_checkpoint_writes_schema_v5(
     )
     assert tuple(angle.shape) == (1, 101)
     assert tuple(speed.shape) == (1, 31)
+    assert int(speed.argmax(dim=1).item()) == (15 if angle_only else 0)

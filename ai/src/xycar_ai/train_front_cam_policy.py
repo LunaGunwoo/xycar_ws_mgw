@@ -469,6 +469,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         "pretrained": config.model.pretrained,
         "preprocessing": preprocessing,
         "label_contract": label_contract,
+        "training_objective": build_training_objective_contract(config),
         "test_metrics": test_metrics,
     }
     write_json(run_dir / "summary.json", summary)
@@ -752,6 +753,22 @@ def build_label_contract(config: TrainConfig) -> dict[str, object]:
             )
         contract["history"] = history_contract
     return contract
+
+
+def build_training_objective_contract(config: TrainConfig) -> dict[str, object]:
+    speed_output_trained = config.loss.speed_loss_weight > 0
+    angle_only = (
+        not speed_output_trained
+        and config.training.validation_speed_mae_weight == 0
+    )
+    return {
+        "mode": "angle_only" if angle_only else "joint_angle_speed",
+        "speed_output_trained": speed_output_trained,
+        "speed_loss_weight": config.loss.speed_loss_weight,
+        "validation_speed_mae_weight": (
+            config.training.validation_speed_mae_weight
+        ),
+    }
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -1434,7 +1451,10 @@ def validation_selection_score(
     config: TrainConfig,
 ) -> float:
     if not config.data.ema_sampling:
-        return selection_score(metrics)
+        return selection_score(
+            metrics,
+            speed_mae_weight=config.training.validation_speed_mae_weight,
+        )
     if config.data.source_sampling_masses:
         samples = tuple(sample for session in sessions for sample in session.samples)
         pair_masses = source_generation_sampling_masses(
@@ -1447,7 +1467,7 @@ def validation_selection_score(
             mass
             * (
                 metrics[f"val_source_{source_id}_generation_{generation}_angle_mae"]
-                + 0.25
+                + config.training.validation_speed_mae_weight
                 * metrics[f"val_source_{source_id}_generation_{generation}_speed_mae"]
             )
             for (source_id, generation), mass in pair_masses.items()
@@ -1470,7 +1490,9 @@ def validation_selection_score(
         )
         prefix = f"val_generation_{generation}"
         weighted_score += mass * (
-            metrics[f"{prefix}_angle_mae"] + 0.25 * metrics[f"{prefix}_speed_mae"]
+            metrics[f"{prefix}_angle_mae"]
+            + config.training.validation_speed_mae_weight
+            * metrics[f"{prefix}_speed_mae"]
         )
         total_mass += mass
     return weighted_score / total_mass
@@ -1541,6 +1563,7 @@ def checkpoint_payload(
         "split_manifest": split_manifest,
         "dataset_stats": dataset_stats,
         "source": source_state,
+        "training_objective": build_training_objective_contract(config),
         "best_score": best_score,
         "best_epoch": best_epoch,
         "epochs_without_improvement": epochs_without_improvement,

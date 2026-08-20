@@ -75,6 +75,9 @@ schema v3는 같은 tensor shape를 사용하지만 history source를 실제 실
 UNKNOWN 또는 canonical `(0,dataset mean speed)×4` 초기화와 공용 numeric token
 mapping을 검증하고 실제 발행 history만 받는다. canonical 명령은 embedding
 경계에서만 내부 token ID로 encode되며 물리 명령의 초기 의미는 바뀌지 않는다.
+Angle-only schema v5 artifact는 tuple shape를 바꾸지 않고 speed logits를 검증된
+dataset 고정 class로 강제하며, manifest의 `training_objective.speed_output_trained`와
+`speed_output`에 미학습 head와 실제 고정 출력을 함께 기록한다.
 CPU thread 8개로 model을 load하고 3회 warm-up한다. artifact 생성과 배포는 개발
 Laptop의 MGW root에서 수행한다.
 
@@ -160,6 +163,17 @@ executed_speed = clamp(
   speed_cap)
 ```
 
+Angle-only checkpoint의 raw speed head는 Guided에 사용하지 않는다. 고정 speed로
+export된 artifact만 예외이며, 이 경우 `model_speed`는 학습된 head가 아니라
+manifest `speed_output.class_id`가 지정한 상수다. 현재 teleop_15 angle-only
+artifact는 이를 `15`로 고정하므로 기본 profile에서 실제 합성 범위는 LT full
+`10`, trigger 중립 `15`, RT full `17`이고 hard ceiling은 계속 `30`이다. angle
+class 자체는 driver `-50..50`이며 runtime이 normalized `-100..100`으로 복원한다.
+현재 artifact를 만든 PyTorch 2.8 TorchScript는 Jetson host의 system PyTorch 1.8과
+archive 호환이 되지 않는다. 실제 Guided에는 검증된 PyTorch 2.8 CUDA container를
+쓰는 `jetson_guided_collection.launch.py`만 사용하고 아래 host-local CPU 점검
+명령에는 이 artifact를 넣지 않는다.
+
 기본 Remote Gamepad에서는 조향 부호를 반전하고 `max_steering_angle=100`으로 전체
 조향 범위를 사용하며 `game_controller_node`의 RB `buttons[10]`을 hold takeover로
 쓴다. RB를 놓은 상태에서 들어오는 `steering_axis`는 조향에 적용하지 않는다. CSV
@@ -172,8 +186,8 @@ angle/speed는 공통 ViT backbone과 별도 출력 head를 공유하므로 한 
 새 stateless curriculum의 모든 guided round는 `speed_cap=30`을 사용한다. 이 값은
 목표 속도나 최소 속도가 아니라 합성 결과에 대한 hard ceiling이다. 세대별 실제
 속도 분포는 parent model의 speed와 YAML의 RT/LT 보정량으로 점진적으로 넓히며,
-사용자 지시 없이 cap을 30보다 낮추지 않는다. 예를 들어 speed 15 Base에 RT/LT
-`+5/-5`를 적용하면 첫 round의 실행 범위는 대체로 10~20이지만 30까지는 계속
+사용자 지시 없이 cap을 30보다 낮추지 않는다. 예를 들어 speed 15 Base에 기본
+RT/LT `+2/-5`를 적용하면 첫 round의 실행 범위는 10~17이지만 30까지는 계속
 허용된다.
 
 - Y: DRIVE ON/OFF. 시작은 OFF이며 RB와 trigger를 놓고 Y를 release 후 눌러야
