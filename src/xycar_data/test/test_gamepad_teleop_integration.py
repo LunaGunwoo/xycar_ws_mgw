@@ -130,7 +130,7 @@ def ros_harness(monkeypatch, tmp_path):
         Parameter('lidar_topic', value=LIDAR_TOPIC),
         Parameter('lidar_timeout_sec', value=0.30),
         Parameter('max_lidar_skew_sec', value=0.20),
-        Parameter('steering_contract', value='normalized_percent_v1'),
+        Parameter('steering_contract', value='normalized_percent_v2'),
         Parameter('publish_rate_hz', value=20.0),
         Parameter('joy_timeout_sec', value=0.25),
         Parameter('graph_check_period_sec', value=0.05),
@@ -144,11 +144,11 @@ def ros_harness(monkeypatch, tmp_path):
         Parameter('recording_queue_size', value=64),
         Parameter('recording_min_free_space_mb', value=0),
     ]
-    profile = tmp_path / 'gamepad_stateless_manual_normalized_v1.yaml'
+    profile = tmp_path / 'gamepad_stateless_manual_normalized_v2.yaml'
     profile.write_text(
         'gamepad_teleop:\n'
         '  ros__parameters:\n'
-        '    steering_contract: normalized_percent_v1\n',
+        '    steering_contract: normalized_percent_v2\n',
         encoding='utf-8',
     )
     overrides.append(
@@ -213,11 +213,11 @@ def signal_harness(monkeypatch, tmp_path):
     rclpy.init(args=[])
 
     root = tmp_path / 'traffic_signal_images'
-    profile = tmp_path / 'traffic_signal_collection_normalized_v1.yaml'
+    profile = tmp_path / 'traffic_signal_collection_normalized_v2.yaml'
     profile.write_text(
         'traffic_signal_collector:\n'
         '  ros__parameters:\n'
-        '    steering_contract: normalized_percent_v1\n',
+        '    steering_contract: normalized_percent_v2\n',
         encoding='utf-8',
     )
     overrides = [
@@ -226,7 +226,7 @@ def signal_harness(monkeypatch, tmp_path):
         Parameter('camera_topic', value=SIGNAL_CAMERA_TOPIC),
         Parameter('preview_topic', value=SIGNAL_PREVIEW_TOPIC),
         Parameter('collection_profile_path', value=str(profile)),
-        Parameter('steering_contract', value='normalized_percent_v1'),
+        Parameter('steering_contract', value='normalized_percent_v2'),
         Parameter('max_forward_speed', value=5.0),
         Parameter('max_reverse_speed', value=5.0),
         Parameter('publish_rate_hz', value=20.0),
@@ -477,7 +477,7 @@ def test_a_waits_for_forward_and_b_saves_all_frames_without_stopping(
     assert metadata['stop_reason'] == 'b_button'
     assert metadata['emergency_discard_count'] == 0
     assert metadata['collection_profile']['path'].endswith(
-        'gamepad_stateless_manual_normalized_v1.yaml'
+        'gamepad_stateless_manual_normalized_v2.yaml'
     )
     assert len(metadata['collection_profile']['sha256']) == 64
     assert metadata['recording']['root_dir'] == str(
@@ -487,12 +487,12 @@ def test_a_waits_for_forward_and_b_saves_all_frames_without_stopping(
     assert metadata['recording']['jpeg_quality'] == 95
     assert metadata['steering_contract'] == {
         'schema_version': 1,
-        'name': 'normalized_percent_v1',
+        'name': 'normalized_percent_v2',
         'command_min': -100.0,
         'command_max': 100.0,
-        'driver_min': -40.0,
-        'driver_max': 40.0,
-        'mapping': 'linear_scale_0.4',
+        'driver_min': -50.0,
+        'driver_max': 50.0,
+        'mapping': 'linear_scale_0.5',
         'motor_topic': MOTOR_TOPIC,
         'driver_topic': '/xycar_motor_safe',
     }

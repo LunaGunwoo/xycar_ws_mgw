@@ -552,7 +552,7 @@ def test_normalized_collection_templates_are_versioned_and_strict(tmp_path):
         (
             package_root
             / 'config'
-            / 'gamepad_stateless_manual_normalized_v1.yaml'
+            / 'gamepad_stateless_manual_normalized_v2.yaml'
         ).read_text(encoding='utf-8')
     )['gamepad_teleop']['ros__parameters']
     launch_text = (
@@ -567,7 +567,7 @@ def test_normalized_collection_templates_are_versioned_and_strict(tmp_path):
     assert config['recording_root_dir'].endswith('/stateless_manual')
     assert config['recording_image_format'] == 'jpeg'
     assert config['recording_jpeg_quality'] == 95
-    assert config['steering_contract'] == 'normalized_percent_v1'
+    assert config['steering_contract'] == 'normalized_percent_v2'
     assert "'collection_profile_path': ParameterValue(" in launch_text
     assert "default_value='/gamepad_teleop/joy'" in launch_text
     assert "remappings=[('joy', joy_topic)]" in launch_text
@@ -579,9 +579,16 @@ def test_normalized_collection_templates_are_versioned_and_strict(tmp_path):
         str(
             package_root
             / 'config'
-            / 'gamepad_stateless_manual_normalized_v1.yaml'
+            / 'gamepad_stateless_manual_normalized_v2.yaml'
         )
     )
+    retired_v1 = (
+        package_root
+        / 'config'
+        / 'gamepad_stateless_manual_normalized_v1.yaml'
+    )
+    with pytest.raises(ValueError, match='normalized_percent_v2'):
+        _validate_collection_profile(str(retired_v1))
     legacy = package_root / 'config' / 'gamepad_stateless_manual.yaml'
     with pytest.raises(ValueError, match='steering_contract'):
         _validate_collection_profile(str(legacy))
@@ -600,7 +607,7 @@ def test_traffic_signal_profile_and_launch_preserve_flat_class_contract():
     profile = (
         package_root
         / 'config'
-        / 'traffic_signal_collection_normalized_v1.yaml'
+        / 'traffic_signal_collection_normalized_v2.yaml'
     )
     config = yaml.safe_load(profile.read_text(encoding='utf-8'))[
         'traffic_signal_collector'
@@ -617,7 +624,7 @@ def test_traffic_signal_profile_and_launch_preserve_flat_class_contract():
     assert config['left_green_button'] == 0
     assert config['recording_root_dir'].endswith('/traffic_signal_images')
     assert config['recording_jpeg_quality'] == 95
-    assert config['steering_contract'] == 'normalized_percent_v1'
+    assert config['steering_contract'] == 'normalized_percent_v2'
     assert config['preview_enabled'] is False
     assert "default_value='/traffic_signal_collector/joy'" in launch_text
     assert "default_value='false'" in launch_text
@@ -635,7 +642,7 @@ def test_lidar_include_keeps_teleop_params_file_scoped(monkeypatch):
     profile = (
         package_root
         / 'config'
-        / 'gamepad_stateless_manual_normalized_v1.yaml'
+        / 'gamepad_stateless_manual_normalized_v2.yaml'
     )
     lidar_params = (
         source_root

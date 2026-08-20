@@ -5,29 +5,29 @@ from __future__ import annotations
 import math
 
 LEGACY_CONTROL_ENCODING = "legacy_command_201"
-COMPACT_CONTROL_ENCODING = "driver_compact_v1"
+COMPACT_CONTROL_ENCODING = "driver_compact_v2"
 CONTROL_ENCODINGS = {LEGACY_CONTROL_ENCODING, COMPACT_CONTROL_ENCODING}
 
-DRIVER_ANGLE_MIN = -40
-DRIVER_ANGLE_MAX = 40
-DRIVER_ANGLE_OFFSET = 40
-ANGLE_OUTPUT_CLASSES = 81
+DRIVER_ANGLE_MIN = -50
+DRIVER_ANGLE_MAX = 50
+DRIVER_ANGLE_OFFSET = 50
+ANGLE_OUTPUT_CLASSES = 101
 
 SPEED_MIN = 0
 SPEED_MAX = 30
 SPEED_OUTPUT_CLASSES = 31
 
-NUMERIC_TOKEN_MIN = -40
-NUMERIC_TOKEN_MAX = 40
-NUMERIC_TOKEN_OFFSET = 40
-NUMERIC_TOKEN_COUNT = 81
-UNKNOWN_ANGLE_TOKEN_ID = 81
-UNKNOWN_SPEED_TOKEN_ID = 82
-ANGLE_QUERY_TOKEN_ID = 83
-SPEED_QUERY_TOKEN_ID = 84
-CONTROL_TOKEN_COUNT = 85
+NUMERIC_TOKEN_MIN = -50
+NUMERIC_TOKEN_MAX = 50
+NUMERIC_TOKEN_OFFSET = 50
+NUMERIC_TOKEN_COUNT = 101
+UNKNOWN_ANGLE_TOKEN_ID = 101
+UNKNOWN_SPEED_TOKEN_ID = 102
+ANGLE_QUERY_TOKEN_ID = 103
+SPEED_QUERY_TOKEN_ID = 104
+CONTROL_TOKEN_COUNT = 105
 
-NORMALIZED_TO_DRIVER_SCALE = 0.4
+NORMALIZED_TO_DRIVER_SCALE = 0.5
 
 
 def normalized_angle_to_driver(value: float) -> int:
@@ -43,7 +43,7 @@ def normalized_angle_to_driver(value: float) -> int:
 def driver_angle_to_normalized(value: int | float) -> float:
     numeric = _finite(value, "driver angle")
     if not DRIVER_ANGLE_MIN <= numeric <= DRIVER_ANGLE_MAX:
-        raise ValueError("driver angle must be in [-40,40]")
+        raise ValueError("driver angle must be in [-50,50]")
     return numeric / NORMALIZED_TO_DRIVER_SCALE
 
 

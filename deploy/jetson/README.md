@@ -17,10 +17,10 @@ build·exec dependency closure만 Focal 안에서 source build한다.
 Focal GCC에서 필요한 `rmw/time.h`의 `<stdbool.h>` 호환 patch는 적용 전
 `images.lock.env`의 RMW commit을 검증한다.
 
-Motor image `xycar/noetic-motor:jp6.2.1-noetic-steering-v1`부터 외부
+Motor image `xycar/noetic-motor:jp6.2.1-noetic-steering-v2`부터 외부
 `/xycar_motor` angle은 normalized percent `-100..100`이고 ROS 1 watchdog이
-유효값만 `×0.4`로 변환해 내부 `/xycar_motor_safe` driver command
-`-40..40`으로 발행한다. 범위 밖 angle, malformed, NaN/Inf, stale와 시간 역행은
+유효값만 `×0.5`로 변환해 내부 `/xycar_motor_safe` driver command
+`-50..50`으로 발행한다. 범위 밖 angle, malformed, NaN/Inf, stale와 시간 역행은
 clamp하지 않고 `[0,0]`으로 닫힌다. speed는 변환하지 않는다.
 rollback은 motor image, 그 source와 일치하는 installed wrapper 및 steering artifact
 계약을 한 세트로 되돌릴 때만 허용한다. legacy artifact와 normalized adapter 또는
@@ -71,22 +71,22 @@ source하지 않고 `/home/xytron/.local/bin/motor`만 실행한다. GPU wrapper
 부분 빌드에 의존하지 않는다. motor wrapper와 lock도 같은 이유로
 `~/.local/lib/xycar-motor/`에 복사한다.
 기존 legacy profile은 그대로 보존하며 installer가 생성·수정·삭제하지 않는다.
-normalized v1 profile 세 개는 `~/.config/xycar/`에 같은 이름의 파일이 없을 때만
+normalized v2 profile 세 개는 `~/.config/xycar/`에 같은 이름의 파일이 없을 때만
 설치한다. 차량에서 튜닝한 versioned profile도 이후 재설치에서 덮어쓰지 않는다.
 
 Guided collector의 Controller 조향 takeover 계약에서는 새 versioned 외부
 profile에 `max_steering_angle: 100.0`과
-`steering_contract: normalized_percent_v1`이 반드시 있어야 한다. 기존 Guided
+`steering_contract: normalized_percent_v2`가 반드시 있어야 한다. 기존 Guided
 profile은 수정하지 않고 rollback/reference로 보존한다.
 
 ```text
-~/.config/xycar/gamepad_stateless_manual_normalized_v1.yaml
-~/.config/xycar/guided_stateless_collection_normalized_v1.yaml
-~/.config/xycar/competition_mission_collection_normalized_v1.yaml
+~/.config/xycar/gamepad_stateless_manual_normalized_v2.yaml
+~/.config/xycar/guided_stateless_collection_normalized_v2.yaml
+~/.config/xycar/competition_mission_collection_normalized_v2.yaml
 ```
 
 기존 이름의 profile은 rollback 자료다. 새 수집 node는 versioned profile의
-`steering_contract: normalized_percent_v1`이 없으면 시작을 거부한다.
+`steering_contract: normalized_percent_v2`가 없으면 시작을 거부한다.
 
 학습용 `ai/uv.lock`은 4090 Laptop CUDA 환경이므로 Jetson에서 `uv sync`하지 않는다.
 GPU image build context는 runtime package인 `src/xycar_ai_drive`로 제한하며 dataset,
@@ -128,7 +128,7 @@ cd /home/xytron/xycar_ws_mgw
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch xycar_ai_drive jetson_guided_collection.launch.py \
-  params_file:=/home/xytron/.config/xycar/guided_stateless_collection_normalized_v1.yaml \
+  params_file:=/home/xytron/.config/xycar/guided_stateless_collection_normalized_v2.yaml \
   artifact_id:=<normalized-schema-v1-stateless-artifact-id> \
   curriculum_generation:=1 speed_cap:=30.0 \
   use_camera:=true use_gamepad:=true allow_motion:=true

@@ -504,7 +504,7 @@ def build_label_contract(config: TrainConfig) -> dict[str, object]:
             else "canonical_initial_command"
         )
         contract: dict[str, object] = {
-            "schema_version": 2,
+            "schema_version": 3,
             "control_encoding": COMPACT_CONTROL_ENCODING,
             "output_keys": ["angle_logits", "speed_logits"],
             "output_shapes": {
@@ -513,12 +513,12 @@ def build_label_contract(config: TrainConfig) -> dict[str, object]:
             },
             "angle": {
                 "num_classes": ANGLE_OUTPUT_CLASSES,
-                "driver_range": [-40, 40],
+                "driver_range": [-50, 50],
                 "class_id_mapping": (
-                    "round(clamp(normalized_angle * 0.4, -40, 40)) + 40"
+                    "round(clamp(normalized_angle * 0.5, -50, 50)) + 50"
                 ),
-                "decode_driver_mapping": "class_id - 40",
-                "decode_normalized_mapping": "(class_id - 40) / 0.4",
+                "decode_driver_mapping": "class_id - 50",
+                "decode_normalized_mapping": "(class_id - 50) / 0.5",
             },
             "speed": {
                 "num_classes": SPEED_OUTPUT_CLASSES,
@@ -527,14 +527,14 @@ def build_label_contract(config: TrainConfig) -> dict[str, object]:
                 "decode_mapping": "class_id",
             },
             "shared_numeric_vocabulary": {
-                "numeric_range": [-40, 40],
-                "numeric_token_mapping": "value + 40",
-                "numeric_token_ids": [0, 80],
-                "unknown_angle_token_id": 81,
-                "unknown_speed_token_id": 82,
-                "angle_query_token_id": 83,
-                "speed_query_token_id": 84,
-                "vocabulary_size": 85,
+                "numeric_range": [-50, 50],
+                "numeric_token_mapping": "value + 50",
+                "numeric_token_ids": [0, 100],
+                "unknown_angle_token_id": 101,
+                "unknown_speed_token_id": 102,
+                "angle_query_token_id": 103,
+                "speed_query_token_id": 104,
+                "vocabulary_size": 105,
             },
             "train_angle_target": {
                 "method": "centered_mean",
@@ -547,8 +547,8 @@ def build_label_contract(config: TrainConfig) -> dict[str, object]:
             "horizontal_flip_mapping": {
                 "angle_raw": "-angle_raw",
                 "angle": "-angle",
-                "angle_class_id": "80 - angle_class_id",
-                "angle_history_token_id": "80 - token_id",
+                "angle_class_id": "100 - angle_class_id",
+                "angle_history_token_id": "100 - token_id",
                 "unknown_angle_token_id": "unchanged",
                 "speed": "unchanged",
                 "speed_class_id": "unchanged",
@@ -568,8 +568,8 @@ def build_label_contract(config: TrainConfig) -> dict[str, object]:
                     config.model.history_initial_speed,
                 ],
                 "initial_token_ids": list(compact_initial_pair),
-                "actual_angle_token_range": [0, 80],
-                "actual_speed_token_range": [40, 70],
+                "actual_angle_token_range": [0, 100],
+                "actual_speed_token_range": [50, 80],
                 "update": "externally_executed_commands",
                 "known_train_label_leakage": False,
             }
@@ -578,10 +578,10 @@ def build_label_contract(config: TrainConfig) -> dict[str, object]:
                     {
                         "train_source": "self_predicted_argmax_sequence_rollout",
                         "train_prediction_execution": {
-                            "angle_output_class_clamp": [0, 80],
+                            "angle_output_class_clamp": [0, 100],
                             "speed_output_class_clamp": [0, 30],
                             "angle_history_token_mapping": "class_id",
-                            "speed_history_token_mapping": "class_id + 40",
+                            "speed_history_token_mapping": "class_id + 50",
                             "gradient": "detached_before_history_update",
                         },
                         "sequence_length": config.training.sequence_length,
@@ -1059,10 +1059,10 @@ def predicted_executed_class_pair(
 ) -> torch.Tensor:
     """Decode the class pair that the no-reverse runtime can publish."""
     if control_encoding == COMPACT_CONTROL_ENCODING:
-        angle_class = outputs["angle_logits"].argmax(dim=1).clamp(0, 80)
+        angle_class = outputs["angle_logits"].argmax(dim=1).clamp(0, 100)
         speed_class = outputs["speed_logits"].argmax(dim=1).clamp(0, 30)
         return torch.stack(
-            (angle_class, speed_class + 40),
+            (angle_class, speed_class + 50),
             dim=1,
         ).detach()
     angle_class = outputs["angle_logits"].argmax(dim=1).clamp(0, 200)

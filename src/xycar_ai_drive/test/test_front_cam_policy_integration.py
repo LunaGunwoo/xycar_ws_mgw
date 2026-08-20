@@ -106,7 +106,7 @@ def test_only_paired_unnamed_bridge_endpoint_is_recognized():
 def test_legacy_artifact_contract_blocks_motion_enable():
     node = SimpleNamespace(_artifact_motion_contract_valid=False)
     assert FrontCamPolicyNode._unsafe_reason_locked(node, 1.0) == (
-        'artifact steering contract is not normalized_percent_v1'
+        'artifact steering contract is not normalized_percent_v2'
     )
 
 

@@ -535,7 +535,7 @@ class FrontCamPolicyNode(Node):
         if not self._artifact_motion_contract_valid:
             return (
                 'artifact steering contract is not '
-                'normalized_percent_v1'
+                'normalized_percent_v2'
             )
         if self._competitors:
             return 'competing motor publisher(s): ' + ', '.join(

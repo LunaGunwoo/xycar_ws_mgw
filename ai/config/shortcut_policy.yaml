@@ -16,7 +16,7 @@ data:
   window_step: 4
   num_workers: 4
   minimum_shortcut_sessions: 30
-  required_steering_contract: normalized_percent_v1
+  required_steering_contract: normalized_percent_v2
 
 training:
   seed: 20260815

@@ -8,11 +8,11 @@ from enum import Enum
 
 NUM_COMMAND_CLASSES = 201
 COMMAND_OFFSET = 100
-COMPACT_ANGLE_CLASSES = 81
+COMPACT_ANGLE_CLASSES = 101
 COMPACT_SPEED_CLASSES = 31
-COMPACT_ANGLE_OFFSET = 40
-COMPACT_SPEED_TOKEN_OFFSET = 40
-NORMALIZED_TO_DRIVER_SCALE = 0.4
+COMPACT_ANGLE_OFFSET = 50
+COMPACT_SPEED_TOKEN_OFFSET = 50
+NORMALIZED_TO_DRIVER_SCALE = 0.5
 
 
 @dataclass(frozen=True)
@@ -171,7 +171,7 @@ def decode_compact_output_ids(
         or not 0 <= angle_class_id < COMPACT_ANGLE_CLASSES
     ):
         raise ValueError(
-            f'angle class id must be in [0, 80]: {angle_class_id!r}'
+            f'angle class id must be in [0, 100]: {angle_class_id!r}'
         )
     if (
         isinstance(speed_class_id, bool)
@@ -189,11 +189,11 @@ def decode_compact_output_ids(
 
 
 def command_history_token_ids(command: DriveCommand) -> tuple[int, int]:
-    """Quantize an actually published normalized command for schema v4."""
+    """Quantize an actually published normalized command for schema v5."""
     if not all(math.isfinite(value) for value in (command.angle, command.speed)):
         raise ValueError('executed command must contain finite values')
     driver_angle = round(
-        max(-40.0, min(40.0, command.angle * NORMALIZED_TO_DRIVER_SCALE))
+        max(-50.0, min(50.0, command.angle * NORMALIZED_TO_DRIVER_SCALE))
     )
     speed = round(max(0.0, min(30.0, command.speed)))
     return (

@@ -8,11 +8,11 @@ class MotorCommandWatchdogTest(unittest.TestCase):
     def test_normalized_angle_mapping_and_speed_passthrough(self):
         watchdog = MotorCommandWatchdog(0.25)
         for normalized, driver in (
-            (-100.0, -40.0),
-            (-50.0, -20.0),
+            (-100.0, -50.0),
+            (-50.0, -25.0),
             (0.0, 0.0),
-            (50.0, 20.0),
-            (100.0, 40.0),
+            (50.0, 25.0),
+            (100.0, 50.0),
         ):
             self.assertTrue(watchdog.observe([normalized, 17.25], 1.0))
             self.assertEqual(watchdog.command(1.24), (driver, 17.25))
@@ -41,8 +41,8 @@ class MotorCommandWatchdogTest(unittest.TestCase):
             self.assertEqual(watchdog.command(3.0), STOP_COMMAND)
 
     def test_rejects_a_different_steering_contract(self):
-        with self.assertRaisesRegex(ValueError, 'normalized_percent_v1'):
-            MotorCommandWatchdog(0.25, driver_angle_max=50.0)
+        with self.assertRaisesRegex(ValueError, 'normalized_percent_v2'):
+            MotorCommandWatchdog(0.25, driver_angle_max=40.0)
 
 
 if __name__ == '__main__':

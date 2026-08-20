@@ -7,10 +7,13 @@ NPZ metadata로 연결한다. 게임패드 주행은 카메라나 LiDAR가 없�
 camera가 없으면 frame을 건너뛰고 LiDAR가 없으면 `lidar_valid=false`로 저장한다.
 
 새 수집의 `/xycar_motor` angle은 물리 driver 단위가 아니라 normalized percent
-`-100..100`이다. ROS 1 safety adapter가 이를 `×0.4`로 변환해
-`/xycar_motor_safe`에 driver command `-40..40`을 발행한다. CSV `angle`은 변환 전
+`-100..100`이다. ROS 1 safety adapter가 이를 `×0.5`로 변환해
+`/xycar_motor_safe`에 driver command `-50..50`을 발행한다. CSV `angle`은 변환 전
 실제 normalized publish 값이며 session metadata의
-`steering_contract.name=normalized_percent_v1`에 이 의미를 기록한다.
+`steering_contract.name=normalized_percent_v2`에 이 의미를 기록한다.
+calibration 식 기준 driver `-50/+50`의 raw servo는 `0.087810/0.912990`이고 VESC가
+최종 `0.15/0.85`로 clamp한다. 따라서 normalized 약 `-84.93/+84.73`부터 물리
+끝단에 포화되며 stick 바깥쪽 약 15%에서는 추가 조향 변화가 없다.
 
 새 수집 명령은 활성 Jetson 차량
 `xytron@xycar-gpu:/home/xytron/xycar_ws_mgw` 기준이다. 기존 `xytron@xycar`는
@@ -26,13 +29,19 @@ ssh -t xytron@xycar-gpu
 cd /home/xytron/xycar_ws_mgw
 source /opt/ros/humble/setup.bash
 git pull --ff-only
+./deploy/jetson/build_images.sh
 colcon build --symlink-install \
   --packages-select xycar_cam xycar_lidar xycar_data
+./deploy/jetson/install_runtime.sh
 source /home/xytron/xycar_ws_mgw/install/setup.bash
 export ROS_DOMAIN_ID=7
 export ROS_NAMESPACE=xycar
 export ROS_LOCALHOST_ONLY=1
 ```
+
+steering v2 최초 배포에서는 새
+`xycar/noetic-motor:jp6.2.1-noetic-steering-v2` image build가 필수다. colcon build만
+수행하면 host teleop은 갱신돼도 ROS 1 adapter는 이전 `×0.4` image에 남는다.
 
 ## Remote Gamepad Teleop
 
@@ -52,12 +61,12 @@ Gamepad camera frame은 Jetson에서 30 Hz를 지속 저장할 수 있도록 기
 
 ```bash
 ros2 launch xycar_data gamepad_teleop.launch.py \
-  params_file:=/home/xytron/.config/xycar/gamepad_stateless_manual_normalized_v1.yaml \
+  params_file:=/home/xytron/.config/xycar/gamepad_stateless_manual_normalized_v2.yaml \
   use_camera:=true \
   use_lidar:=true
 ```
 
-아래 인자 없는 명령도 normalized v1 generic profile과 기존
+아래 인자 없는 명령도 normalized v2 generic profile과 기존
 `/home/xytron/xycar_data/teleop` 저장 root를 사용한다. Generic profile은 기존
 전진 `7`/후진 `-5`를 유지하며, 아래 입력 표와 25/10 값은 위 stateless manual
 profile 기준이다.
@@ -131,8 +140,8 @@ ros2 launch xycar_data gamepad_teleop.launch.py use_lidar:=false
 
 ```bash
 ros2 run xycar_data gamepad_teleop --ros-args \
-  --params-file /home/xytron/.config/xycar/gamepad_stateless_manual_normalized_v1.yaml \
-  -p collection_profile_path:=/home/xytron/.config/xycar/gamepad_stateless_manual_normalized_v1.yaml
+  --params-file /home/xytron/.config/xycar/gamepad_stateless_manual_normalized_v2.yaml \
+  -p collection_profile_path:=/home/xytron/.config/xycar/gamepad_stateless_manual_normalized_v2.yaml
 ```
 
 기본값은 `config/gamepad_teleop.yaml`에서 바꿀 수 있다. 다른 SDL 장치를 쓸 때는
@@ -221,8 +230,8 @@ publisher로 중단되면
 ## 튜닝
 
 새 수집은 외부
-`~/.config/xycar/gamepad_stateless_manual_normalized_v1.yaml`을 조정한다.
-tracked seed는 `config/gamepad_stateless_manual_normalized_v1.yaml`이다. 계약이
+`~/.config/xycar/gamepad_stateless_manual_normalized_v2.yaml`을 조정한다.
+tracked seed는 `config/gamepad_stateless_manual_normalized_v2.yaml`이다. 계약이
 없는 기존 profile과 raw session은 legacy/reference로 보존하며 새 학습에 넣지
 않는다.
 
@@ -236,7 +245,7 @@ tracked seed는 `config/gamepad_stateless_manual_normalized_v1.yaml`이다. 계�
 YAML의 빈 topic, 잘못된 speed/steering 부호·범위, `NaN`·`Inf` 수치, 음수
 timeout, queue 크기, 이미지 형식, JPEG 품질과 PNG compression 범위 오류는 node
 시작 시 거부된다. profile이 없거나 `steering_contract`가
-`normalized_percent_v1`이 아니어도 시작을 거부한다.
+`normalized_percent_v2`가 아니어도 시작을 거부한다.
 실제 차에서는 raised-car 상태에서 왼쪽 stick 조향 부호와 후진 부호를 먼저
 확인한 뒤 값을 조정한다.
 
@@ -315,7 +324,7 @@ Joy와 camera가 이미 별도 승인된 node에서 발행 중이면 collector�
 수 있다. 이 명령도 motor publisher를 만들므로 실행 직전 별도 승인이 필요하다.
 
 ```bash
-PROFILE=/home/xytron/xycar_ws_mgw/install/xycar_data/share/xycar_data/config/traffic_signal_collection_normalized_v1.yaml
+PROFILE=/home/xytron/xycar_ws_mgw/install/xycar_data/share/xycar_data/config/traffic_signal_collection_normalized_v2.yaml
 ros2 run xycar_data traffic_signal_collector --ros-args \
   --params-file "${PROFILE}" \
   -p collection_profile_path:="${PROFILE}"
@@ -349,7 +358,7 @@ export ROS_DOMAIN_ID=7
 export ROS_NAMESPACE=xycar
 
 ros2 launch xycar_data mission_sequence_collection.launch.py \
-  params_file:=/home/xytron/.config/xycar/competition_mission_collection_normalized_v1.yaml \
+  params_file:=/home/xytron/.config/xycar/competition_mission_collection_normalized_v2.yaml \
   capture_kind:=signal
 ```
 
@@ -357,7 +366,7 @@ ros2 launch xycar_data mission_sequence_collection.launch.py \
 
 ```bash
 ros2 launch xycar_data mission_sequence_collection.launch.py \
-  params_file:=/home/xytron/.config/xycar/competition_mission_collection_normalized_v1.yaml \
+  params_file:=/home/xytron/.config/xycar/competition_mission_collection_normalized_v2.yaml \
   capture_kind:=shortcut
 ```
 
@@ -366,9 +375,9 @@ camera와 Joy가 이미 승인된 별도 node에서 발행 중일 때 collector�
 
 ```bash
 ros2 run xycar_data mission_sequence_collector --ros-args \
-  --params-file /home/xytron/.config/xycar/competition_mission_collection_normalized_v1.yaml \
+  --params-file /home/xytron/.config/xycar/competition_mission_collection_normalized_v2.yaml \
   -p capture_kind:=signal \
-  -p collection_profile_path:=/home/xytron/.config/xycar/competition_mission_collection_normalized_v1.yaml
+  -p collection_profile_path:=/home/xytron/.config/xycar/competition_mission_collection_normalized_v2.yaml
 ```
 
 - A를 놓았다가 한 번 누르면 현재 speed와 관계없이 녹화가 시작된다.
@@ -381,7 +390,7 @@ ros2 run xycar_data mission_sequence_collector --ros-args \
 `dataset_kind=competition_mission_sequence`,
 `control_mode=gamepad_mission_sequence`, `mission.capture_kind`와
 `mission.records_stationary_frames=true`를 기록한다. 수집 profile seed는
-`config/competition_mission_collection_normalized_v1.yaml`이고 Jetson runtime
+`config/competition_mission_collection_normalized_v2.yaml`이고 Jetson runtime
 설치 시 같은 이름의 외부 file이 없을 때만 복사한다.
 
 정확히 모아야 할 상태별 session 수, 각 sequence 시작/종료 지점과 라벨 검수

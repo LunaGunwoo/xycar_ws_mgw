@@ -50,8 +50,8 @@ class _TinyARPolicy(nn.Module):
         super().__init__()
         del model_name, pretrained, image_size, use_control_type_embedding
         self.history_frames = history_frames
-        compact = control_encoding == "driver_compact_v1"
-        self.angle_bias = nn.Parameter(torch.zeros(81 if compact else 201))
+        compact = control_encoding == "driver_compact_v2"
+        self.angle_bias = nn.Parameter(torch.zeros(101 if compact else 201))
         self.speed_bias = nn.Parameter(torch.ones(31 if compact else 201))
 
     def forward(
@@ -81,7 +81,7 @@ def test_export_checkpoint_writes_verified_artifact(monkeypatch, tmp_path: Path)
             "config": {
                 "model": {"name": "tiny", "image_size": 16},
                 "data": {
-                    "required_steering_contract": "normalized_percent_v1"
+                    "required_steering_contract": "normalized_percent_v2"
                 },
             },
             "model_state": model.state_dict(),
@@ -122,12 +122,12 @@ def test_export_checkpoint_writes_verified_artifact(monkeypatch, tmp_path: Path)
     assert manifest["model"]["input"]["shape"] == [1, 3, 16, 16]
     assert manifest["steering_contract"] == {
         "schema_version": 1,
-        "name": "normalized_percent_v1",
+        "name": "normalized_percent_v2",
         "command_min": -100.0,
         "command_max": 100.0,
-        "driver_min": -40.0,
-        "driver_max": 40.0,
-        "mapping": "linear_scale_0.4",
+        "driver_min": -50.0,
+        "driver_max": 50.0,
+        "mapping": "linear_scale_0.5",
     }
     model_ts = torch.jit.load(str(artifact / "model.ts"), map_location="cpu")
     angle, speed = model_ts(torch.zeros(1, 3, 16, 16))
@@ -192,7 +192,7 @@ def test_guided_export_records_advisory_promotion_status(
             "config": {
                 "model": {"name": "tiny", "image_size": 16},
                 "data": {
-                    "required_steering_contract": "normalized_percent_v1",
+                    "required_steering_contract": "normalized_percent_v2",
                     "current_generation": 1,
                 },
             },
@@ -337,7 +337,7 @@ def test_export_ar_checkpoint_writes_v3_external_history_contract(
                     "history_initial_speed": 25,
                 },
                 "data": {
-                    "required_steering_contract": "normalized_percent_v1"
+                    "required_steering_contract": "normalized_percent_v2"
                 },
             },
             "model_state": model.state_dict(),
@@ -382,7 +382,7 @@ def test_export_ar_checkpoint_writes_v3_external_history_contract(
     }
     assert manifest["history"]["initial_class_ids"] == [100, 125]
     assert manifest["history"]["update"] == "externally_executed_commands"
-    assert manifest["steering_contract"]["name"] == "normalized_percent_v1"
+    assert manifest["steering_contract"]["name"] == "normalized_percent_v2"
     model_ts = torch.jit.load(str(artifact / "model.ts"), map_location="cpu")
     angle, speed = model_ts(
         torch.zeros(1, 3, 16, 16),
@@ -395,11 +395,11 @@ def test_export_ar_checkpoint_writes_v3_external_history_contract(
 @pytest.mark.parametrize(
     ("initialization", "initial_ids", "initial_command"),
     [
-        ("learned_unknown_tokens", [81, 82], None),
-        ("canonical_initial_command", [40, 55], [0, 15]),
+        ("learned_unknown_tokens", [101, 102], None),
+        ("canonical_initial_command", [50, 65], [0, 15]),
     ],
 )
-def test_export_compact_ar_checkpoint_writes_schema_v4(
+def test_export_compact_ar_checkpoint_writes_schema_v5(
     monkeypatch,
     tmp_path: Path,
     initialization: str,
@@ -418,24 +418,24 @@ def test_export_compact_ar_checkpoint_writes_schema_v4(
         image_size=16,
         history_frames=4,
         use_control_type_embedding=False,
-        control_encoding="driver_compact_v1",
+        control_encoding="driver_compact_v2",
     )
     label_contract = {
-        "schema_version": 2,
-        "control_encoding": "driver_compact_v1",
+        "schema_version": 3,
+        "control_encoding": "driver_compact_v2",
         "output_shapes": {
-            "angle_logits": [1, 81],
+            "angle_logits": [1, 101],
             "speed_logits": [1, 31],
         },
-        "angle": {"num_classes": 81, "driver_range": [-40, 40]},
+        "angle": {"num_classes": 101, "driver_range": [-50, 50]},
         "speed": {"num_classes": 31, "command_range": [0, 30]},
         "shared_numeric_vocabulary": {
-            "numeric_range": [-40, 40],
-            "unknown_angle_token_id": 81,
-            "unknown_speed_token_id": 82,
-            "angle_query_token_id": 83,
-            "speed_query_token_id": 84,
-            "vocabulary_size": 85,
+            "numeric_range": [-50, 50],
+            "unknown_angle_token_id": 101,
+            "unknown_speed_token_id": 102,
+            "angle_query_token_id": 103,
+            "speed_query_token_id": 104,
+            "vocabulary_size": 105,
         },
         "history": {
             "initialization": initialization,
@@ -452,12 +452,12 @@ def test_export_compact_ar_checkpoint_writes_schema_v4(
                     "name": "tiny",
                     "image_size": 16,
                     "architecture": "ar_control_tokens",
-                    "control_encoding": "driver_compact_v1",
+                    "control_encoding": "driver_compact_v2",
                     "history_frames": 4,
                     "control_token_type_embedding": False,
                 },
                 "data": {
-                    "required_steering_contract": "normalized_percent_v1"
+                    "required_steering_contract": "normalized_percent_v2"
                 },
             },
             "model_state": model.state_dict(),
@@ -476,15 +476,15 @@ def test_export_compact_ar_checkpoint_writes_schema_v4(
         checkpoint_path=checkpoint_path,
         artifact_id="compact-ar-policy",
         output_root=tmp_path / "models",
-        require_schema_version=4,
+        require_schema_version=5,
     )
     manifest = yaml.safe_load((artifact / "manifest.yaml").read_text())
-    assert manifest["schema_version"] == 4
+    assert manifest["schema_version"] == 5
     assert manifest["model"]["input"]["order"] == [
         "images",
         "history_token_ids",
     ]
-    assert manifest["model"]["output"]["shapes"] == [[1, 81], [1, 31]]
+    assert manifest["model"]["output"]["shapes"] == [[1, 101], [1, 31]]
     assert manifest["history"]["initialization"] == initialization
     assert manifest["history"]["initial_token_ids"] == initial_ids
     assert manifest["history"]["update"] == "externally_executed_commands"
@@ -493,5 +493,5 @@ def test_export_compact_ar_checkpoint_writes_schema_v4(
         torch.zeros(1, 3, 16, 16),
         torch.tensor([[initial_ids] * 4], dtype=torch.long),
     )
-    assert tuple(angle.shape) == (1, 81)
+    assert tuple(angle.shape) == (1, 101)
     assert tuple(speed.shape) == (1, 31)

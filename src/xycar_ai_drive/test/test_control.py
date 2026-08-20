@@ -219,11 +219,11 @@ def test_class_decode_blocks_reverse_without_positive_speed_cap():
 
 def test_compact_decode_and_executed_history_endpoint_mapping():
     assert decode_compact_output_ids(0, 0) == DriveCommand(-100.0, 0.0)
-    assert decode_compact_output_ids(80, 30) == DriveCommand(100.0, 30.0)
-    assert command_history_token_ids(DriveCommand(-100.0, 0.0)) == (0, 40)
-    assert command_history_token_ids(DriveCommand(100.0, 30.0)) == (80, 70)
-    with pytest.raises(ValueError, match=r'\[0, 80\]'):
-        decode_compact_output_ids(81, 0)
+    assert decode_compact_output_ids(100, 30) == DriveCommand(100.0, 30.0)
+    assert command_history_token_ids(DriveCommand(-100.0, 0.0)) == (0, 50)
+    assert command_history_token_ids(DriveCommand(100.0, 30.0)) == (100, 80)
+    with pytest.raises(ValueError, match=r'\[0, 100\]'):
+        decode_compact_output_ids(101, 0)
     with pytest.raises(ValueError, match=r'\[0, 30\]'):
         decode_compact_output_ids(40, 31)
 
@@ -402,7 +402,7 @@ def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
         '  ros__parameters:\n'
         '    max_steering_angle: 100.0\n'
         '    steering_takeover_button: 10\n'
-        '    steering_contract: normalized_percent_v1\n',
+        '    steering_contract: normalized_percent_v2\n',
         encoding='utf-8',
     )
     validate_collection_profile(str(profile))
@@ -430,7 +430,7 @@ def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
         'guided_policy_collector:\n'
         '  ros__parameters:\n'
         '    speed_cap: 30.0\n'
-        '    steering_contract: normalized_percent_v1\n',
+        '    steering_contract: normalized_percent_v2\n',
         encoding='utf-8',
     )
     with pytest.raises(ValueError, match='explicitly set max_steering_angle'):
@@ -440,7 +440,7 @@ def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
         'guided_policy_collector:\n'
         '  ros__parameters:\n'
         '    max_steering_angle: 100.0\n'
-        '    steering_contract: normalized_percent_v1\n',
+        '    steering_contract: normalized_percent_v2\n',
         encoding='utf-8',
     )
     with pytest.raises(
@@ -534,13 +534,20 @@ def test_stateless_external_collection_templates_and_launch_contract():
     profile_paths = (
         package_root
         / 'config'
-        / 'guided_stateless_collection_normalized_v1.yaml',
+        / 'guided_stateless_collection_normalized_v2.yaml',
         package_root
         / 'config'
-        / 'guided_policy_collection_normalized_v1.yaml',
+        / 'guided_policy_collection_normalized_v2.yaml',
     )
     for path in profile_paths:
         validate_collection_profile(str(path))
+    retired_v1 = (
+        package_root
+        / 'config'
+        / 'guided_stateless_collection_normalized_v1.yaml'
+    )
+    with pytest.raises(ValueError, match='normalized_percent_v2'):
+        validate_collection_profile(str(retired_v1))
     profiles = [
         yaml.safe_load(path.read_text(encoding='utf-8'))[
             'guided_policy_collector'
@@ -569,7 +576,7 @@ def test_stateless_external_collection_templates_and_launch_contract():
         assert configured_profile['max_steering_angle'] == 100.0
         assert (
             configured_profile['steering_contract']
-            == 'normalized_percent_v1'
+            == 'normalized_percent_v2'
         )
         assert configured_profile['steering_takeover_button'] == 10
         assert 'residual_gain' not in configured_profile
@@ -827,11 +834,11 @@ def test_v2_artifact_history_contract_and_runtime_queue(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     ('initialization', 'initial_ids', 'initial_command'),
     [
-        ('learned_unknown_tokens', [81, 82], None),
-        ('canonical_initial_command', [40, 55], [0, 15]),
+        ('learned_unknown_tokens', [101, 102], None),
+        ('canonical_initial_command', [50, 65], [0, 15]),
     ],
 )
-def test_schema_v4_runtime_uses_compact_initial_and_external_tokens(
+def test_schema_v5_runtime_uses_compact_initial_and_external_tokens(
     tmp_path,
     initialization,
     initial_ids,
@@ -844,7 +851,7 @@ def test_schema_v4_runtime_uses_compact_initial_and_external_tokens(
             batch_size = images.shape[0]
             history_signal = history_token_ids[:, :1, :1].to(images.dtype) * 0
             angle = torch.full(
-                (batch_size, 81), -10.0, dtype=images.dtype
+                (batch_size, 101), -10.0, dtype=images.dtype
             ) + history_signal
             speed = torch.full(
                 (batch_size, 31), -10.0, dtype=images.dtype
@@ -864,13 +871,13 @@ def test_schema_v4_runtime_uses_compact_initial_and_external_tokens(
     )
     traced.save(str(artifact / 'model.ts'))
     manifest = {
-        'schema_version': 4,
+        'schema_version': 5,
         'artifact_id': artifact.name,
         'model': {
             'format': 'torchscript',
             'file': 'model.ts',
             'architecture': 'ar_control_tokens',
-            'control_encoding': 'driver_compact_v1',
+            'control_encoding': 'driver_compact_v2',
             'input': {
                 'kind': 'tuple',
                 'order': ['images', 'history_token_ids'],
@@ -887,7 +894,7 @@ def test_schema_v4_runtime_uses_compact_initial_and_external_tokens(
             'output': {
                 'kind': 'tuple',
                 'order': ['angle_logits', 'speed_logits'],
-                'shapes': [[1, 81], [1, 31]],
+                'shapes': [[1, 101], [1, 31]],
             },
         },
         'preprocessing': {
@@ -897,20 +904,20 @@ def test_schema_v4_runtime_uses_compact_initial_and_external_tokens(
             'std': [0.5, 0.5, 0.5],
         },
         'label_contract': {
-            'control_encoding': 'driver_compact_v1',
+            'control_encoding': 'driver_compact_v2',
             'output_shapes': {
-                'angle_logits': [1, 81],
+                'angle_logits': [1, 101],
                 'speed_logits': [1, 31],
             },
-            'angle': {'num_classes': 81, 'driver_range': [-40, 40]},
+            'angle': {'num_classes': 101, 'driver_range': [-50, 50]},
             'speed': {'num_classes': 31, 'command_range': [0, 30]},
             'shared_numeric_vocabulary': {
-                'numeric_range': [-40, 40],
-                'unknown_angle_token_id': 81,
-                'unknown_speed_token_id': 82,
-                'angle_query_token_id': 83,
-                'speed_query_token_id': 84,
-                'vocabulary_size': 85,
+                'numeric_range': [-50, 50],
+                'unknown_angle_token_id': 101,
+                'unknown_speed_token_id': 102,
+                'angle_query_token_id': 103,
+                'speed_query_token_id': 104,
+                'vocabulary_size': 105,
             },
         },
         'history': {
@@ -919,8 +926,8 @@ def test_schema_v4_runtime_uses_compact_initial_and_external_tokens(
             'time_order': 'oldest_to_newest',
             'initialization': initialization,
             'initial_token_ids': initial_ids,
-            'actual_angle_token_range': [0, 80],
-            'actual_speed_token_range': [40, 70],
+            'actual_angle_token_range': [0, 100],
+            'actual_speed_token_range': [50, 80],
             'update': 'externally_executed_commands',
         },
         'steering_contract': steering_contract_mapping(),
@@ -934,7 +941,7 @@ def test_schema_v4_runtime_uses_compact_initial_and_external_tokens(
     _write_checksums(artifact)
 
     contract = load_policy_artifact(artifact)
-    assert contract.output_shapes == ((1, 81), (1, 31))
+    assert contract.output_shapes == ((1, 101), (1, 31))
     assert contract.history is not None
     assert contract.history.initial_class_ids == tuple(initial_ids)
     runtime = TorchScriptPolicy(
@@ -947,11 +954,11 @@ def test_schema_v4_runtime_uses_compact_initial_and_external_tokens(
     assert prediction.command == DriveCommand(-100.0, 30.0)
     prediction = runtime.infer(
         frame,
-        [[0, 40], [20, 45], [40, 55], [80, 70]],
+        [[0, 50], [25, 55], [50, 65], [100, 80]],
     )
     assert prediction.command == DriveCommand(-100.0, 30.0)
     with pytest.raises(PolicyRuntimeError, match='executed history'):
-        runtime.infer(frame, [[81, 40]] * 4)
+        runtime.infer(frame, [[101, 50]] * 4)
 
 
 def test_road_warp_artifact_and_runtime_preprocessing(tmp_path):

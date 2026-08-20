@@ -21,7 +21,7 @@ def generate_launch_description():
     default_params = os.path.join(
         get_package_share_directory('xycar_data'),
         'config',
-        'traffic_signal_collection_normalized_v1.yaml',
+        'traffic_signal_collection_normalized_v2.yaml',
     )
     params_file = LaunchConfiguration('params_file')
     device_id = LaunchConfiguration('device_id')

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 import math
 
-STEERING_CONTRACT_NAME = "normalized_percent_v1"
+STEERING_CONTRACT_NAME = "normalized_percent_v2"
 
 
 def steering_contract_mapping() -> dict[str, object]:
@@ -14,9 +14,9 @@ def steering_contract_mapping() -> dict[str, object]:
         "name": STEERING_CONTRACT_NAME,
         "command_min": -100.0,
         "command_max": 100.0,
-        "driver_min": -40.0,
-        "driver_max": 40.0,
-        "mapping": "linear_scale_0.4",
+        "driver_min": -50.0,
+        "driver_max": 50.0,
+        "mapping": "linear_scale_0.5",
     }
 
 
@@ -31,7 +31,7 @@ def session_steering_contract_mapping() -> dict[str, object]:
 def validate_required_contract_name(value: str | None) -> None:
     if value is not None and value != STEERING_CONTRACT_NAME:
         raise ValueError(
-            "required_steering_contract must be normalized_percent_v1"
+            "required_steering_contract must be normalized_percent_v2"
         )
 
 

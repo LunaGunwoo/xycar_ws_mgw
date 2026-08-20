@@ -1,0 +1,8 @@
+schema_version: 2
+dataset_snapshot: stateless_normalized_steering_v2_g1_pending
+splits:
+  # Populate with v2 source-qualified manual/<id> and guided/<id> sessions
+  # after the v2 Base is validated and Guided generation 1 is collected.
+  train: []
+  val: []
+  test: []

@@ -251,7 +251,7 @@ def test_required_steering_contract_excludes_legacy_sessions(tmp_path: Path):
         max_forward_speed=None,
         min_forward_speed=None,
         num_workers=0,
-        required_steering_contract="normalized_percent_v1",
+        required_steering_contract="normalized_percent_v2",
     )
 
     sessions = discover_policy_sessions(config)
@@ -708,7 +708,7 @@ def test_compact_endpoints_flip_and_unknown_history_mapping(tmp_path: Path):
     samples = discover_policy_sessions(
         _data_config(data_root, tmp_path / "missing-split.yaml")
     )[0].samples
-    unknown = tuple((81, 82) for _ in range(4))
+    unknown = tuple((101, 102) for _ in range(4))
     samples = tuple(replace(sample, history_class_ids=unknown) for sample in samples)
     baseline = FrontCamPolicyDataset(
         samples,
@@ -724,9 +724,9 @@ def test_compact_endpoints_flip_and_unknown_history_mapping(tmp_path: Path):
 
     assert baseline[0]["angle_class_id"] == 0
     assert baseline[0]["speed_class_id"] == 0
-    assert baseline[1]["angle_class_id"] == 80
+    assert baseline[1]["angle_class_id"] == 100
     assert baseline[1]["speed_class_id"] == 30
-    assert flipped[0]["angle_class_id"] == 80
+    assert flipped[0]["angle_class_id"] == 100
     assert flipped[1]["angle_class_id"] == 0
     assert torch.equal(
         flipped[0]["history_token_ids"],
@@ -933,7 +933,7 @@ def test_unknown_history_never_uses_frame_labels(tmp_path: Path):
         *attached.val_samples,
         *attached.test_samples,
     ):
-        assert sample.history_class_ids == ((81, 82),) * 4
+        assert sample.history_class_ids == ((101, 102),) * 4
 
 
 def test_canonical_compact_history_uses_zero_angle_mean_speed_tokens(
@@ -957,7 +957,7 @@ def test_canonical_compact_history_uses_zero_angle_mean_speed_tokens(
     attached = attach_constant_control_history(
         build_policy_data_splits(_data_config(data_root, manifest)),
         history_frames=4,
-        pair=(40, 55),
+        pair=(50, 65),
     )
 
     for sample in (
@@ -965,7 +965,7 @@ def test_canonical_compact_history_uses_zero_angle_mean_speed_tokens(
         *attached.val_samples,
         *attached.test_samples,
     ):
-        assert sample.history_class_ids == ((40, 55),) * 4
+        assert sample.history_class_ids == ((50, 65),) * 4
 
 
 def test_compact_teacher_forcing_uses_previous_truth_after_mean_speed_padding(
@@ -1002,12 +1002,12 @@ def test_compact_teacher_forcing_uses_previous_truth_after_mean_speed_padding(
         attached.val_samples,
         attached.test_samples,
     ):
-        assert samples[0].history_class_ids == ((40, 55),) * 4
+        assert samples[0].history_class_ids == ((50, 65),) * 4
         assert samples[1].history_class_ids == (
-            (40, 55),
-            (40, 55),
-            (40, 55),
-            (24, 47),
+            (50, 65),
+            (50, 65),
+            (50, 65),
+            (30, 57),
         )
 
 

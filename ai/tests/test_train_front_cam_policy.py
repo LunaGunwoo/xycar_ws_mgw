@@ -239,10 +239,10 @@ def test_normalized_stateless_config_requires_raw_normalized_sessions(
 ):
     project_root = Path(__file__).parents[1]
     config = load_train_config(
-        project_root / "config" / "front_cam_policy_train_stateless_normalized_v1.yaml"
+        project_root / "config" / "front_cam_policy_train_stateless_normalized_v2.yaml"
     )
 
-    assert config.data.required_steering_contract == "normalized_percent_v1"
+    assert config.data.required_steering_contract == "normalized_percent_v2"
     assert config.data.train_angle_mean_window == 1
     assert config.data.current_generation == 0
     assert config.data.root == project_root / "datasets/stateless_manual"
@@ -253,15 +253,15 @@ def test_normalized_stateless_config_requires_raw_normalized_sessions(
     assert config.data.minimum_val_sessions == 2
     assert config.data.minimum_test_sessions == 2
     assert config.output.run_name == (
-        "vit_small_stateless_normalized_steering_v1_generation0"
+        "vit_small_stateless_normalized_steering_v2_generation0"
     )
 
     guided_config = load_train_config(
         project_root
         / "config"
-        / "front_cam_policy_train_stateless_normalized_v1_g1.yaml"
+        / "front_cam_policy_train_stateless_normalized_v2_g1.yaml"
     )
-    assert guided_config.data.required_steering_contract == ("normalized_percent_v1")
+    assert guided_config.data.required_steering_contract == ("normalized_percent_v2")
     assert guided_config.data.current_generation == 1
     assert guided_config.data.generation_decay == 0.8
     assert guided_config.data.source_sampling_masses == {
@@ -269,7 +269,7 @@ def test_normalized_stateless_config_requires_raw_normalized_sessions(
         "guided": 0.5,
     }
     assert guided_config.data.manual_anchor_split_manifest == (
-        project_root / "config" / "front_cam_policy_split_stateless_normalized_v1.yaml"
+        project_root / "config" / "front_cam_policy_split_stateless_normalized_v2.yaml"
     )
     assert guided_config.data.current_generation_session_counts == {
         "train": 3,
@@ -292,7 +292,7 @@ def test_normalized_stateless_config_requires_raw_normalized_sessions(
         (
             project_root
             / "config"
-            / "front_cam_policy_train_stateless_normalized_v1_g1.yaml"
+            / "front_cam_policy_train_stateless_normalized_v2_g1.yaml"
         ).read_text(encoding="utf-8")
     )
     expanded_payload["data"]["current_generation_session_counts"] = {
@@ -328,7 +328,7 @@ def test_source_sampling_masses_fail_closed(
         (
             project_root
             / "config"
-            / "front_cam_policy_train_stateless_normalized_v1_g1.yaml"
+            / "front_cam_policy_train_stateless_normalized_v2_g1.yaml"
         ).read_text(encoding="utf-8")
     )
     payload["data"]["source_sampling_masses"] = masses
@@ -394,7 +394,7 @@ def test_source_anchored_validation_score_uses_same_half_and_half_mass():
     config = load_train_config(
         project_root
         / "config"
-        / "front_cam_policy_train_stateless_normalized_v1_g1.yaml"
+        / "front_cam_policy_train_stateless_normalized_v2_g1.yaml"
     )
     sessions = (
         _metric_session(source_id="manual", generation=0),
@@ -439,7 +439,7 @@ def test_class_weights_use_source_anchored_sample_mass():
     config = load_train_config(
         project_root
         / "config"
-        / "front_cam_policy_train_stateless_normalized_v1_g1.yaml"
+        / "front_cam_policy_train_stateless_normalized_v2_g1.yaml"
     )
     samples = (
         _metric_sample(source_id="manual", generation=0, speed_class_id=110),
@@ -737,7 +737,7 @@ def test_frame_pretraining_records_unknown_non_teacher_forced_history(
     )
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     payload["model"]["history_update"] = "externally_executed_commands"
-    payload["model"]["control_encoding"] = "driver_compact_v1"
+    payload["model"]["control_encoding"] = "driver_compact_v2"
     payload["training"]["history_training_source"] = "learned_unknown_tokens"
     config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
@@ -747,7 +747,7 @@ def test_frame_pretraining_records_unknown_non_teacher_forced_history(
     assert config.training.history_training_source == "learned_unknown_tokens"
     assert history["train_source"] == "learned_unknown_tokens"
     assert history["evaluation_source"] == "learned_unknown_tokens"
-    assert history["initial_token_ids"] == [81, 82]
+    assert history["initial_token_ids"] == [101, 102]
     assert history["frame_pretraining"] is True
     assert history["labels_used_as_history"] is False
     assert history["known_train_label_leakage"] is False
@@ -764,7 +764,7 @@ def test_compact_canonical_history_records_zero_angle_mean_speed_tokens(
     )
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     payload["model"]["history_update"] = "externally_executed_commands"
-    payload["model"]["control_encoding"] = "driver_compact_v1"
+    payload["model"]["control_encoding"] = "driver_compact_v2"
     payload["model"]["history_initial_angle"] = 0
     payload["model"]["history_initial_speed"] = 15
     payload["training"]["history_training_source"] = "canonical_initial_command"
@@ -775,7 +775,7 @@ def test_compact_canonical_history_records_zero_angle_mean_speed_tokens(
 
     assert history["initialization"] == "canonical_initial_command"
     assert history["initial_command"] == [0, 15]
-    assert history["initial_token_ids"] == [40, 55]
+    assert history["initial_token_ids"] == [50, 65]
     assert history["train_source"] == "canonical_initial_command"
     assert history["labels_used_as_history"] is False
     assert history["known_train_label_leakage"] is False
@@ -794,7 +794,7 @@ def test_compact_history_rejects_speed_outside_output_range(
     )
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     payload["model"]["history_update"] = "externally_executed_commands"
-    payload["model"]["control_encoding"] = "driver_compact_v1"
+    payload["model"]["control_encoding"] = "driver_compact_v2"
     payload["model"]["history_initial_speed"] = initial_speed
     config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
@@ -811,7 +811,7 @@ def test_compact_teacher_forcing_records_only_previous_truth(tmp_path: Path):
     )
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     payload["model"]["history_update"] = "externally_executed_commands"
-    payload["model"]["control_encoding"] = "driver_compact_v1"
+    payload["model"]["control_encoding"] = "driver_compact_v2"
     payload["model"]["history_initial_angle"] = 0
     payload["model"]["history_initial_speed"] = 15
     payload["training"]["history_training_source"] = "teacher_forced_executed_commands"
@@ -820,7 +820,7 @@ def test_compact_teacher_forcing_records_only_previous_truth(tmp_path: Path):
     history = build_label_contract(load_train_config(config_path))["history"]
 
     assert history["initial_command"] == [0, 15]
-    assert history["initial_token_ids"] == [40, 55]
+    assert history["initial_token_ids"] == [50, 65]
     assert history["train_source"] == (
         "ground_truth_teacher_forcing_previous_executed_commands"
     )
@@ -838,7 +838,7 @@ def test_unknown_frame_history_rejects_sequence_rollout(tmp_path: Path):
     )
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     payload["model"]["history_update"] = "externally_executed_commands"
-    payload["model"]["control_encoding"] = "driver_compact_v1"
+    payload["model"]["control_encoding"] = "driver_compact_v2"
     payload["training"]["history_training_source"] = "learned_unknown_tokens"
     payload["training"]["batch_size"] = 8
     payload["training"]["sequence_length"] = 8

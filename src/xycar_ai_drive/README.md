@@ -7,9 +7,9 @@ ROS 2 패키지다.
 20 Hz로 발행한다.
 
 새 moving runtime의 angle은 normalized percent `-100..100`이다. ROS 1 safety
-adapter가 `×0.4`로 변환한 driver command `-40..40`만
+adapter가 `×0.5`로 변환한 driver command `-50..50`만
 `/xycar_motor_safe`에 발행한다. artifact manifest에 정확한
-`normalized_percent_v1` 계약이 없으면 일반 AI node는 시작 후에도 DRIVE ON을
+`normalized_percent_v2` 계약이 없으면 일반 AI node는 시작 후에도 DRIVE ON을
 거부하고 Guided collector는 parent artifact로 받아들이지 않는다.
 
 ## 동작 계약
@@ -22,19 +22,19 @@ adapter가 `×0.4`로 변환한 driver command `-40..40`만
   유효 예측을 motor command로 사용하고, OFF 상태에서는 `[0, 0]`을 발행한다.
 - legacy AR artifact는 `(angle=0, speed=25)` class 네 쌍으로 history를 시작하고
   schema v2에서는 argmax 예측, schema v3에서는 실제 motor에 발행된 명령만
-  queue에 추가한다. schema v4 compact AR은 artifact에 따라 legacy UNKNOWN 또는
-  canonical 실제 명령 `(angle=0, dataset mean speed)` 네 쌍으로 시작하고 실제 발행 명령을 angle token `0..80`, speed
-  token `40..70`으로 바꿔 오래된 slot부터 교체한다. 추론됐지만 발행되지 않은 명령은
-  schema v3/v4 history에 넣지 않는다.
+  queue에 추가한다. schema v5 compact AR은 artifact에 따라 UNKNOWN 또는
+  canonical 실제 명령 `(angle=0, dataset mean speed)` 네 쌍으로 시작하고 실제 발행 명령을 angle token `0..100`, speed
+  token `50..80`으로 바꿔 오래된 slot부터 교체한다. 추론됐지만 발행되지 않은 명령은
+  schema v3/v5 history에 넣지 않는다.
   추론 실패 또는 성공한 추론 사이가 0.25초 이상 벌어지면 초기 history로 reset한다.
 - A hold로 ON이 되는 순간에도 AR history와 저장된 예측을 reset한다. reset 뒤
   새 camera frame의 첫 예측이 완료될 때까지 motor output은 `[0, 0]`을 유지한다.
 - 새 증분 수집 기본은 schema v1 stateless artifact다. AR schema v2/v3 경로는
-  rollback 호환성을 유지하고 schema v4는 ARTrackV2-inspired AR4 실차 평가에 쓴다.
+  rollback 호환성을 유지하고 schema v5는 ARTrackV2-inspired AR4 실차 평가에 쓴다.
 - schema v1/v2/v3 angle은 `angle_class_id - 100`이다. speed는
   `max(0, speed_class_id - 100)`이므로 reverse는 금지하지만 양수 예측에는 별도
-  cap을 적용하지 않아 label 계약의 최대 `100`까지 전달한다. schema v4 angle은
-  `(class_id - 40) ÷ 0.4`로 normalized 명령을 복원하고 speed는 class `0..30`을
+  cap을 적용하지 않아 label 계약의 최대 `100`까지 전달한다. schema v5 angle은
+  `(class_id - 50) ÷ 0.5`로 normalized 명령을 복원하고 speed는 class `0..30`을
   그대로 사용한다.
 - Joy 또는 camera prediction이 0.25초 이상 stale, 추론/변환 오류, motor
   subscriber 소실, 다른 motor publisher 출현 시 즉시 OFF와 `[0, 0]`으로
@@ -71,7 +71,7 @@ RGB `[1,3,224,224]` 하나를 받고 계속 지원한다. schema v2 AR artifact�
 int64 history `[1,4,2]` tuple을 받으며 history pair 순서는
 `[angle_class_id, speed_class_id]`, 시간 순서는 오래된 값부터 최신 값까지다. 이후
 schema v3는 같은 tensor shape를 사용하지만 history source를 실제 실행 명령으로
-강제한다. schema v4는 `history_token_ids [1,4,2]`, angle `[1,81]`, speed `[1,31]`,
+강제한다. schema v5는 `history_token_ids [1,4,2]`, angle `[1,101]`, speed `[1,31]`,
 UNKNOWN 또는 canonical `(0,dataset mean speed)×4` 초기화와 공용 numeric token
 mapping을 검증하고 실제 발행 history만 받는다. canonical 명령은 embedding
 경계에서만 내부 token ID로 encode되며 물리 명령의 초기 의미는 바뀌지 않는다.
@@ -196,7 +196,7 @@ angle/speed는 공통 ViT backbone과 별도 출력 head를 공유하므로 한 
 `speed_cap`은 해당 라운드에서
 사람과 모델이 합성한 전진 명령의 상한이다. 두 값은 launch 인자로 지정한다.
 외부 base profile
-`/home/xytron/.config/xycar/guided_stateless_collection_normalized_v1.yaml`에는
+`/home/xytron/.config/xycar/guided_stateless_collection_normalized_v2.yaml`에는
 `max_steering_angle`, `steering_takeover_button`, trigger 증감, deadzone, 버튼, timeout과
 기본 저장 root를 둔다. 실제 수집은 이 파일을 collection ID별 외부 profile로
 복사하면서 `recording_root_dir`만
@@ -210,7 +210,7 @@ JPEG 품질 95로 저장하며 `recording_image_format`과
 
 기존 `residual_gain` 또는 steering 계약이 없는 profile은 호환 실행하지 않는다.
 새 versioned profile에는 `max_steering_angle: 100.0`,
-`steering_takeover_button: 10`, `steering_contract: normalized_percent_v1`이 모두
+`steering_takeover_button: 10`, `steering_contract: normalized_percent_v2`가 모두
 있어야 한다. Jetson과 일반 Guided launch는 이 외부 profile 계약을 camera,
 gamepad 또는 CUDA wrapper를 시작하기 전에 검사하고, 누락되면 실행 전체를
 거부한다.

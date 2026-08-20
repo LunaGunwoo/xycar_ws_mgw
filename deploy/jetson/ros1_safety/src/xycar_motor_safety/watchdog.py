@@ -7,8 +7,8 @@ import math
 STOP_COMMAND = (0.0, 0.0)
 INPUT_ANGLE_MIN = -100.0
 INPUT_ANGLE_MAX = 100.0
-DRIVER_ANGLE_MIN = -40.0
-DRIVER_ANGLE_MAX = 40.0
+DRIVER_ANGLE_MIN = -50.0
+DRIVER_ANGLE_MAX = 50.0
 
 
 class MotorCommandWatchdog:
@@ -41,8 +41,8 @@ class MotorCommandWatchdog:
             DRIVER_ANGLE_MAX,
         ):
             raise ValueError(
-                'normalized_percent_v1 requires input [-100,100] and '
-                'driver [-40,40]'
+                'normalized_percent_v2 requires input [-100,100] and '
+                'driver [-50,50]'
             )
         self.timeout_sec = float(timeout_sec)
         self.input_angle_min = ranges[0]

@@ -46,7 +46,7 @@ def generate_launch_description():
                 default_value=os.path.join(
                     package_share,
                     'config',
-                    'guided_policy_collection_normalized_v1.yaml',
+                    'guided_policy_collection_normalized_v2.yaml',
                 ),
             ),
             DeclareLaunchArgument(

@@ -32,7 +32,7 @@ def generate_launch_description():
                 'params_file',
                 default_value=(
                     '/home/xytron/.config/xycar/'
-                    'guided_stateless_collection_normalized_v1.yaml'
+                    'guided_stateless_collection_normalized_v2.yaml'
                 ),
                 description='External guided collection parameter YAML.',
             ),

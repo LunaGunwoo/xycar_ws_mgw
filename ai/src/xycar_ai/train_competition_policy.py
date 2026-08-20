@@ -578,7 +578,7 @@ def _load_config(path: Path, *, expected_kind: str) -> Mapping[str, Any]:
         "required_steering_contract"
     ) != STEERING_CONTRACT_NAME:
         raise CompetitionTrainingError(
-            "shortcut data must require normalized_percent_v1 steering"
+            "shortcut data must require normalized_percent_v2 steering"
         )
     return payload
 

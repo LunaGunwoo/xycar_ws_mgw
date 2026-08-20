@@ -28,10 +28,10 @@ class MotorWatchdogNode:
                 rospy.get_param('~input_angle_max', 100.0)
             ),
             driver_angle_min=float(
-                rospy.get_param('~driver_angle_min', -40.0)
+                rospy.get_param('~driver_angle_min', -50.0)
             ),
             driver_angle_max=float(
-                rospy.get_param('~driver_angle_max', 40.0)
+                rospy.get_param('~driver_angle_max', 50.0)
             ),
         )
         self._publisher = rospy.Publisher(

@@ -35,7 +35,7 @@ from xycar_ai.steering_contract import (
 
 LEGACY_ARTIFACT_SCHEMA_VERSION = 1
 AR_ARTIFACT_SCHEMA_VERSION = 3
-COMPACT_AR_ARTIFACT_SCHEMA_VERSION = 4
+COMPACT_AR_ARTIFACT_SCHEMA_VERSION = 5
 ARTIFACT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 DEFAULT_OUTPUT_ROOT = Path("artifacts/models")
 MODEL_FILENAME = "model.ts"
@@ -142,7 +142,7 @@ def export_checkpoint(
     data_config = _mapping(checkpoint_config, "data", "checkpoint.config")
     if data_config.get("required_steering_contract") != STEERING_CONTRACT_NAME:
         raise PolicyExportError(
-            "checkpoint data must require normalized_percent_v1 steering"
+            "checkpoint data must require normalized_percent_v2 steering"
         )
     promotion = _validated_promotion_report(
         checkpoint_path=checkpoint_path,
@@ -429,8 +429,8 @@ def _build_manifest(
                 "time_order": "oldest_to_newest",
                 "initialization": initialization,
                 "initial_token_ids": [initial_angle, initial_speed],
-                "actual_angle_token_range": [0, 80],
-                "actual_speed_token_range": [40, 70],
+                "actual_angle_token_range": [0, 100],
+                "actual_speed_token_range": [50, 80],
                 "update": "externally_executed_commands",
             }
             if initialization == "canonical_initial_command":

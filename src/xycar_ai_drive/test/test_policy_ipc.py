@@ -272,12 +272,12 @@ def _competition_artifact(tmp_path):
         'artifact_id': root.name,
         'steering_contract': {
             'schema_version': 1,
-            'name': 'normalized_percent_v1',
+            'name': 'normalized_percent_v2',
             'command_min': -100.0,
             'command_max': 100.0,
-            'driver_min': -40.0,
-            'driver_max': 40.0,
-            'mapping': 'linear_scale_0.4',
+            'driver_min': -50.0,
+            'driver_max': 50.0,
+            'mapping': 'linear_scale_0.5',
         },
         'models': {
             'base': {

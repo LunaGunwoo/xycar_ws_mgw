@@ -1,0 +1,79 @@
+schema_version: 3
+
+model:
+  name: vit_small_patch16_224.augreg_in21k_ft_in1k
+  pretrained: true
+  image_size: 224
+  architecture: task_tokens
+  history_frames: 0
+
+data:
+  sources:
+    manual:
+      root: datasets/stateless_manual
+      control_modes:
+        - gamepad
+      fixed_generation: 0
+    guided:
+      root: datasets/stateless_guided
+      control_modes:
+        - guided_policy
+      require_curriculum_generation: true
+  split_manifest: config/front_cam_policy_split_stateless_normalized_v2_g1.yaml
+  require_all_matching_sessions: false
+  required_steering_contract: normalized_percent_v2
+  current_generation: 1
+  generation_decay: 0.8
+  source_sampling_masses:
+    manual: 0.5
+    guided: 0.5
+  manual_anchor_split_manifest: config/front_cam_policy_split_stateless_normalized_v2.yaml
+  current_generation_session_counts:
+    train: 3
+    val: 1
+    test: 1
+  num_workers: 8
+  train_angle_mean_window: 1
+
+preprocessing:
+  road_warp_config: config/front_cam_policy_preprocess.yaml
+
+augmentation:
+  brightness: 0.12
+  contrast: 0.12
+  saturation: 0.08
+  hue: 0.02
+  horizontal_flip_probability: 0.5
+
+optimizer:
+  name: adamw
+  learning_rate: 0.0001
+  weight_decay: 0.05
+
+scheduler:
+  name: cosine
+  warmup_epochs: 1
+
+training:
+  epochs: 10
+  early_stopping_patience: 3
+  batch_size: 128
+  grad_clip: 1.0
+  seed: 20260817
+  device: cuda
+  amp: true
+  deterministic: true
+
+loss:
+  angle_label_smoothing: 0.02
+  speed_label_smoothing: 0.02
+  angle_class_weighting: sqrt_inverse_frequency
+  speed_class_weighting: sqrt_inverse_frequency
+  min_class_weight: 0.5
+  max_class_weight: 3.0
+  speed_loss_weight: 0.5
+  emd_loss_weight: 0.2
+
+output:
+  root: artifacts/runs/front_cam_policy
+  run_name: vit_small_stateless_normalized_steering_v2_generation1

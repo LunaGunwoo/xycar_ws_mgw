@@ -18,7 +18,7 @@
     <param name="stop_publish_count" value="5" />
     <param name="input_angle_min" value="-100.0" />
     <param name="input_angle_max" value="100.0" />
-    <param name="driver_angle_min" value="-40.0" />
-    <param name="driver_angle_max" value="40.0" />
+    <param name="driver_angle_min" value="-50.0" />
+    <param name="driver_angle_max" value="50.0" />
   </node>
 </launch>

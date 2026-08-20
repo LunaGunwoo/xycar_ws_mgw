@@ -1,0 +1,8 @@
+schema_version: 1
+dataset_snapshot: stateless_manual_normalized_steering_v2_g0_pending
+splits:
+  # Populate only after at least 10,000 normalized_percent_v2 frames across
+  # 11 complete sessions. Required minimum: train 7 / val 2 / test 2.
+  train: []
+  val: []
+  test: []

@@ -107,8 +107,8 @@ def test_compact_ar_uses_unknown_tokens_and_unequal_shared_outputs():
     images = torch.zeros(2, 3, 32, 32)
     history = torch.tensor(
         [
-            [[81, 82], [81, 82], [0, 40], [80, 70]],
-            [[81, 82], [40, 55], [41, 56], [39, 54]],
+            [[101, 102], [101, 102], [0, 50], [100, 80]],
+            [[101, 102], [50, 65], [51, 66], [49, 64]],
         ],
         dtype=torch.long,
     )
@@ -117,27 +117,27 @@ def test_compact_ar_uses_unknown_tokens_and_unequal_shared_outputs():
         outputs = model(images, history)
     expected_angle = torch.nn.functional.linear(
         features[:, -2],
-        model.control_token_embedding.weight[:81],
+        model.control_token_embedding.weight[:101],
         model.angle_output_bias,
     )
     expected_speed = torch.nn.functional.linear(
         features[:, -1],
-        model.control_token_embedding.weight[40:71],
+        model.control_token_embedding.weight[50:81],
         model.speed_output_bias,
     )
 
-    assert tuple(outputs["angle_logits"].shape) == (2, 81)
+    assert tuple(outputs["angle_logits"].shape) == (2, 101)
     assert tuple(outputs["speed_logits"].shape) == (2, 31)
     assert torch.equal(outputs["angle_logits"], expected_angle)
     assert torch.equal(outputs["speed_logits"], expected_speed)
     with pytest.raises(ValueError, match="invalid token id"):
-        model(images[:1], torch.tensor([[[0, 39]] * 4], dtype=torch.long))
+        model(images[:1], torch.tensor([[[0, 49]] * 4], dtype=torch.long))
 
 
 def test_compact_metrics_decode_angle_back_to_normalized_units():
-    angle_logits = torch.full((2, 81), -1000.0)
+    angle_logits = torch.full((2, 101), -1000.0)
     speed_logits = torch.full((2, 31), -1000.0)
-    angle_logits[0, 0] = angle_logits[1, 80] = 1000.0
+    angle_logits[0, 0] = angle_logits[1, 100] = 1000.0
     speed_logits[0, 0] = speed_logits[1, 30] = 1000.0
     accumulator = ClassificationMetricAccumulator(
         "test",
@@ -148,7 +148,7 @@ def test_compact_metrics_decode_angle_back_to_normalized_units():
         batch={
             "angle": torch.tensor([-100.0, 100.0]),
             "speed": torch.tensor([0.0, 30.0]),
-            "angle_class_id": torch.tensor([0, 80]),
+            "angle_class_id": torch.tensor([0, 100]),
             "speed_class_id": torch.tensor([0, 30]),
         },
         total_loss=torch.tensor(0.0),
