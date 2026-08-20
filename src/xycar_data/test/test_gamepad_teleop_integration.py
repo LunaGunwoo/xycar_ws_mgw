@@ -242,6 +242,15 @@ def signal_harness(monkeypatch, tmp_path):
         Parameter('preview_enabled', value=True),
     ]
     collector = TrafficSignalCollectorNode(parameter_overrides=overrides)
+
+    def fail_outgoing_cv_bridge(*_args, **_kwargs):
+        raise KeyError(16)
+
+    monkeypatch.setattr(
+        collector.bridge,
+        'cv2_to_imgmsg',
+        fail_outgoing_cv_bridge,
+    )
     peer = Node('traffic_signal_collector_test_peer')
     commands = []
     previews = []
@@ -262,7 +271,7 @@ def signal_harness(monkeypatch, tmp_path):
         Image,
         SIGNAL_PREVIEW_TOPIC,
         lambda message: previews.append(message),
-        qos_profile_sensor_data,
+        10,
     )
     executor = SingleThreadedExecutor()
     executor.add_node(collector)
@@ -715,6 +724,10 @@ def test_signal_buttons_capture_each_frame_without_controlling_motion(
     assert collector._selection.ambiguous
     assert sum(collector.writer.counts.values()) == before_ambiguous
     assert harness['previews']
+    preview = harness['previews'][-1]
+    assert preview.encoding == 'bgr8'
+    assert preview.step == preview.width * 3
+    assert len(preview.data) == preview.step * preview.height
 
     assert set(collector.writer.counts) == set(SIGNAL_CLASSES)
     for class_name in SIGNAL_CLASSES:

@@ -265,7 +265,7 @@ class TrafficSignalCollectorNode(Node):
             self.preview_publisher = self.create_publisher(
                 Image,
                 self.preview_topic,
-                qos_profile_sensor_data,
+                10,
             )
         self.joy_subscription = self.create_subscription(
             Joy,
@@ -516,18 +516,16 @@ class TrafficSignalCollectorNode(Node):
             1,
             cv2.LINE_AA,
         )
-        try:
-            preview_message = self.bridge.cv2_to_imgmsg(
-                preview,
-                encoding='bgr8',
-            )
-        except CvBridgeError as exc:
-            self.get_logger().warning(
-                f'Preview image conversion failed: {exc}',
-                throttle_duration_sec=2.0,
-            )
-            return
+        # Build the outgoing image directly. Jetson's Humble cv_bridge can
+        # raise KeyError for the otherwise valid bgr8 -> Image conversion.
+        preview_message = Image()
         preview_message.header = source.header
+        preview_message.height = int(preview.shape[0])
+        preview_message.width = int(preview.shape[1])
+        preview_message.encoding = 'bgr8'
+        preview_message.is_bigendian = False
+        preview_message.step = preview_message.width * 3
+        preview_message.data = preview.tobytes()
         self.preview_publisher.publish(preview_message)
 
     def _preview_status(
