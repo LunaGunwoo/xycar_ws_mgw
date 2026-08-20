@@ -1,0 +1,411 @@
+"""Strict loader for the traffic-light shortcut mission bundle."""
+
+from __future__ import annotations
+
+import hashlib
+import math
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+
+import yaml
+
+from xycar_ai_drive.artifact import (
+    ANGLE_REGRESSION_FIXED_SPEED_PREDICTION_MODE,
+    COMPACT_CONTROL_ENCODING,
+    CONTINUOUS_REGRESSION_PREDICTION_MODE,
+    ArtifactContractError,
+    PolicyArtifact,
+    load_policy_artifact,
+)
+from xycar_ai_drive.steering_contract import NORMALIZED_STEERING_CONTRACT
+
+BUNDLE_KIND = 'traffic_shortcut_bundle'
+BUNDLE_SCHEMA_VERSION = 1
+BUNDLE_MANIFEST = 'manifest.yaml'
+BUNDLE_CHECKSUMS = 'SHA256SUMS'
+TRAFFIC_MODEL_SHA256 = (
+    '24c1a38eacfb065c95e5577be29a2a542b985d6ea1954bf2fc94c52eb674aa41'
+)
+EXPECTED_BASE_ARTIFACT_ID = (
+    'front-cam-policy-vit-small-ar4-v2-nice-adaptive-joint-regression-'
+    'sequence-init25-window5-20260821'
+)
+EXPECTED_SHORTCUT_ARTIFACT_ID = (
+    'nice-shortcut-resnet18-squarewarp-speed23-20260821'
+)
+EXPECTED_ONNXRUNTIME_VERSION = '1.24.0'
+EXPECTED_NUMPY_VERSION = '1.26.4'
+EXPECTED_PROVIDERS = (
+    'CUDAExecutionProvider',
+    'CPUExecutionProvider',
+)
+
+
+@dataclass(frozen=True)
+class TrafficDetectorContract:
+    model_path: Path
+    confidence_threshold: float
+    bbox_width_min: int
+    bbox_width_max: int
+    inference_every_n_frames: int
+    percentile: float
+    red_index: int
+    left_indices: tuple[int, int]
+    straight_index: int
+    red_consecutive_reads: int
+
+
+@dataclass(frozen=True)
+class TrafficShortcutBundle:
+    root: Path
+    artifact_id: str
+    base: PolicyArtifact
+    shortcut: PolicyArtifact
+    detector: TrafficDetectorContract
+    base_speed_cap: float
+    shortcut_speed: float
+    shortcut_duration_sec: float
+    successful_shortcut_once: bool
+    action_priority: tuple[str, str, str]
+    onnxruntime_version: str
+    numpy_version: str
+    providers: tuple[str, ...]
+
+
+def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
+    root = _safe_root(root)
+    _verify_bundle_checksums(root)
+    manifest = _load_mapping(root / BUNDLE_MANIFEST)
+    if manifest.get('schema_version') != BUNDLE_SCHEMA_VERSION:
+        raise ArtifactContractError('traffic shortcut bundle schema must be 1')
+    if manifest.get('artifact_kind') != BUNDLE_KIND:
+        raise ArtifactContractError('artifact is not a traffic shortcut bundle')
+    artifact_id = _required_string(manifest, 'artifact_id', 'manifest')
+    if artifact_id != root.name:
+        raise ArtifactContractError('traffic shortcut bundle id mismatch')
+
+    components = _required_mapping(manifest, 'components', 'manifest')
+    base_contract = _required_mapping(components, 'base', 'components')
+    shortcut_contract = _required_mapping(
+        components,
+        'shortcut',
+        'components',
+    )
+    base = _load_component(root, base_contract, 'base')
+    shortcut = _load_component(root, shortcut_contract, 'shortcut')
+    _validate_policy_contracts(base, shortcut, base_contract, shortcut_contract)
+
+    signal = _required_mapping(components, 'traffic_light', 'components')
+    signal_relative = _required_string(signal, 'file', 'traffic_light')
+    _validate_relative_path(signal_relative)
+    signal_path = root / signal_relative
+    if signal_path.is_symlink() or not signal_path.is_file():
+        raise ArtifactContractError('traffic light ONNX is missing or unsafe')
+    if signal.get('format') != 'onnx':
+        raise ArtifactContractError('traffic light model format must be onnx')
+    if signal.get('sha256') != TRAFFIC_MODEL_SHA256:
+        raise ArtifactContractError('traffic light model SHA-256 contract mismatch')
+    if _sha256_file(signal_path) != TRAFFIC_MODEL_SHA256:
+        raise ArtifactContractError('traffic light model checksum mismatch')
+    if signal.get('input') != {
+        'name': 'images',
+        'dtype': 'float32',
+        'shape': [1, 3, 640, 640],
+    }:
+        raise ArtifactContractError('traffic light ONNX input contract mismatch')
+    if signal.get('output') != {
+        'name': 'output0',
+        'dtype': 'float32',
+        'shape': [1, 5, 8400],
+    }:
+        raise ArtifactContractError('traffic light ONNX output contract mismatch')
+
+    detector = _required_mapping(manifest, 'detector', 'manifest')
+    lamp = _required_mapping(detector, 'lamp', 'detector')
+    bbox_width = detector.get('bbox_width_px')
+    if bbox_width != [45, 200]:
+        raise ArtifactContractError('detector bbox width gate must be [45,200]')
+    if lamp.get('count') != 4 or lamp.get('score') != 'hsv_v_percentile':
+        raise ArtifactContractError('traffic lamp score contract mismatch')
+    if lamp.get('red_index') != 0:
+        raise ArtifactContractError('traffic lamp red index must be 0')
+    if lamp.get('left_indices') != [2, 3]:
+        raise ArtifactContractError('traffic lamp left indices must be [2,3]')
+    if lamp.get('straight_index') != 3:
+        raise ArtifactContractError('traffic lamp straight index must be 3')
+    if lamp.get('straight_requires_red_off') is not True:
+        raise ArtifactContractError('straight lamp must require red off')
+    if lamp.get('relative_threshold') != '(min + max) / 2':
+        raise ArtifactContractError('traffic lamp relative threshold mismatch')
+    confidence = _exact_number(detector, 'confidence_threshold', 0.25)
+    percentile = _exact_number(lamp, 'percentile', 80.0)
+    inference_every = _exact_int(detector, 'inference_every_n_frames', 3)
+
+    red_latch = _required_mapping(manifest, 'red_latch', 'manifest')
+    if (
+        red_latch.get('consecutive_red_reads') != 3
+        or red_latch.get('unknown_behavior') != 'retain_latch'
+        or red_latch.get('clear_actions') != ['LEFT', 'STRAIGHT']
+    ):
+        raise ArtifactContractError('red latch contract mismatch')
+
+    mission = _required_mapping(manifest, 'mission', 'manifest')
+    if mission.get('states') != [
+        'OFF',
+        'BASE',
+        'RED_STOP',
+        'SWITCH_TO_SHORTCUT',
+        'SHORTCUT',
+        'SWITCH_TO_BASE',
+        'FAULT',
+    ]:
+        raise ArtifactContractError('mission state contract mismatch')
+    if mission.get('action_priority') != ['STOP', 'LEFT', 'STRAIGHT']:
+        raise ArtifactContractError('mission action priority mismatch')
+    if mission.get('transition_stop_control_cycles') != 1:
+        raise ArtifactContractError('mission transition stop must be one cycle')
+    if mission.get('red_cancels_shortcut') is not True:
+        raise ArtifactContractError('red must cancel the shortcut attempt')
+    if mission.get('red_cancel_consumes_success') is not False:
+        raise ArtifactContractError('red cancellation must not consume success')
+    base_speed_cap = _exact_number(mission, 'base_speed_cap', 25.0)
+    _exact_number(mission, 'a_hold_release_grace_sec', 0.12)
+    shortcut_speed = _exact_number(mission, 'shortcut_speed', 23.0)
+    shortcut_duration = _exact_number(
+        mission,
+        'shortcut_duration_sec',
+        8.0,
+    )
+    if mission.get('successful_shortcut_once') is not True:
+        raise ArtifactContractError('successful shortcut must be process-once')
+
+    runtime = _required_mapping(manifest, 'host_runtime', 'manifest')
+    if runtime.get('onnxruntime_version') != EXPECTED_ONNXRUNTIME_VERSION:
+        raise ArtifactContractError('ONNX Runtime version contract mismatch')
+    if runtime.get('numpy_version') != EXPECTED_NUMPY_VERSION:
+        raise ArtifactContractError('NumPy version contract mismatch')
+    if runtime.get('providers') != list(EXPECTED_PROVIDERS):
+        raise ArtifactContractError('ONNX Runtime provider order mismatch')
+    if runtime.get('policies_preloaded') is not True:
+        raise ArtifactContractError('both policies must be preloaded')
+    if runtime.get('shared_cuda_lock') is not True:
+        raise ArtifactContractError('dual policies must share a CUDA lock')
+
+    return TrafficShortcutBundle(
+        root=root,
+        artifact_id=artifact_id,
+        base=base,
+        shortcut=shortcut,
+        detector=TrafficDetectorContract(
+            model_path=signal_path,
+            confidence_threshold=confidence,
+            bbox_width_min=45,
+            bbox_width_max=200,
+            inference_every_n_frames=inference_every,
+            percentile=percentile,
+            red_index=0,
+            left_indices=(2, 3),
+            straight_index=3,
+            red_consecutive_reads=3,
+        ),
+        base_speed_cap=base_speed_cap,
+        shortcut_speed=shortcut_speed,
+        shortcut_duration_sec=shortcut_duration,
+        successful_shortcut_once=True,
+        action_priority=('STOP', 'LEFT', 'STRAIGHT'),
+        onnxruntime_version=EXPECTED_ONNXRUNTIME_VERSION,
+        numpy_version=EXPECTED_NUMPY_VERSION,
+        providers=EXPECTED_PROVIDERS,
+    )
+
+
+def _load_component(
+    root: Path,
+    contract: Mapping[str, object],
+    name: str,
+) -> PolicyArtifact:
+    relative = _required_string(contract, 'directory', name)
+    _validate_relative_path(relative)
+    component_root = root / relative
+    expected_relative = f'policies/{contract.get("artifact_id")}'
+    if relative != expected_relative:
+        raise ArtifactContractError(
+            f'{name} component directory must be {expected_relative}'
+        )
+    artifact = load_policy_artifact(component_root)
+    if contract.get('artifact_id') != artifact.artifact_id:
+        raise ArtifactContractError(f'{name} component artifact id mismatch')
+    digest = contract.get('source_sha256s_sha256')
+    if (
+        not isinstance(digest, str)
+        or not re.fullmatch(r'[0-9a-f]{64}', digest)
+        or _sha256_file(component_root / BUNDLE_CHECKSUMS) != digest
+    ):
+        raise ArtifactContractError(f'{name} source checksum identity mismatch')
+    return artifact
+
+
+def _validate_policy_contracts(
+    base: PolicyArtifact,
+    shortcut: PolicyArtifact,
+    base_contract: Mapping[str, object],
+    shortcut_contract: Mapping[str, object],
+) -> None:
+    if base.artifact_id != EXPECTED_BASE_ARTIFACT_ID:
+        raise ArtifactContractError('base artifact id is not approved')
+    if shortcut.artifact_id != EXPECTED_SHORTCUT_ARTIFACT_ID:
+        raise ArtifactContractError('shortcut artifact id is not approved')
+    if base_contract.get('schema_version') != 6:
+        raise ArtifactContractError('base policy schema must be 6')
+    if shortcut_contract.get('schema_version') != 7:
+        raise ArtifactContractError('shortcut policy schema must be 7')
+    if (
+        base.prediction_mode != CONTINUOUS_REGRESSION_PREDICTION_MODE
+        or base.control_encoding != COMPACT_CONTROL_ENCODING
+        or base.history is None
+        or base.history.update != 'externally_executed_commands'
+    ):
+        raise ArtifactContractError('base policy AR contract mismatch')
+    if (
+        shortcut.prediction_mode
+        != ANGLE_REGRESSION_FIXED_SPEED_PREDICTION_MODE
+        or shortcut.history is not None
+        or shortcut.fixed_speed != 23.0
+        or shortcut.speed_normalization_divisor != 25.0
+    ):
+        raise ArtifactContractError('shortcut fixed-speed contract mismatch')
+    if (
+        base.steering_contract != NORMALIZED_STEERING_CONTRACT
+        or shortcut.steering_contract != NORMALIZED_STEERING_CONTRACT
+    ):
+        raise ArtifactContractError('policy steering contract mismatch')
+    if base.road_warp is None or shortcut.road_warp is None:
+        raise ArtifactContractError('both policies require road warp')
+    if base.road_warp != shortcut.road_warp:
+        raise ArtifactContractError('Base and shortcut road warp must match')
+    if base.image_size != 224 or shortcut.image_size != 224:
+        raise ArtifactContractError('both policy inputs must be 224 square')
+
+
+def _safe_root(value: str | Path) -> Path:
+    root = Path(value).expanduser()
+    if root.is_symlink():
+        raise ArtifactContractError('bundle root must not be a symlink')
+    root = root.resolve()
+    if not root.is_dir():
+        raise ArtifactContractError(f'bundle directory is missing: {root}')
+    return root
+
+
+def _verify_bundle_checksums(root: Path) -> None:
+    checksum_path = root / BUNDLE_CHECKSUMS
+    if checksum_path.is_symlink() or not checksum_path.is_file():
+        raise ArtifactContractError('bundle SHA256SUMS is missing or unsafe')
+    expected: dict[str, str] = {}
+    for line in checksum_path.read_text(encoding='utf-8').splitlines():
+        parts = line.split(maxsplit=1)
+        if len(parts) != 2:
+            raise ArtifactContractError('invalid bundle SHA256SUMS line')
+        digest, relative = parts
+        relative = relative.removeprefix('*')
+        _validate_relative_path(relative)
+        if not re.fullmatch(r'[0-9a-f]{64}', digest):
+            raise ArtifactContractError('invalid bundle SHA-256 digest')
+        if relative in expected:
+            raise ArtifactContractError(f'duplicate bundle checksum: {relative}')
+        expected[relative] = digest
+    for path in root.rglob('*'):
+        if path.is_symlink():
+            raise ArtifactContractError(f'bundle contains a symlink: {path}')
+        if not path.is_dir() and not path.is_file():
+            raise ArtifactContractError(f'bundle contains a special file: {path}')
+    actual = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob('*')
+        if path.is_file() and path != checksum_path
+    }
+    if actual != set(expected):
+        raise ArtifactContractError('bundle SHA256SUMS file list mismatch')
+    for relative, digest in expected.items():
+        if _sha256_file(root / relative) != digest:
+            raise ArtifactContractError(f'bundle checksum mismatch: {relative}')
+
+
+def _load_mapping(path: Path) -> Mapping[str, object]:
+    if path.is_symlink() or not path.is_file():
+        raise ArtifactContractError(f'missing or unsafe bundle manifest: {path}')
+    try:
+        payload = yaml.safe_load(path.read_text(encoding='utf-8'))
+    except yaml.YAMLError as exc:
+        raise ArtifactContractError('bundle manifest YAML is invalid') from exc
+    if not isinstance(payload, Mapping):
+        raise ArtifactContractError('bundle manifest must contain a mapping')
+    return payload
+
+
+def _required_mapping(
+    payload: Mapping[str, object],
+    key: str,
+    context: str,
+) -> Mapping[str, object]:
+    value = payload.get(key)
+    if not isinstance(value, Mapping):
+        raise ArtifactContractError(f'{context}.{key} must be a mapping')
+    return value
+
+
+def _required_string(
+    payload: Mapping[str, object],
+    key: str,
+    context: str,
+) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value:
+        raise ArtifactContractError(f'{context}.{key} must be a string')
+    return value
+
+
+def _exact_number(
+    payload: Mapping[str, object],
+    key: str,
+    expected: float,
+) -> float:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ArtifactContractError(f'{key} must be numeric')
+    result = float(value)
+    if not math.isfinite(result) or result != expected:
+        raise ArtifactContractError(f'{key} must be {expected:g}')
+    return result
+
+
+def _exact_int(
+    payload: Mapping[str, object],
+    key: str,
+    expected: int,
+) -> int:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value != expected:
+        raise ArtifactContractError(f'{key} must be {expected}')
+    return value
+
+
+def _validate_relative_path(value: str) -> None:
+    path = PurePosixPath(value)
+    if (
+        not value
+        or path.is_absolute()
+        or '..' in path.parts
+        or not re.fullmatch(r'[A-Za-z0-9._/-]+', value)
+    ):
+        raise ArtifactContractError(f'unsafe bundle path: {value}')
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open('rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()

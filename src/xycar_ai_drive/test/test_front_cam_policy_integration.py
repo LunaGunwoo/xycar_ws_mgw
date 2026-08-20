@@ -15,6 +15,7 @@ from xycar_ai_drive.control import DriveCommand
 from xycar_ai_drive.front_cam_policy_node import (
     FrontCamPolicyNode,
     _is_paired_unnamed_relay,
+    _validate_fixed_speed_cap,
 )
 from xycar_ai_drive.steering_contract import NORMALIZED_STEERING_CONTRACT
 
@@ -108,6 +109,13 @@ def test_legacy_artifact_contract_blocks_motion_enable():
     assert FrontCamPolicyNode._unsafe_reason_locked(node, 1.0) == (
         'artifact steering contract is not normalized_percent_v2'
     )
+
+
+def test_fixed_speed_artifact_requires_matching_speed_cap():
+    artifact = SimpleNamespace(fixed_speed=23.0)
+    _validate_fixed_speed_cap(artifact, 23.0)
+    with pytest.raises(ValueError, match=r'fixed-speed.*\(23\)'):
+        _validate_fixed_speed_cap(artifact, 22.0)
 
 
 def _spin_for(harness, duration_sec, *, a=None, publish_camera=True):

@@ -974,7 +974,7 @@ artifacts/models/<artifact-id>/
 
 `SHA256SUMS`에는 `manifest.yaml`과 모든 배포 파일의 상대 경로를 기록한다.
 절대 경로, `..`, symlink는 허용하지 않는다. 학습 checkpoint를 fixed-shape
-TorchScript tuple-output artifact로 변환할 때는 다음 명령을 사용한다. 기존
+TorchScript artifact로 변환할 때는 다음 명령을 사용한다. 기존
 artifact ID는 덮어쓰지 않는다. stateless schema v1은 image `[1,3,224,224]` 하나를
 받고 기존 AR schema v2는 image와 predicted history `[1,4,2]`를 함께 받는다.
 legacy AR exporter는 같은 input shape에 실제 실행 history를 요구하는 schema v3를
@@ -984,7 +984,10 @@ schema v5를 생성한다. angle-only checkpoint는 고정 speed dataset과 hist
 검증한 뒤 angle logits는 보존하고 speed logits의 argmax만 고정 class로 만든다.
 연속 회귀 compact AR checkpoint는 driver angle과 speed scalar가 각각 `[1,1]`인
 schema v6를 생성하고 단위, 범위, runtime `angle_driver × 2` 변환과 canonical
-`[50,75]×4` history를 manifest에 기록한다. v1/v2/v3/v5 runtime 호환은 유지한다.
+`[50,75]×4` history를 manifest에 기록한다. schema v7은 좌회전 전용 ResNet18의
+정사각형 road-warp image와 `speed/25`를 tuple input으로 받고 angle `[1,1]`만
+출력한다. manifest 고정 speed와 실제 launch `speed_cap`은 반드시 같아야 한다.
+v1/v2/v3/v5/v6 runtime 호환은 유지한다.
 
 G1 이상 run은 아래 명령에 같은 run의
 `--promotion-report artifacts/runs/front_cam_policy/<stateless-run>/promotion_gate.json`
@@ -999,6 +1002,39 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
   --artifact-id <schema-v1-stateless-artifact-id> \
   --require-schema-version 1
 ```
+
+2026-08-21 nice-shortcut 정사각형 warp 재학습 checkpoint는 다음처럼 schema v7
+artifact로 변환한다. exporter는 raw state dict를 exact ResNet18에 strict load하고
+eager/trace/reload 출력을 비교한다.
+
+```bash
+cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
+/home/xytron/.local/bin/uv run --locked xycar-export-shortcut-angle \
+  --checkpoint artifacts/runs/nice_shortcut_resnet18_squarewarp_seed20260821/best.pt \
+  --artifact-id nice-shortcut-resnet18-squarewarp-speed23-20260821 \
+  --fixed-speed 23 \
+  --warp-config config/front_cam_policy_preprocess.yaml
+```
+
+신호등 통합 runtime에는 두 policy artifact 전체와 검증된 ONNX를 atomic bundle로
+묶는다. builder는 Base schema v6/compact external history, shortcut schema v7/fixed
+speed `23`, 224 square warp, steering 계약과 ONNX SHA-256을 확인하고 기존 bundle을
+덮어쓰지 않는다.
+
+```bash
+cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
+/home/xytron/.local/bin/uv run --locked xycar-build-traffic-shortcut-bundle \
+  --base-artifact artifacts/models/front-cam-policy-vit-small-ar4-v2-nice-adaptive-joint-regression-sequence-init25-window5-20260821 \
+  --shortcut-artifact artifacts/models/nice-shortcut-resnet18-squarewarp-speed23-20260821 \
+  --traffic-model artifacts/sources/traffic_light.onnx \
+  --artifact-id traffic-shortcut-nice-regression-resnet18-8s-20260821 \
+  --output-root artifacts/models
+```
+
+산출물의 `policies/`에는 각 원본 `model.ts`, `manifest.yaml`, `SHA256SUMS`가 그대로
+남고 `signal/traffic_light.onnx`, reference hash와 root manifest/checksum이 추가된다.
+ONNX 원본 SHA-256은
+`24c1a38eacfb065c95e5577be29a2a542b985d6ea1954bf2fc94c52eb674aa41`이다.
 
 exporter는 checkpoint model state를 strict load하고 eager/trace/reload 결과와 schema별
 출력 shape를 확인한 뒤 `model.ts`, `manifest.yaml`, `SHA256SUMS`를 atomic하게

@@ -43,6 +43,14 @@ setup(
                 'xycar_ai_drive.policy_ipc:main'
             ),
             (
+                'traffic_shortcut_gpu_server = '
+                'xycar_ai_drive.dual_policy_ipc:main'
+            ),
+            (
+                'traffic_shortcut_policy = '
+                'xycar_ai_drive.traffic_shortcut_policy_node:main'
+            ),
+            (
                 'guided_policy_collector = '
                 'xycar_ai_drive.guided_policy_collector:main'
             ),

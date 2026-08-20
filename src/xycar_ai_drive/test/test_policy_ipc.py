@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from xycar_ai_drive.control import DriveCommand
+from xycar_ai_drive.dual_policy_ipc import DualPolicyIpcService
 from xycar_ai_drive.competition_artifact import load_competition_bundle
 from xycar_ai_drive.competition_gpu_runtime import (
     CompetitionInference,
@@ -220,6 +221,142 @@ def test_ipc_server_disconnect_closes_client_fail_closed(tmp_path):
     with pytest.raises(PolicyRuntimeError, match='failed closed'):
         client.infer(np.zeros((8, 12, 3), dtype=np.uint8))
     assert client._socket is None
+
+
+def test_dual_policy_service_opens_two_sockets_and_serializes_cuda(
+    tmp_path,
+    monkeypatch,
+):
+    base_parent = tmp_path / 'base'
+    shortcut_parent = tmp_path / 'shortcut'
+    base_parent.mkdir()
+    shortcut_parent.mkdir()
+    base_artifact = _artifact(base_parent)
+    shortcut_artifact = _artifact(shortcut_parent)
+    concurrency = SimpleNamespace(active=0, maximum=0)
+    concurrency_lock = threading.Lock()
+
+    class TrackedPolicy(_FakePolicy):
+        def infer(self, image, history=None):
+            with concurrency_lock:
+                concurrency.active += 1
+                concurrency.maximum = max(
+                    concurrency.maximum,
+                    concurrency.active,
+                )
+            try:
+                time.sleep(0.05)
+                return super().infer(image, history)
+            finally:
+                with concurrency_lock:
+                    concurrency.active -= 1
+
+    artifacts = {
+        str(base_artifact.resolve()): base_artifact,
+        str(shortcut_artifact.resolve()): shortcut_artifact,
+    }
+
+    def policy_factory(*, artifact_dir, device, **_kwargs):
+        return TrackedPolicy(artifacts[str(artifact_dir)], device=device)
+
+    monkeypatch.setattr(
+        'xycar_ai_drive.dual_policy_ipc.load_traffic_shortcut_bundle',
+        lambda _path: SimpleNamespace(
+            base=SimpleNamespace(root=base_artifact.resolve()),
+            shortcut=SimpleNamespace(root=shortcut_artifact.resolve()),
+        ),
+    )
+    monkeypatch.setattr(
+        'xycar_ai_drive.dual_policy_ipc.DeviceTorchScriptPolicy',
+        policy_factory,
+    )
+    base_socket = tmp_path / 'base.sock'
+    shortcut_socket = tmp_path / 'shortcut.sock'
+    service = DualPolicyIpcService(
+        bundle_dir='/fake-bundle',
+        base_socket_path=str(base_socket),
+        shortcut_socket_path=str(shortcut_socket),
+        device='cuda',
+        torch_num_threads=1,
+        warmup_count=0,
+        history_reset_timeout_sec=0.25,
+    )
+    service_thread = threading.Thread(
+        target=service.serve_forever,
+        daemon=True,
+    )
+    service_thread.start()
+    deadline = time.monotonic() + 2.0
+    while (
+        (not base_socket.exists() or not shortcut_socket.exists())
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.01)
+    assert base_socket.exists() and shortcut_socket.exists()
+    base_client = UnixSocketPolicyClient(
+        artifact_dir=str(base_artifact),
+        socket_path=str(base_socket),
+        timeout_sec=0.5,
+        required_device='cuda',
+    )
+    shortcut_client = UnixSocketPolicyClient(
+        artifact_dir=str(shortcut_artifact),
+        socket_path=str(shortcut_socket),
+        timeout_sec=0.5,
+        required_device='cuda',
+    )
+    image = np.zeros((8, 12, 3), dtype=np.uint8)
+    callers = [
+        threading.Thread(target=client.infer, args=(image,))
+        for client in (base_client, shortcut_client)
+    ]
+    for caller in callers:
+        caller.start()
+    for caller in callers:
+        caller.join(timeout=1.0)
+
+    assert all(not caller.is_alive() for caller in callers)
+    assert concurrency.maximum == 1
+    base_client.close()
+    shortcut_client.close()
+    service.stop()
+    service_thread.join(timeout=2.0)
+    assert not service_thread.is_alive()
+
+
+def test_dual_policy_service_refuses_preload_failure_before_sockets(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        'xycar_ai_drive.dual_policy_ipc.load_traffic_shortcut_bundle',
+        lambda _path: SimpleNamespace(
+            base=SimpleNamespace(root=tmp_path / 'base'),
+            shortcut=SimpleNamespace(root=tmp_path / 'shortcut'),
+        ),
+    )
+
+    def fail_preload(**_kwargs):
+        raise PolicyRuntimeError('preload failed')
+
+    monkeypatch.setattr(
+        'xycar_ai_drive.dual_policy_ipc.DeviceTorchScriptPolicy',
+        fail_preload,
+    )
+    base_socket = tmp_path / 'base.sock'
+    shortcut_socket = tmp_path / 'shortcut.sock'
+    with pytest.raises(PolicyRuntimeError, match='preload failed'):
+        DualPolicyIpcService(
+            bundle_dir='/fake-bundle',
+            base_socket_path=str(base_socket),
+            shortcut_socket_path=str(shortcut_socket),
+            device='cuda',
+            torch_num_threads=1,
+            warmup_count=3,
+            history_reset_timeout_sec=0.25,
+        )
+    assert not base_socket.exists()
+    assert not shortcut_socket.exists()
 
 
 class _FakeCompetitionRuntime:

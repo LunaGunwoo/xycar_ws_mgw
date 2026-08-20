@@ -1,0 +1,32 @@
+game_controller_node:
+  ros__parameters:
+    device_id: 0
+    deadzone: 0.05
+    autorepeat_rate: 20.0
+    sticky_buttons: false
+    coalesce_interval_ms: 1
+
+traffic_shortcut_policy:
+  ros__parameters:
+    camera_topic: /image_raw
+    joy_topic: /joy
+    motor_topic: /xycar_motor
+    allowed_motor_relay_nodes: ['/ros_bridge']
+    prediction_topic: /traffic_shortcut/prediction
+    enabled_topic: /traffic_shortcut/enabled
+
+    a_button_index: 0
+    a_release_grace_sec: 0.12
+    allow_motion: true
+
+    publish_rate_hz: 20.0
+    joy_timeout_sec: 0.25
+    camera_timeout_sec: 0.25
+    inference_timeout_sec: 0.25
+    graph_check_period_sec: 0.5
+    stop_publish_count: 5
+
+    inference_device: cuda
+    base_socket_path: /run/user/1000/xycar-ai/traffic-base.sock
+    shortcut_socket_path: /run/user/1000/xycar-ai/traffic-shortcut.sock
+    inference_rpc_timeout_sec: 0.20

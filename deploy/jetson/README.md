@@ -143,8 +143,9 @@ GPU server는 network와 hardware device 없이 실행되고, host Humble node�
 `0600` Unix socket으로만 통신한다. server 단절·timeout·artifact/device mismatch는
 CPU fallback 없이 motion OFF와 `[0,0]`으로 처리한다.
 
-기본 nice_adaptive runtime은 schema v6 회귀를 지원하는
-`xycar/ai-drive:jp6.2.1-pytorch25.06-schema6` tag다. 기본 artifact는
+기본 GPU runtime은 schema v6, angle-only fixed-speed schema v7과 두 policy 공유
+CUDA IPC를 지원하는
+`xycar/ai-drive:jp6.2.1-pytorch25.06-schema7-traffic-v1` tag다. 기본 nice_adaptive artifact는
 `front-cam-policy-vit-small-ar4-v2-nice-adaptive-joint-regression-sequence-init25-window5-20260821`
 이며 실차 명령에서 `speed_cap:=25.0`을 명시한다. 일반 policy launch의 하위 호환
 기본 cap `30`은 바꾸지 않는다. 기존 `xycar/ai-drive:jp6.2.1-pytorch25.06` image와
@@ -153,17 +154,42 @@ schema v5 분류 artifact는 rollback용으로 삭제하지 않는다.
 GPU image 또는 `images.lock.env`를 변경한 배포는 image build만으로 끝내지 않는다.
 `install_runtime.sh`로 wrapper와 lock을 함께 설치하고, camera나 motor를 시작하기
 전에 source와 설치본이 같은지 확인한다. 설치본 lock이 이전 image를 가리키면
-schema v6 artifact가 container 시작 직후 종료될 수 있다.
+schema v7 artifact가 container 시작 직후 종료될 수 있다.
 
 ```bash
 cd /home/xytron/xycar_ws_mgw
 ./deploy/jetson/install_runtime.sh
 cmp deploy/jetson/images.lock.env \
   /home/xytron/.local/lib/xycar-ai-gpu/images.lock.env
-grep -Fx 'GPU_IMAGE=xycar/ai-drive:jp6.2.1-pytorch25.06-schema6' \
+grep -Fx 'GPU_IMAGE=xycar/ai-drive:jp6.2.1-pytorch25.06-schema7-traffic-v1' \
   /home/xytron/.local/lib/xycar-ai-gpu/images.lock.env
-docker image inspect xycar/ai-drive:jp6.2.1-pytorch25.06-schema6 >/dev/null
+docker image inspect xycar/ai-drive:jp6.2.1-pytorch25.06-schema7-traffic-v1 >/dev/null
 ```
+
+좌회전 전용 정사각형-warp artifact는 `speed_cap:=23.0`을 명시한다. 이 model-only
+시험에는 좌회전 감지나 9초 timer가 없고 A hold 동안만 연속 추론한다.
+
+```bash
+ros2 launch xycar_ai_drive jetson_gpu_policy.launch.py artifact_id:=nice-shortcut-resnet18-squarewarp-speed23-20260821 speed_cap:=23.0 use_camera:=true use_gamepad:=true allow_motion:=true
+```
+
+## Traffic shortcut bundle wrapper
+
+`jetson_traffic_shortcut.launch.py`는 host의 NumPy `1.26.4`, ONNX Runtime `1.24.0`,
+CUDA→CPU provider와 bundle checksum을 camera 시작 전에 검사한다. 실제 traffic
+ONNX synthetic inference가 끝나면 network-none CUDA container 하나에 Base와
+ResNet18을 모두 preload하고 두 socket을 연다. 두 server는 한 CUDA lock을 공유하고
+host 통합 node만 선택된 policy를 호출한다. `install_runtime.sh`가 설치하는
+`run_gpu_traffic_shortcut.sh`의 절대 경로를 사용하며 motor bridge는 시작하지 않는다.
+
+```bash
+cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-20260821 use_camera:=true use_gamepad:=true allow_motion:=true
+```
+
+camera, gamepad와 motor publisher를 시작하므로 실차 실행마다 별도 직전 승인을
+받고 바퀴 지지/안전 공간, 전원 차단, A release·`Ctrl+C`, 경쟁 publisher 부재를
+확인한다. 빨강은 항상 우선하고, 좌회전 성공 one-shot을 다시 실행하려면 node를
+재시작한다.
 
 ## Competition bundle wrapper
 

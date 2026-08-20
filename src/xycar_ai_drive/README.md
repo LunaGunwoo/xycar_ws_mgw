@@ -1,6 +1,6 @@
 # xycar_ai_drive
 
-고정 224x224 TorchScript ViT 정책으로 `/image_raw`를 계속 추론하고,
+고정 224x224 TorchScript ViT 또는 ResNet18 정책으로 `/image_raw`를 계속 추론하고,
 게임패드로 일반 AI 주행 또는 사람 보정 기반 고속 데이터 수집을 수행하는
 ROS 2 패키지다.
 모터 메시지는 `std_msgs/Float32MultiArray([angle, speed])`이며 ON/OFF와 관계없이
@@ -42,6 +42,10 @@ adapter가 `×0.5`로 변환한 driver command `-50..50`만
   `×2`하여 normalized motor 명령으로 바꾼다. shape, NaN/Inf 또는 범위 위반은
   fail-closed다. 모든 schema의 예측 speed에는 launch `speed_cap` 기본값 `30`을
   motor publish 전에 적용하며, external AR history에도 이 capped 실제 명령만 넣는다.
+- schema v7은 정사각형 road warp RGB `[1,3,224,224]`와 명시 속도 `[1,1]`을
+  받아 normalized angle `[1,1]`만 출력한다. manifest의 고정 속도를 `25`로 나눠
+  model input에 넣고 angle은 `×100`한다. 실제 `speed_cap`이 고정 속도와 다르면
+  입력 속도와 실행 속도가 어긋나므로 node 시작을 거부한다.
 - Joy 또는 camera prediction이 0.25초 이상 stale, 추론/변환 오류, motor
   subscriber 소실, 다른 motor publisher 출현 시 즉시 OFF와 `[0, 0]`으로
   전환한다. 조건이 복구돼도 A release 후 새 press가 있어야 다시 ON된다.
@@ -71,7 +75,7 @@ adapter가 `×0.5`로 변환한 driver command `-50..50`만
     SHA256SUMS
 ```
 
-node는 시작 전에 checksum, input, angle/speed tuple output,
+node는 시작 전에 checksum, input, schema별 output,
 normalization, label decode와 steering 계약을 검증한다. schema v1 stateless artifact는 고정
 RGB `[1,3,224,224]` 하나를 받고 계속 지원한다. schema v2 AR artifact는 RGB image와
 int64 history `[1,4,2]` tuple을 받으며 history pair 순서는
@@ -88,6 +92,10 @@ schema v6는 같은 compact history input과 canonical `(0,25)×4` 초기화를 
 tuple output을 driver angle `[1,1]`, speed `[1,1]` float scalar로 바꾼다. manifest의
 단위·범위·`angle_driver × 2` mapping을 검사하고 범위를 벗어난 runtime 출력은
 발행하지 않는다.
+schema v7은 ResNet18 `image + speed/25 → angle` 전용 계약이다. 기존 normalized
+road-warp와 ImageNet 정규화를 사용하며 speed를 예측하거나 AR history를 만들지
+않는다. angle tensor shape, finite 값과 `[-1,1]` 범위를 검사한 뒤 `×100`으로
+normalized steering을 복원한다.
 CPU thread 8개로 model을 load하고 3회 warm-up한다. artifact 생성과 배포는 개발
 Laptop의 MGW root에서 수행한다.
 
@@ -417,6 +425,18 @@ ros2 launch xycar_ai_drive jetson_gpu_policy.launch.py \
   use_camera:=true use_gamepad:=true allow_motion:=true
 ```
 
+정사각형 road-warp로 재학습한 좌회전 전용 ResNet18을 고정 속도 `23`으로
+연속 inference하며 시험 주행하는 명령은 다음과 같다.
+
+```bash
+ros2 launch xycar_ai_drive jetson_gpu_policy.launch.py artifact_id:=nice-shortcut-resnet18-squarewarp-speed23-20260821 speed_cap:=23.0 use_camera:=true use_gamepad:=true allow_motion:=true
+```
+
+이 명령은 9초 timer나 좌회전 감지 FSM을 포함하지 않는다. 시작은 DRIVE OFF이며
+A를 누르는 동안만 model output과 speed `23`을 발행하고 A를 놓으면 정지한다.
+camera와 motor publisher를 시작할 수 있으므로 실행 직전 실차 승인, 바퀴 지지 또는
+안전 공간, 전원 차단 수단, `Ctrl+C` 정지와 경쟁 publisher 부재를 확인한다.
+
 이 Jetson 전용 launch는 checksum이 있는 versioned artifact와 CUDA server
 container를 먼저 준비하고 Unix socket이 열린 뒤 camera, gamepad와 policy node를
 시작한다. motor bridge는 시작하지 않으므로 별도 terminal의 `motor` 또는
@@ -437,6 +457,66 @@ wrapper는 camera를 열기 전에 host NumPy 1.x, OpenCV와 `cv_bridge` import�
 검사한다. user site-packages의 NumPy 2.x가 ROS Humble ABI를 가리면 즉시 종료하며
 camera나 CUDA container를 남기지 않는다. policy node가 오류로 종료돼도 같은
 launch의 camera와 gamepad를 종료하고 CUDA container를 정리한다.
+
+## 신호등 기반 Base/ResNet18 통합 runtime
+
+`traffic_shortcut_policy` 하나가 `/image_raw`와 `/joy`를 구독하고 최종
+`/xycar_motor`를 독점 발행한다. versioned bundle은 schema v6 nice_adaptive Base,
+schema v7 `nice-shortcut` ResNet18과 SHA-256
+`24c1a38eacfb065c95e5577be29a2a542b985d6ea1954bf2fc94c52eb674aa41`의
+`traffic_light.onnx` 전체를 포함한다. `/home/xytron/yolo_tl.py`나
+`xycar_ws_minju`를 import하지 않는다.
+
+- ONNX는 BGR 640 resize, RGB float32 NCHW 입력과 maximum-confidence bbox를
+  사용한다. bbox 폭 `45..200`, confidence `0.25`, 3 frame마다 판독한다.
+- 네 lamp의 HSV V 80 percentile을 `(min+max)/2`와 비교한다. red index `0`, left는
+  `2+3`, straight-green은 `3 && !0`이며 우선순위는 STOP > LEFT > STRAIGHT다.
+- red는 3회 연속 판독 뒤 latch하고 unknown에서 유지한다. green 또는 새 left만
+  latch를 해제한다.
+- left frame에서는 한 제어 주기 STOP, 다음 fresh frame부터 speed `23` ResNet18을
+  사용한다. 첫 실제 shortcut 명령부터 8초에 STOP하고 다음 fresh frame부터 Base로
+  복귀한다. 성공은 process당 한 번이고 red 취소는 성공을 소비하지 않는다.
+- Base external AR history에는 실제 발행한 Base, shortcut과 transition/red STOP만
+  compact token으로 추가한다. 두 policy는 한 CUDA process에서 preload/warm-up하고
+  서로 다른 mode `0600` socket을 공유 CUDA lock으로 직렬화한다.
+- 시작은 OFF이고 A hold/release grace `0.12s` 계약을 유지한다. Joy/camera/IPC
+  stale, ONNX shape·NaN/Inf, 경쟁 publisher와 motor subscriber 소실은 FAULT와
+  `[0,0]`이다.
+
+Jetson host는 NumPy `1.26.4`, ONNX Runtime `1.24.0`, provider 순서
+CUDA→CPU를 exact 검사한다. bundle checksum, 두 socket과 synthetic ONNX preflight가
+끝난 뒤에만 camera/gamepad launch를 시작한다. motor bridge는 포함하지 않는다.
+
+```bash
+cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-20260821 use_camera:=true use_gamepad:=true allow_motion:=true
+```
+
+이 launch는 실제 camera와 motor publisher를 열 수 있으므로 매번 직전 승인을 받고
+바퀴 지지/안전 공간, 전원 차단, A release와 `Ctrl+C`, 경쟁 publisher 부재를
+확인한다. 성공한 좌회전을 다시 실행하려면 node를 재시작한다. 오프라인 성공은
+실차 주행 적합성을 보장하지 않는다.
+
+wrapper 내부 경계를 각각 진단할 때만 다음 명령을 사용한다. 첫 명령은 container
+안에서 두 CUDA policy server를 띄우는 entry point다. host launch와 node 직접
+실행은 같은 bundle로 두 socket이 이미 준비된 경우에만 유효하다. 뒤 두 명령은
+camera 또는 motor publisher를 열 수 있으므로 정상 wrapper와 같은 실행 직전 승인
+규칙을 적용한다.
+
+```bash
+ros2 run xycar_ai_drive traffic_shortcut_gpu_server -- \
+  --bundle-dir /artifacts/traffic-shortcut-nice-regression-resnet18-8s-20260821 \
+  --base-socket-path /run/user/1000/xycar-ai/traffic-base.sock \
+  --shortcut-socket-path /run/user/1000/xycar-ai/traffic-shortcut.sock \
+  --device cuda
+
+ros2 launch xycar_ai_drive traffic_shortcut_policy.launch.py \
+  bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-20260821 \
+  use_camera:=true use_gamepad:=true allow_motion:=true
+
+ros2 run xycar_ai_drive traffic_shortcut_policy --ros-args \
+  --params-file /home/xytron/xycar_ws_mgw/install/xycar_ai_drive/share/xycar_ai_drive/config/traffic_shortcut_policy.yaml \
+  -p bundle_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/traffic-shortcut-nice-regression-resnet18-8s-20260821
+```
 
 ## 대회 signal + shortcut 통합 runtime
 

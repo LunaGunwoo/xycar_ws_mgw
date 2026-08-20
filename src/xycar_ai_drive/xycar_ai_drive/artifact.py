@@ -17,11 +17,14 @@ from xycar_ai_drive.steering_contract import (
     parse_steering_contract,
 )
 
-SUPPORTED_ARTIFACT_SCHEMA_VERSIONS = {1, 2, 3, 5, 6}
+SUPPORTED_ARTIFACT_SCHEMA_VERSIONS = {1, 2, 3, 5, 6, 7}
 LEGACY_CONTROL_ENCODING = 'legacy_command_201'
 COMPACT_CONTROL_ENCODING = 'driver_compact_v2'
 CATEGORICAL_PREDICTION_MODE = 'categorical'
 CONTINUOUS_REGRESSION_PREDICTION_MODE = 'continuous_regression'
+ANGLE_REGRESSION_FIXED_SPEED_PREDICTION_MODE = (
+    'angle_regression_fixed_speed'
+)
 CHECKSUM_FILENAME = 'SHA256SUMS'
 MANIFEST_FILENAME = 'manifest.yaml'
 
@@ -78,11 +81,13 @@ class PolicyArtifact:
     history: PolicyHistoryContract | None
     steering_contract: SteeringContract | None
     control_encoding: str = LEGACY_CONTROL_ENCODING
-    output_shapes: tuple[tuple[int, int], tuple[int, int]] = (
+    output_shapes: tuple[tuple[int, int], ...] = (
         (1, 201),
         (1, 201),
     )
     prediction_mode: str = CATEGORICAL_PREDICTION_MODE
+    fixed_speed: float | None = None
+    speed_normalization_divisor: float | None = None
 
 
 def load_policy_artifact(root: str | Path) -> PolicyArtifact:
@@ -125,6 +130,37 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
     )
     if schema_version == 1:
         shape = _validate_image_input(model_input)
+    elif schema_version == 7:
+        if model.get('architecture') != 'resnet18_speed_conditioned_angle':
+            raise ArtifactContractError(
+                'schema v7 requires resnet18_speed_conditioned_angle'
+            )
+        if model_input.get('kind') != 'tuple':
+            raise ArtifactContractError(
+                'schema v7 model input must be a tuple'
+            )
+        if model_input.get('order') != ['images', 'speed_normalized']:
+            raise ArtifactContractError(
+                'schema v7 model input order is unsupported'
+            )
+        shape = _validate_image_input(
+            _required_mapping(model_input, 'images', 'model.input')
+        )
+        speed_input = _required_mapping(
+            model_input,
+            'speed_normalized',
+            'model.input',
+        )
+        if (
+            speed_input.get('dtype') != 'float32'
+            or speed_input.get('shape') != [1, 1]
+            or speed_input.get('unit') != 'motor_speed'
+            or speed_input.get('normalization')
+            != 'value / runtime.speed_normalization_divisor'
+        ):
+            raise ArtifactContractError(
+                'schema v7 speed input contract is invalid'
+            )
     else:
         if model.get('architecture') != 'ar_control_tokens':
             raise ArtifactContractError('AR schema requires ar_control_tokens')
@@ -157,32 +193,48 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
     image_size = shape[2]
 
     model_output = _required_mapping(model, 'output', 'model')
-    if model_output.get('kind') != 'tuple':
-        raise ArtifactContractError('model output kind must be tuple')
-    expected_output_order = (
-        ['angle_driver', 'speed']
-        if schema_version == 6
-        else ['angle_logits', 'speed_logits']
-    )
-    if model_output.get('order') != expected_output_order:
-        raise ArtifactContractError('model output order is unsupported')
-    expected_output_shapes = (
-        [[1, 1], [1, 1]]
-        if schema_version == 6
-        else
-        [[1, 101], [1, 31]]
-        if schema_version == 5
-        else [[1, 201], [1, 201]]
-    )
-    if model_output.get('shapes') != expected_output_shapes:
-        raise ArtifactContractError(
-            f'model output shapes must be {expected_output_shapes}'
+    if schema_version == 7:
+        expected_output_shapes = [[1, 1]]
+        if (
+            model_output.get('kind') != 'tensor'
+            or model_output.get('name') != 'angle_normalized'
+            or model_output.get('dtype') != 'float32'
+            or model_output.get('shape') != [1, 1]
+            or model_output.get('range') != [-1.0, 1.0]
+            or model_output.get('runtime_mapping') != 'value * 100'
+        ):
+            raise ArtifactContractError(
+                'schema v7 model output contract is invalid'
+            )
+    else:
+        if model_output.get('kind') != 'tuple':
+            raise ArtifactContractError('model output kind must be tuple')
+        expected_output_order = (
+            ['angle_driver', 'speed']
+            if schema_version == 6
+            else ['angle_logits', 'speed_logits']
         )
+        if model_output.get('order') != expected_output_order:
+            raise ArtifactContractError('model output order is unsupported')
+        expected_output_shapes = (
+            [[1, 1], [1, 1]]
+            if schema_version == 6
+            else
+            [[1, 101], [1, 31]]
+            if schema_version == 5
+            else [[1, 201], [1, 201]]
+        )
+        if model_output.get('shapes') != expected_output_shapes:
+            raise ArtifactContractError(
+                f'model output shapes must be {expected_output_shapes}'
+            )
     prediction_mode = str(
         model.get('prediction_mode', CATEGORICAL_PREDICTION_MODE)
     )
     expected_prediction_mode = (
-        CONTINUOUS_REGRESSION_PREDICTION_MODE
+        ANGLE_REGRESSION_FIXED_SPEED_PREDICTION_MODE
+        if schema_version == 7
+        else CONTINUOUS_REGRESSION_PREDICTION_MODE
         if schema_version == 6
         else CATEGORICAL_PREDICTION_MODE
     )
@@ -218,12 +270,37 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
             'full-frame preprocessing must not define road_warp'
         )
 
+    fixed_speed = None
+    speed_normalization_divisor = None
+    if schema_version == 7:
+        runtime = _required_mapping(manifest, 'runtime', 'manifest')
+        fixed_speed = _finite_contract_number(
+            runtime,
+            'fixed_speed',
+            context='runtime',
+        )
+        if not 0.0 <= fixed_speed <= 30.0:
+            raise ArtifactContractError(
+                'runtime.fixed_speed must be in [0,30]'
+            )
+        speed_normalization_divisor = _finite_contract_number(
+            runtime,
+            'speed_normalization_divisor',
+            context='runtime',
+        )
+        if speed_normalization_divisor <= 0.0:
+            raise ArtifactContractError(
+                'runtime.speed_normalization_divisor must be positive'
+            )
+
     label_contract = _required_mapping(
         manifest,
         'label_contract',
         'manifest',
     )
-    if schema_version in {5, 6}:
+    if schema_version == 7:
+        _validate_fixed_speed_angle_label_contract(label_contract)
+    elif schema_version in {5, 6}:
         _validate_compact_label_contract(
             label_contract,
             regression=schema_version == 6,
@@ -255,6 +332,8 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
         control_encoding=control_encoding,
         output_shapes=tuple(tuple(value) for value in expected_output_shapes),
         prediction_mode=prediction_mode,
+        fixed_speed=fixed_speed,
+        speed_normalization_divisor=speed_normalization_divisor,
     )
 
 
@@ -423,6 +502,33 @@ def _validate_compact_label_contract(
         or vocabulary.get('vocabulary_size') != 105
     ):
         raise ArtifactContractError('schema v5 numeric vocabulary is invalid')
+
+
+def _validate_fixed_speed_angle_label_contract(
+    contract: Mapping[str, object],
+) -> None:
+    if (
+        contract.get('prediction_mode')
+        != ANGLE_REGRESSION_FIXED_SPEED_PREDICTION_MODE
+        or contract.get('output_shape') != [1, 1]
+    ):
+        raise ArtifactContractError(
+            'schema v7 prediction contract is invalid'
+        )
+    angle = _required_mapping(contract, 'angle', 'label_contract')
+    speed = _required_mapping(contract, 'speed', 'label_contract')
+    if (
+        angle.get('unit') != 'normalized_percent'
+        or angle.get('range') != [-100.0, 100.0]
+        or angle.get('model_output_range') != [-1.0, 1.0]
+        or angle.get('runtime_mapping') != 'angle_normalized * 100'
+        or speed.get('unit') != 'motor_speed'
+        or speed.get('source') != 'runtime.fixed_speed'
+        or speed.get('range') != [0.0, 30.0]
+    ):
+        raise ArtifactContractError(
+            'schema v7 angle or speed label contract is invalid'
+        )
 
 
 def _validate_regression_output_values(
@@ -648,6 +754,21 @@ def _finite_number(payload: Mapping[str, object], key: str) -> float:
     result = float(value)
     if not math.isfinite(result):
         raise ArtifactContractError(f'road_warp.{key} must be finite')
+    return result
+
+
+def _finite_contract_number(
+    payload: Mapping[str, object],
+    key: str,
+    *,
+    context: str,
+) -> float:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ArtifactContractError(f'{context}.{key} must be numeric')
+    result = float(value)
+    if not math.isfinite(result):
+        raise ArtifactContractError(f'{context}.{key} must be finite')
     return result
 
 

@@ -46,6 +46,8 @@ install -m 0755 "${SCRIPT_DIR}/run_gpu_competition.sh" \
     "${gpu_runtime_dir}/run_gpu_competition.sh"
 ln -sfn "${gpu_runtime_dir}/run_gpu_competition.sh" \
     "${HOME}/.local/bin/xycar-ai-competition"
+install -m 0755 "${SCRIPT_DIR}/run_gpu_traffic_shortcut.sh" \
+    "${gpu_runtime_dir}/run_gpu_traffic_shortcut.sh"
 install -m 0755 "${SCRIPT_DIR}/x27-jetson.sh" "${x27_path}"
 if [ ! -e "${profile_dir}/gamepad_stateless_manual_normalized_v2.yaml" ] \
     && [ ! -L "${profile_dir}/gamepad_stateless_manual_normalized_v2.yaml" ]; then

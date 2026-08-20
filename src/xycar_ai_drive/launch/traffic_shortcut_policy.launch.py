@@ -1,0 +1,119 @@
+# Copyright 2026 Gunwoo Moon
+# Licensed under the Apache License, Version 2.0
+
+import os
+
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    Shutdown,
+)
+from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+
+
+def generate_launch_description():
+    package_share = get_package_share_directory('xycar_ai_drive')
+    camera_share = get_package_share_directory('xycar_cam')
+    params_file = LaunchConfiguration('params_file')
+    bundle_root = LaunchConfiguration('bundle_root')
+    bundle_id = LaunchConfiguration('bundle_id')
+    use_camera = LaunchConfiguration('use_camera')
+    use_gamepad = LaunchConfiguration('use_gamepad')
+    allow_motion = LaunchConfiguration('allow_motion')
+    device_id = LaunchConfiguration('device_id')
+    base_socket_path = LaunchConfiguration('base_socket_path')
+    shortcut_socket_path = LaunchConfiguration('shortcut_socket_path')
+    rpc_timeout = LaunchConfiguration('inference_rpc_timeout_sec')
+
+    return LaunchDescription(
+        [
+            DeclareLaunchArgument(
+                'params_file',
+                default_value=os.path.join(
+                    package_share,
+                    'config',
+                    'traffic_shortcut_policy.yaml',
+                ),
+            ),
+            DeclareLaunchArgument(
+                'bundle_root',
+                default_value='/home/xytron/xycar_ws_mgw/artifacts/models',
+            ),
+            DeclareLaunchArgument('bundle_id'),
+            DeclareLaunchArgument('use_camera', default_value='true'),
+            DeclareLaunchArgument('use_gamepad', default_value='true'),
+            DeclareLaunchArgument('allow_motion', default_value='true'),
+            DeclareLaunchArgument('device_id', default_value='0'),
+            DeclareLaunchArgument(
+                'base_socket_path',
+                default_value='/run/user/1000/xycar-ai/traffic-base.sock',
+            ),
+            DeclareLaunchArgument(
+                'shortcut_socket_path',
+                default_value='/run/user/1000/xycar-ai/traffic-shortcut.sock',
+            ),
+            DeclareLaunchArgument(
+                'inference_rpc_timeout_sec',
+                default_value='0.20',
+            ),
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(camera_share, 'launch', 'xycar_cam.launch.py')
+                ),
+                condition=IfCondition(use_camera),
+            ),
+            Node(
+                package='joy',
+                executable='game_controller_node',
+                name='game_controller_node',
+                namespace='/',
+                output='screen',
+                condition=IfCondition(use_gamepad),
+                parameters=[
+                    params_file,
+                    {
+                        'device_id': ParameterValue(
+                            device_id,
+                            value_type=int,
+                        )
+                    },
+                ],
+                remappings=[('joy', '/joy')],
+            ),
+            Node(
+                package='xycar_ai_drive',
+                executable='traffic_shortcut_policy',
+                name='traffic_shortcut_policy',
+                namespace='/',
+                output='screen',
+                parameters=[
+                    params_file,
+                    {
+                        'bundle_dir': PathJoinSubstitution(
+                            [bundle_root, bundle_id]
+                        ),
+                        'allow_motion': ParameterValue(
+                            allow_motion,
+                            value_type=bool,
+                        ),
+                        'inference_device': 'cuda',
+                        'base_socket_path': base_socket_path,
+                        'shortcut_socket_path': shortcut_socket_path,
+                        'inference_rpc_timeout_sec': ParameterValue(
+                            rpc_timeout,
+                            value_type=float,
+                        ),
+                    },
+                ],
+                on_exit=Shutdown(
+                    reason='traffic shortcut policy exited; stopping sensors'
+                ),
+            ),
+        ]
+    )

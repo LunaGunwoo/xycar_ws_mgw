@@ -1095,6 +1095,113 @@ def test_schema_v6_runtime_decodes_regression_and_fails_closed(tmp_path):
         runtime.infer(frame, [[50, 75]] * 4)
 
 
+def test_schema_v7_runtime_uses_angle_only_and_fixed_speed(tmp_path):
+    torch = pytest.importorskip('torch')
+
+    class AngleOnlyPolicy(torch.nn.Module):
+        def forward(self, images, speed_normalized):
+            signal = images[:, :1, :1, :1].reshape(-1, 1) * 0
+            return signal + speed_normalized * 0 + 0.25
+
+    artifact = tmp_path / 'fixture-fixed-speed-angle-policy'
+    artifact.mkdir()
+    sample_image = torch.zeros(1, 3, 4, 4)
+    sample_speed = torch.tensor([[23.0 / 25.0]], dtype=torch.float32)
+    torch.jit.trace(
+        AngleOnlyPolicy(),
+        (sample_image, sample_speed),
+        strict=True,
+    ).save(str(artifact / 'model.ts'))
+    manifest = {
+        'schema_version': 7,
+        'artifact_id': artifact.name,
+        'model': {
+            'format': 'torchscript',
+            'file': 'model.ts',
+            'architecture': 'resnet18_speed_conditioned_angle',
+            'prediction_mode': 'angle_regression_fixed_speed',
+            'input': {
+                'kind': 'tuple',
+                'order': ['images', 'speed_normalized'],
+                'images': {
+                    'color_space': 'RGB',
+                    'dtype': 'float32',
+                    'shape': [1, 3, 4, 4],
+                },
+                'speed_normalized': {
+                    'dtype': 'float32',
+                    'shape': [1, 1],
+                    'unit': 'motor_speed',
+                    'normalization': (
+                        'value / runtime.speed_normalization_divisor'
+                    ),
+                },
+            },
+            'output': {
+                'kind': 'tensor',
+                'name': 'angle_normalized',
+                'dtype': 'float32',
+                'shape': [1, 1],
+                'range': [-1.0, 1.0],
+                'runtime_mapping': 'value * 100',
+            },
+        },
+        'preprocessing': {
+            'geometry': 'full_frame_bicubic_resize',
+            'image_size': 4,
+            'mean': [0.5, 0.5, 0.5],
+            'std': [0.5, 0.5, 0.5],
+        },
+        'runtime': {
+            'fixed_speed': 23.0,
+            'speed_normalization_divisor': 25.0,
+        },
+        'label_contract': {
+            'prediction_mode': 'angle_regression_fixed_speed',
+            'output_shape': [1, 1],
+            'angle': {
+                'unit': 'normalized_percent',
+                'range': [-100.0, 100.0],
+                'model_output_range': [-1.0, 1.0],
+                'runtime_mapping': 'angle_normalized * 100',
+            },
+            'speed': {
+                'unit': 'motor_speed',
+                'source': 'runtime.fixed_speed',
+                'range': [0.0, 30.0],
+            },
+        },
+        'steering_contract': steering_contract_mapping(),
+    }
+    (artifact / 'manifest.yaml').write_text(
+        yaml.safe_dump(manifest, sort_keys=False),
+        encoding='utf-8',
+    )
+    _write_checksums(artifact)
+
+    contract = load_policy_artifact(artifact)
+    assert contract.output_shapes == ((1, 1),)
+    assert contract.fixed_speed == pytest.approx(23.0)
+    assert contract.speed_normalization_divisor == pytest.approx(25.0)
+    runtime = TorchScriptPolicy(
+        artifact_dir=str(artifact),
+        torch_num_threads=1,
+        warmup_count=1,
+    )
+    frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    assert runtime.infer(frame).command == DriveCommand(25.0, 23.0)
+    with pytest.raises(PolicyRuntimeError, match='does not accept'):
+        runtime.infer(frame, [[100, 123]] * 4)
+
+    class OutOfRangePolicy:
+        def __call__(self, *_args):
+            return torch.tensor([[1.01]])
+
+    runtime._model = OutOfRangePolicy()
+    with pytest.raises(PolicyRuntimeError, match=r'\[-1,1\]'):
+        runtime.infer(frame)
+
+
 def test_road_warp_artifact_and_runtime_preprocessing(tmp_path):
     artifact = tmp_path / 'warp-policy'
     artifact.mkdir()

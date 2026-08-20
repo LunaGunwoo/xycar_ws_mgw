@@ -82,6 +82,23 @@ def _is_paired_unnamed_relay(endpoint, subscriptions) -> bool:
     )
 
 
+def _validate_fixed_speed_cap(
+    artifact: PolicyArtifact | object | None,
+    speed_cap: float,
+) -> None:
+    fixed_speed = getattr(artifact, 'fixed_speed', None)
+    if fixed_speed is not None and not np.isclose(
+        speed_cap,
+        fixed_speed,
+        rtol=0.0,
+        atol=1e-6,
+    ):
+        raise ValueError(
+            'speed_cap must equal the fixed-speed artifact command '
+            f'({fixed_speed:g})'
+        )
+
+
 class FrontCamPolicyNode(Node):
     """Infer continuously and publish motor commands only while A is held."""
 
@@ -143,6 +160,7 @@ class FrontCamPolicyNode(Node):
             'artifact',
             getattr(self._policy, '_artifact', None),
         )
+        _validate_fixed_speed_cap(self.artifact, self.speed_cap)
         self._artifact_motion_contract_valid = (
             self.artifact is not None
             and self.artifact.steering_contract

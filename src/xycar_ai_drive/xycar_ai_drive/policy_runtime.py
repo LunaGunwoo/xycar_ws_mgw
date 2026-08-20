@@ -11,6 +11,8 @@ import cv2
 import numpy as np
 
 from xycar_ai_drive.artifact import (
+    ANGLE_REGRESSION_FIXED_SPEED_PREDICTION_MODE,
+    CATEGORICAL_PREDICTION_MODE,
     COMPACT_CONTROL_ENCODING,
     CONTINUOUS_REGRESSION_PREDICTION_MODE,
     RoadWarpParameters,
@@ -99,7 +101,12 @@ class TorchScriptPolicy:
         )
         with torch.inference_mode():
             for _ in range(warmup_count):
-                if self._history_class_ids is None:
+                if (
+                    self.artifact.prediction_mode
+                    == ANGLE_REGRESSION_FIXED_SPEED_PREDICTION_MODE
+                ):
+                    outputs = self._model(sample, self._fixed_speed_tensor())
+                elif self._history_class_ids is None:
                     outputs = self._model(sample)
                 else:
                     history = torch.tensor(
@@ -159,7 +166,15 @@ class TorchScriptPolicy:
                     inference_history = self._inference_history(
                         history_class_ids
                     )
-                    if inference_history is None:
+                    if (
+                        self.artifact.prediction_mode
+                        == ANGLE_REGRESSION_FIXED_SPEED_PREDICTION_MODE
+                    ):
+                        outputs = self._model(
+                            tensor,
+                            self._fixed_speed_tensor(),
+                        )
+                    elif inference_history is None:
                         outputs = self._model(tensor)
                     else:
                         history = self._torch.tensor(
@@ -170,6 +185,16 @@ class TorchScriptPolicy:
                 inference_ms = (time.perf_counter() - started) * 1000.0
                 angle_logits, speed_logits = self._validate_outputs(outputs)
                 if (
+                    self.artifact.prediction_mode
+                    == ANGLE_REGRESSION_FIXED_SPEED_PREDICTION_MODE
+                ):
+                    assert self.artifact.fixed_speed is not None
+                    command = DriveCommand(
+                        angle=float(angle_logits.item()) * 100.0,
+                        speed=self.artifact.fixed_speed,
+                    )
+                    angle_class_id = speed_class_id = None
+                elif (
                     self.artifact.prediction_mode
                     == CONTINUOUS_REGRESSION_PREDICTION_MODE
                 ):
@@ -207,7 +232,7 @@ class TorchScriptPolicy:
             raise PolicyRuntimeError(
                 f'TorchScript inference failed: {exc}'
             ) from exc
-        if self.artifact.prediction_mode != CONTINUOUS_REGRESSION_PREDICTION_MODE:
+        if self.artifact.prediction_mode == CATEGORICAL_PREDICTION_MODE:
             decoder = (
                 decode_compact_output_ids
                 if self.artifact.control_encoding == COMPACT_CONTROL_ENCODING
@@ -249,7 +274,41 @@ class TorchScriptPolicy:
             )
         return values
 
+    def _fixed_speed_tensor(self):
+        fixed_speed = self.artifact.fixed_speed
+        divisor = self.artifact.speed_normalization_divisor
+        if fixed_speed is None or divisor is None:
+            raise PolicyRuntimeError(
+                'fixed-speed artifact runtime values are missing'
+            )
+        return self._torch.tensor(
+            [[fixed_speed / divisor]],
+            dtype=self._torch.float32,
+        )
+
     def _validate_outputs(self, outputs: object):
+        if (
+            self.artifact.prediction_mode
+            == ANGLE_REGRESSION_FIXED_SPEED_PREDICTION_MODE
+        ):
+            if not isinstance(outputs, self._torch.Tensor):
+                raise PolicyRuntimeError('angle output must be a tensor')
+            expected_shape = self.artifact.output_shapes[0]
+            if tuple(outputs.shape) != expected_shape:
+                raise PolicyRuntimeError(
+                    f'angle output shape must be {list(expected_shape)}, '
+                    f'got {tuple(outputs.shape)}'
+                )
+            if not bool(self._torch.isfinite(outputs).all()):
+                raise PolicyRuntimeError(
+                    'angle output contains a non-finite value'
+                )
+            value = float(outputs.item())
+            if not -1.0 <= value <= 1.0:
+                raise PolicyRuntimeError(
+                    'normalized angle output must be in [-1,1]'
+                )
+            return outputs, None
         if not isinstance(outputs, (tuple, list)) or len(outputs) != 2:
             raise PolicyRuntimeError('model output must be a two-tensor tuple')
         angle_logits, speed_logits = outputs
