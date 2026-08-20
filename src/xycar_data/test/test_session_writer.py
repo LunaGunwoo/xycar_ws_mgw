@@ -10,6 +10,10 @@ import cv2
 import numpy as np
 import yaml
 
+from xycar_data.class_image_writer import (
+    AsyncClassImageWriter,
+    ClassImageSample,
+)
 from xycar_data.session_writer import (
     AsyncSessionWriter,
     CameraSample,
@@ -52,6 +56,17 @@ def _writer(root, *, image_format='png', jpeg_quality=95):
         image_format=image_format,
         jpeg_quality=jpeg_quality,
     )
+
+
+def _wait_for_class_images(writer, expected_count):
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if sum(writer.counts.values()) == expected_count:
+            return
+        if writer.failure is not None:
+            raise AssertionError(writer.failure)
+        time.sleep(0.01)
+    raise AssertionError('timed out waiting for class images')
 
 
 def test_finish_writes_buffered_final_samples_in_order(tmp_path):
@@ -213,3 +228,66 @@ def test_unique_path_adds_suffix_for_same_timestamp(tmp_path):
     second.mkdir()
 
     assert _unique_path(base) == base.with_name(f'{base.name}_3')
+
+
+def test_class_image_writer_keeps_flat_jpeg_class_directories(tmp_path):
+    root = tmp_path / 'traffic_signal_images'
+    classes = ('red', 'yellow', 'straight_green', 'left_green')
+    writer = AsyncClassImageWriter(
+        root,
+        class_names=classes,
+        jpeg_quality=95,
+        queue_size=16,
+        min_free_space_mb=0,
+    )
+    try:
+        for sequence, class_name in enumerate(classes, start=1):
+            assert writer.submit(
+                ClassImageSample(
+                    class_name=class_name,
+                    image=np.full(
+                        (8, 12, 3),
+                        sequence * 20,
+                        dtype=np.uint8,
+                    ),
+                    sequence=sequence,
+                    received_wall_time_ns=1_800_000_000_000_000_000,
+                )
+            )
+        _wait_for_class_images(writer, len(classes))
+    finally:
+        assert writer.shutdown()
+
+    assert {path.name for path in root.iterdir()} == set(classes)
+    for class_name in classes:
+        entries = list((root / class_name).iterdir())
+        assert len(entries) == 1
+        assert entries[0].suffix == '.jpg'
+        assert cv2.imread(str(entries[0])).shape == (8, 12, 3)
+
+
+def test_class_image_writer_never_overwrites_a_colliding_filename(tmp_path):
+    root = tmp_path / 'traffic_signal_images'
+    writer = AsyncClassImageWriter(
+        root,
+        class_names=('red',),
+        jpeg_quality=95,
+        queue_size=4,
+        min_free_space_mb=0,
+    )
+    sample = ClassImageSample(
+        class_name='red',
+        image=np.zeros((4, 6, 3), dtype=np.uint8),
+        sequence=1,
+        received_wall_time_ns=1_800_000_000_000_000_000,
+    )
+    try:
+        assert writer.submit(sample)
+        assert writer.submit(sample)
+        _wait_for_class_images(writer, 2)
+    finally:
+        assert writer.shutdown()
+
+    images = sorted((root / 'red').glob('*.jpg'))
+    assert len(images) == 2
+    assert images[0].name != images[1].name

@@ -35,6 +35,18 @@ from xycar_data.gamepad_teleop import (
     matching_lidar_snapshot,
 )
 from xycar_data.session_writer import LidarSnapshot
+from xycar_data.traffic_signal_collector import (
+    SignalSelection,
+    select_signal_class,
+)
+
+
+SIGNAL_BUTTONS = {
+    'red': 2,
+    'yellow': 3,
+    'straight_green': 1,
+    'left_green': 0,
+}
 
 
 def _endpoint(participant: bytes, entity: bytes, *, named: bool = False):
@@ -198,6 +210,58 @@ def test_custom_mapping_and_limits_are_supported():
     )
     command = map_joy_axes([-0.25, -0.5, -0.5], config)
     assert command == DriveCommand(-15.0, 1.25)
+
+
+def test_traffic_signal_speed_profile_is_symmetric_and_proportional():
+    config = GamepadConfig(
+        max_forward_speed=5.0,
+        max_reverse_speed=5.0,
+    )
+
+    forward = map_joy_axes(
+        [0.0, 0.0, 0.0, 0.0, 0.0, -0.5],
+        config,
+    )
+    reverse = map_joy_axes(
+        [0.0, 0.0, 0.0, 0.0, -0.5, 0.0],
+        config,
+    )
+    cancelled = map_joy_axes(
+        [0.0, 0.0, 0.0, 0.0, -1.0, -1.0],
+        config,
+    )
+
+    assert forward.speed == pytest.approx(2.5)
+    assert reverse.speed == pytest.approx(-2.5)
+    assert cancelled.speed == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize(
+    ('buttons', 'expected'),
+    [
+        ([0, 0, 1, 0], SignalSelection('red')),
+        ([0, 0, 0, 1], SignalSelection('yellow')),
+        ([0, 1, 0, 0], SignalSelection('straight_green')),
+        ([1, 0, 0, 0], SignalSelection('left_green')),
+        ([0, 0, 0, 0], SignalSelection(None)),
+        ([0, 0, 1, 1], SignalSelection(None, ambiguous=True)),
+    ],
+)
+def test_signal_class_selection_requires_exactly_one_button(
+    buttons,
+    expected,
+):
+    assert select_signal_class(buttons, SIGNAL_BUTTONS) == expected
+
+
+def test_signal_class_selection_rejects_short_or_duplicate_mapping():
+    with pytest.raises(InvalidJoyInput, match='button index 3'):
+        select_signal_class([0, 0], SIGNAL_BUTTONS)
+    with pytest.raises(ValueError, match='must be distinct'):
+        select_signal_class(
+            [0, 0, 0, 0],
+            {**SIGNAL_BUTTONS, 'yellow': 2},
+        )
 
 
 @pytest.mark.parametrize(
@@ -529,6 +593,40 @@ def test_normalized_collection_templates_are_versioned_and_strict(tmp_path):
     )
     with pytest.raises(ValueError, match='steering_contract'):
         _validate_collection_profile(str(invalid))
+
+
+def test_traffic_signal_profile_and_launch_preserve_flat_class_contract():
+    package_root = Path(__file__).parents[1]
+    profile = (
+        package_root
+        / 'config'
+        / 'traffic_signal_collection_normalized_v1.yaml'
+    )
+    config = yaml.safe_load(profile.read_text(encoding='utf-8'))[
+        'traffic_signal_collector'
+    ]['ros__parameters']
+    launch_text = (
+        package_root / 'launch' / 'traffic_signal_collection.launch.py'
+    ).read_text(encoding='utf-8')
+
+    assert config['max_forward_speed'] == 5.0
+    assert config['max_reverse_speed'] == 5.0
+    assert config['red_button'] == 2
+    assert config['yellow_button'] == 3
+    assert config['straight_green_button'] == 1
+    assert config['left_green_button'] == 0
+    assert config['recording_root_dir'].endswith('/traffic_signal_images')
+    assert config['recording_jpeg_quality'] == 95
+    assert config['steering_contract'] == 'normalized_percent_v1'
+    assert config['preview_enabled'] is False
+    assert "default_value='/traffic_signal_collector/joy'" in launch_text
+    assert "default_value='false'" in launch_text
+    assert "('image', '/traffic_signal_collector/preview')" in launch_text
+    assert "'collection_profile_path': ParameterValue(" in launch_text
+    _validate_collection_profile(
+        str(profile),
+        node_name='traffic_signal_collector',
+    )
 
 
 def test_lidar_include_keeps_teleop_params_file_scoped(monkeypatch):

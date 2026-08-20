@@ -4,6 +4,7 @@
 import csv
 import time
 
+import cv2
 import numpy as np
 import pytest
 import rclpy
@@ -19,12 +20,20 @@ from xycar_data.gamepad_teleop import (
     GamepadTeleopNode,
     RecordingState,
 )
+from xycar_data.traffic_signal_collector import (
+    SIGNAL_CLASSES,
+    TrafficSignalCollectorNode,
+)
 
 
 JOY_TOPIC = '/xycar_data_test/gamepad/joy'
 MOTOR_TOPIC = '/xycar_data_test/gamepad/motor'
 CAMERA_TOPIC = '/xycar_data_test/gamepad/camera'
 LIDAR_TOPIC = '/xycar_data_test/gamepad/lidar'
+SIGNAL_JOY_TOPIC = '/xycar_data_test/signal/joy'
+SIGNAL_MOTOR_TOPIC = '/xycar_data_test/signal/motor'
+SIGNAL_CAMERA_TOPIC = '/xycar_data_test/signal/camera'
+SIGNAL_PREVIEW_TOPIC = '/xycar_data_test/signal/preview'
 
 
 def _joy_message(
@@ -33,13 +42,15 @@ def _joy_message(
     rt: float = 0.0,
     a: bool = False,
     b: bool = False,
+    x: bool = False,
+    y: bool = False,
 ) -> Joy:
     message = Joy()
     # Callers provide 0..1 depth; the vehicle controller reports 0..-1.
     lt_axis = -lt
     rt_axis = -rt
     message.axes = [steering, 0.0, 0.0, 0.0, lt_axis, rt_axis]
-    message.buttons = [int(a), int(b)]
+    message.buttons = [int(a), int(b), int(x), int(y)]
     return message
 
 
@@ -194,6 +205,91 @@ def ros_harness(monkeypatch, tmp_path):
     rclpy.shutdown()
 
 
+@pytest.fixture
+def signal_harness(monkeypatch, tmp_path):
+    # Keep this test graph away from the vehicle domain and motor topic.
+    monkeypatch.setenv('ROS_DOMAIN_ID', '223')
+    monkeypatch.setenv('ROS_LOCALHOST_ONLY', '1')
+    rclpy.init(args=[])
+
+    root = tmp_path / 'traffic_signal_images'
+    profile = tmp_path / 'traffic_signal_collection_normalized_v1.yaml'
+    profile.write_text(
+        'traffic_signal_collector:\n'
+        '  ros__parameters:\n'
+        '    steering_contract: normalized_percent_v1\n',
+        encoding='utf-8',
+    )
+    overrides = [
+        Parameter('joy_topic', value=SIGNAL_JOY_TOPIC),
+        Parameter('motor_topic', value=SIGNAL_MOTOR_TOPIC),
+        Parameter('camera_topic', value=SIGNAL_CAMERA_TOPIC),
+        Parameter('preview_topic', value=SIGNAL_PREVIEW_TOPIC),
+        Parameter('collection_profile_path', value=str(profile)),
+        Parameter('steering_contract', value='normalized_percent_v1'),
+        Parameter('max_forward_speed', value=5.0),
+        Parameter('max_reverse_speed', value=5.0),
+        Parameter('publish_rate_hz', value=20.0),
+        Parameter('joy_timeout_sec', value=0.25),
+        Parameter('camera_timeout_sec', value=0.20),
+        Parameter('graph_check_period_sec', value=0.05),
+        Parameter('neutral_trigger_threshold', value=0.05),
+        Parameter('stop_publish_count', value=1),
+        Parameter('recording_root_dir', value=str(root)),
+        Parameter('recording_jpeg_quality', value=95),
+        Parameter('recording_queue_size', value=64),
+        Parameter('recording_min_free_space_mb', value=0),
+        Parameter('preview_enabled', value=True),
+    ]
+    collector = TrafficSignalCollectorNode(parameter_overrides=overrides)
+    peer = Node('traffic_signal_collector_test_peer')
+    commands = []
+    previews = []
+
+    joy_publisher = peer.create_publisher(Joy, SIGNAL_JOY_TOPIC, 10)
+    camera_publisher = peer.create_publisher(
+        Image,
+        SIGNAL_CAMERA_TOPIC,
+        qos_profile_sensor_data,
+    )
+    motor_subscription = peer.create_subscription(
+        Float32MultiArray,
+        SIGNAL_MOTOR_TOPIC,
+        lambda message: commands.append(tuple(message.data)),
+        10,
+    )
+    preview_subscription = peer.create_subscription(
+        Image,
+        SIGNAL_PREVIEW_TOPIC,
+        lambda message: previews.append(message),
+        qos_profile_sensor_data,
+    )
+    executor = SingleThreadedExecutor()
+    executor.add_node(collector)
+    executor.add_node(peer)
+    harness = {
+        'executor': executor,
+        'teleop': collector,
+        'peer': peer,
+        'joy_publisher': joy_publisher,
+        'camera_publisher': camera_publisher,
+        'motor_subscription': motor_subscription,
+        'preview_subscription': preview_subscription,
+        'received_commands': commands,
+        'previews': previews,
+        'recording_root': root,
+    }
+    yield harness
+
+    collector.shutdown()
+    executor.remove_node(collector)
+    executor.remove_node(peer)
+    collector.destroy_node()
+    peer.destroy_node()
+    executor.shutdown()
+    rclpy.shutdown()
+
+
 def test_neutral_rearming_repeat_and_graph_fail_safes(ros_harness):
     harness = ros_harness
     teleop = harness['teleop']
@@ -253,7 +349,11 @@ def test_neutral_rearming_repeat_and_graph_fail_safes(ros_harness):
     commands.clear()
     assert _spin_until(
         harness,
-        lambda: bool(teleop._competitors) and bool(commands),
+        lambda: (
+            bool(teleop._competitors)
+            and bool(commands)
+            and commands[-1][1] == 0.0
+        ),
         2.0,
         held_forward,
     )
@@ -537,3 +637,165 @@ def test_nonpositive_speed_discards_fifteen_and_keeps_driving(
         ) as stream:
             sample_counts.append(len(list(csv.DictReader(stream))))
     assert sorted(sample_counts) == [3, 5]
+
+
+def test_signal_buttons_capture_each_frame_without_controlling_motion(
+    signal_harness,
+):
+    harness = signal_harness
+    collector = harness['teleop']
+    neutral = _joy_message()
+
+    harness['camera_publisher'].publish(_image_message(1))
+    _spin_for(harness, 0.15, neutral)
+    assert collector._has_motor_subscriber
+    assert collector._arming_gate.armed
+
+    # X captures red even while speed remains zero.
+    red_hold = _joy_message(x=True)
+    _spin_for(harness, 0.05, red_hold)
+    for sequence in range(2, 5):
+        harness['camera_publisher'].publish(_image_message(sequence))
+        _spin_for(harness, 0.03, red_hold)
+    assert _spin_until(
+        harness,
+        lambda: collector.writer.counts['red'] == 3,
+        2.0,
+        red_hold,
+    )
+
+    # The same held label remains independent of proportional RT motion.
+    harness['received_commands'].clear()
+    moving_red = _joy_message(rt=0.5, x=True)
+    harness['camera_publisher'].publish(_image_message(5))
+    _spin_for(harness, 0.10, moving_red)
+    assert any(
+        command[1] == pytest.approx(2.5)
+        for command in harness['received_commands']
+    )
+    assert _spin_until(
+        harness,
+        lambda: collector.writer.counts['red'] == 4,
+        2.0,
+        moving_red,
+    )
+
+    # Releasing every class button stops capture on the next camera frame.
+    before_release = sum(collector.writer.counts.values())
+    _spin_for(harness, 0.05, neutral)
+    harness['camera_publisher'].publish(_image_message(6))
+    _spin_for(harness, 0.05, neutral)
+    assert sum(collector.writer.counts.values()) == before_release
+
+    class_messages = (
+        ('yellow', _joy_message(y=True)),
+        ('straight_green', _joy_message(b=True)),
+        ('left_green', _joy_message(a=True)),
+    )
+    for sequence, (class_name, joy_message) in enumerate(
+        class_messages,
+        start=7,
+    ):
+        _spin_for(harness, 0.05, joy_message)
+        harness['camera_publisher'].publish(_image_message(sequence))
+        _spin_for(harness, 0.05, joy_message)
+        assert _spin_until(
+            harness,
+            lambda name=class_name: collector.writer.counts[name] == 1,
+            2.0,
+            joy_message,
+        )
+
+    # Simultaneous X+Y is visible as ambiguous but never duplicated.
+    before_ambiguous = sum(collector.writer.counts.values())
+    ambiguous = _joy_message(x=True, y=True)
+    _spin_for(harness, 0.05, ambiguous)
+    harness['camera_publisher'].publish(_image_message(10))
+    _spin_for(harness, 0.05, ambiguous)
+    assert collector._selection.ambiguous
+    assert sum(collector.writer.counts.values()) == before_ambiguous
+    assert harness['previews']
+
+    assert set(collector.writer.counts) == set(SIGNAL_CLASSES)
+    for class_name in SIGNAL_CLASSES:
+        images = list((harness['recording_root'] / class_name).iterdir())
+        assert images
+        assert all(path.suffix == '.jpg' for path in images)
+    saved_red = cv2.imread(
+        str(next((harness['recording_root'] / 'red').glob('*.jpg')))
+    )
+    assert saved_red is not None
+    # Stored frames stay clean; preview text is rendered only on its topic.
+    assert int(saved_red.max()) - int(saved_red.min()) <= 2
+
+
+def test_signal_collector_stops_for_stale_camera_and_writer_failure(
+    signal_harness,
+):
+    harness = signal_harness
+    collector = harness['teleop']
+    neutral = _joy_message()
+    forward = _joy_message(rt=0.5)
+
+    harness['camera_publisher'].publish(_image_message(1))
+    _spin_for(harness, 0.15, neutral)
+    harness['received_commands'].clear()
+    harness['camera_publisher'].publish(_image_message(2))
+    _spin_for(harness, 0.10, forward)
+    assert any(
+        command[1] == pytest.approx(2.5)
+        for command in harness['received_commands']
+    )
+
+    harness['received_commands'].clear()
+    _spin_for(harness, 0.35, forward)
+    assert harness['received_commands'][-1] == pytest.approx((0.0, 0.0))
+    assert not collector._arming_gate.armed
+
+    class FailedWriter:
+        failure = 'forced writer failure'
+        counts = {name: 0 for name in SIGNAL_CLASSES}
+
+        def shutdown(self):
+            return True
+
+    assert collector.writer.shutdown()
+    collector.writer = FailedWriter()
+    harness['received_commands'].clear()
+    _spin_for(harness, 0.10, neutral)
+    assert collector._capture_disabled
+    assert harness['received_commands'][-1] == pytest.approx((0.0, 0.0))
+    assert not collector._arming_gate.armed
+
+
+def test_signal_collector_stops_instead_of_dropping_a_full_queue(
+    signal_harness,
+):
+    harness = signal_harness
+    collector = harness['teleop']
+
+    class BackloggedWriter:
+        failure = None
+        counts = {name: 0 for name in SIGNAL_CLASSES}
+
+        def submit(self, _sample):
+            return False
+
+        def shutdown(self):
+            return True
+
+    assert collector.writer.shutdown()
+    collector.writer = BackloggedWriter()
+
+    neutral = _joy_message()
+    red_hold = _joy_message(x=True)
+    harness['camera_publisher'].publish(_image_message(1))
+    _spin_for(harness, 0.15, neutral)
+    _spin_for(harness, 0.05, red_hold)
+    harness['received_commands'].clear()
+    harness['camera_publisher'].publish(_image_message(2))
+    _spin_for(harness, 0.10, red_hold)
+
+    assert collector._capture_disabled
+    assert harness['received_commands'][-1] == pytest.approx((0.0, 0.0))
+    assert not collector._arming_gate.armed

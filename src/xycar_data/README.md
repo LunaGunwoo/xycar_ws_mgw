@@ -229,6 +229,94 @@ timeout, queue 크기, 이미지 형식, JPEG 품질과 PNG compression 범위 �
 실제 차에서는 raised-car 상태에서 왼쪽 stick 조향 부호와 후진 부호를 먼저
 확인한 뒤 값을 조정한다.
 
+## 신호등 버튼 홀드 이미지 수집
+
+`traffic_signal_collection.launch.py`는 기존 mission sequence와 별개로
+신호 상태별 원본 이미지만 평평한 class directory에 저장한다. 이 launch는
+camera, `joy/game_controller_node`와 `/xycar_motor` publisher를 함께 시작하며
+LiDAR는 시작하지 않는다. camera와 motor publisher 각각에 대해 실행 직전
+승인을 받고, 바퀴 지지 또는 안전 공간, 모터 전원 차단과 `Ctrl+C`, 경쟁
+publisher 부재를 확인한다. DRIVE ON/OFF 버튼은 없으므로 중립 확인 뒤 RT 또는
+LT를 누르면 바로 움직일 수 있다.
+
+```bash
+ssh -t xytron@xycar-gpu
+cd /home/xytron/xycar_ws_mgw
+source /opt/ros/humble/setup.bash
+source /home/xytron/xycar_ws_mgw/install/setup.bash
+export ROS_DOMAIN_ID=7
+export ROS_NAMESPACE=xycar
+export ROS_LOCALHOST_ONLY=1
+
+ros2 launch xycar_data traffic_signal_collection.launch.py \
+  use_camera:=true show_preview:=false
+```
+
+입력과 저장 class는 다음과 같다. 버튼은 주행 명령을 바꾸지 않으며, 정지
+상태에서도 class 버튼을 누르면 새 `/image_raw` frame마다 저장한다.
+
+| Gamepad 입력 | 동작 |
+| --- | --- |
+| 왼쪽 스틱 | normalized 조향 `-100..100` |
+| RT/LT | `speed = RT_depth * 5 - LT_depth * 5` |
+| X hold | `red/`에 JPEG 저장 |
+| Y hold | `yellow/`에 JPEG 저장 |
+| B hold | `straight_green/`에 JPEG 저장 |
+| A hold | `left_green/`에 JPEG 저장 |
+
+정확히 한 class 버튼을 누르는 동안에만 저장한다. 두 개 이상을 동시에 누르면
+terminal과 preview에 `AMBIGUOUS`를 표시하고 어느 directory에도 저장하지 않는다.
+버튼을 놓은 새 Joy 입력을 받으면 다음 camera frame부터 저장하지 않는다. 원본
+JPEG는 overlay 없이 품질 95로 저장하며 timestamp와 process-local camera sequence를
+조합한 충돌 방지 파일명을 사용한다.
+
+```text
+/home/xytron/xycar_data/traffic_signal_images/
+├── red/*.jpg
+├── yellow/*.jpg
+├── straight_green/*.jpg
+└── left_green/*.jpg
+```
+
+이 root에는 class directory와 JPEG만 두고 `samples.csv`, `metadata.yaml` 또는
+session directory를 만들지 않는다. 현재 GRU 기반 대회 signal 학습은 연속 mission
+session과 승인 annotation을 요구하므로 이 flat dataset을 자동으로 읽지 않는다.
+
+Jetson local GNOME desktop 또는 RDP처럼 GUI가 있는 terminal에서는 다음처럼
+선택적 preview를 켤 수 있다. 저장 원본과 별도의
+`/traffic_signal_collector/preview`에 `IDLE`, `SAVING`, `AMBIGUOUS`, class별 저장
+수를 overlay하고 `image_view`로 표시한다. 일반 headless SSH에서는 기본값
+`show_preview:=false`를 유지한다.
+
+```bash
+ros2 launch xycar_data traffic_signal_collection.launch.py \
+  use_camera:=true show_preview:=true
+```
+
+이미 승인된 `/image_raw` publisher가 실행 중이면 camera 중복 접근을 피한다.
+
+```bash
+ros2 launch xycar_data traffic_signal_collection.launch.py \
+  use_camera:=false show_preview:=false
+```
+
+Joy와 camera가 이미 별도 승인된 node에서 발행 중이면 collector만 직접 실행할
+수 있다. 이 명령도 motor publisher를 만들므로 실행 직전 별도 승인이 필요하다.
+
+```bash
+PROFILE=/home/xytron/xycar_ws_mgw/install/xycar_data/share/xycar_data/config/traffic_signal_collection_normalized_v1.yaml
+ros2 run xycar_data traffic_signal_collector --ros-args \
+  --params-file "${PROFILE}" \
+  -p collection_profile_path:="${PROFILE}"
+```
+
+Joy가 `0.25`초, camera가 `0.50`초 이상 stale이거나 축이 잘못됐거나 motor
+subscriber가 사라지거나 경쟁 publisher가 발견되면 `[0, 0]`으로 정지하고
+LT/RT 중립 재입력을 요구한다. writer queue 초과, 저장 공간 부족 또는 JPEG 쓰기
+실패도 수집을 disabled 상태로 만들고 정지하며 같은 process에서는 재개하지
+않는다. 종료할 때는 class 버튼과 LT/RT를 모두 놓고 speed 0을 확인한 뒤 launch를
+`Ctrl+C`로 끝내고, 마지막으로 motor bridge를 종료한다.
+
 ## 대회 mission sequence 수집
 
 `mission_sequence_collection.launch.py`는 신호등 정지·재출발과 지름길 전체를

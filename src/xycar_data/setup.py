@@ -40,6 +40,10 @@ setup(
                 "mission_sequence_collector = "
                 "xycar_data.gamepad_teleop:main"
             ),
+            (
+                "traffic_signal_collector = "
+                "xycar_data.traffic_signal_collector:main"
+            ),
         ],
     },
 )
