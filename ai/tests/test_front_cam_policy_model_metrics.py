@@ -188,6 +188,28 @@ def test_regression_metrics_use_driver_and_normalized_angle_units():
     assert metrics["test_angle_sign_acc"] == 1.0
 
 
+def test_regression_prediction_std_accumulates_amp_outputs_in_float32():
+    accumulator = RegressionMetricAccumulator("train")
+    accumulator.update(
+        outputs={
+            "angle_driver": torch.full((128, 1), 50.0, dtype=torch.float16),
+            "speed": torch.full((128, 1), 30.0, dtype=torch.float16),
+        },
+        batch={
+            "angle_raw": torch.full((128,), 100.0),
+            "speed_raw": torch.full((128,), 30.0),
+        },
+        total_loss=torch.tensor(0.0),
+        angle_loss=torch.tensor(0.0),
+        speed_loss=torch.tensor(0.0),
+        emd_loss=torch.tensor(0.0),
+    )
+    metrics = accumulator.compute()
+
+    assert metrics["train_angle_prediction_std"] == 0.0
+    assert metrics["train_speed_prediction_std"] == 0.0
+
+
 def test_compact_metrics_decode_angle_back_to_normalized_units():
     angle_logits = torch.full((2, 101), -1000.0)
     speed_logits = torch.full((2, 31), -1000.0)

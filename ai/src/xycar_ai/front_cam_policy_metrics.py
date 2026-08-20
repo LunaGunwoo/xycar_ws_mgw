@@ -356,6 +356,11 @@ class RegressionMetricAccumulator:
             (angle_prediction, angle_target, "angle"),
             (speed_prediction, speed_target, "speed"),
         ):
+            # AMP may leave model outputs in float16. Squaring and summing a
+            # normal 128-sample batch can overflow float16 even though every
+            # scalar prediction is finite and in range.
+            prediction = prediction.float()
+            target = target.float()
             setattr(
                 self,
                 f"{prefix}_prediction_sum",
