@@ -145,7 +145,7 @@ CPU fallback 없이 motion OFF와 `[0,0]`으로 처리한다.
 
 기본 GPU runtime은 schema v6, angle-only fixed-speed schema v7과 두 policy 공유
 CUDA IPC를 지원하는
-`xycar/ai-drive:jp6.2.1-pytorch25.06-schema7-traffic-shadow-v4` tag다. 기본 nice_adaptive artifact는
+`xycar/ai-drive:jp6.2.1-pytorch25.06-schema7-traffic-shadow-v5` tag다. 기본 nice_adaptive artifact는
 `front-cam-policy-vit-small-ar4-v2-nice-adaptive-joint-regression-sequence-init25-window5-20260821`
 이며 실차 명령에서 `speed_cap:=25.0`을 명시한다. 일반 policy launch의 하위 호환
 기본 cap `30`은 바꾸지 않는다. 기존 `xycar/ai-drive:jp6.2.1-pytorch25.06` image와
@@ -161,16 +161,16 @@ cd /home/xytron/xycar_ws_mgw
 ./deploy/jetson/install_runtime.sh
 cmp deploy/jetson/images.lock.env \
   /home/xytron/.local/lib/xycar-ai-gpu/images.lock.env
-grep -Fx 'GPU_IMAGE=xycar/ai-drive:jp6.2.1-pytorch25.06-schema7-traffic-shadow-v4' \
+grep -Fx 'GPU_IMAGE=xycar/ai-drive:jp6.2.1-pytorch25.06-schema7-traffic-shadow-v5' \
   /home/xytron/.local/lib/xycar-ai-gpu/images.lock.env
-docker image inspect xycar/ai-drive:jp6.2.1-pytorch25.06-schema7-traffic-shadow-v4 >/dev/null
+docker image inspect xycar/ai-drive:jp6.2.1-pytorch25.06-schema7-traffic-shadow-v5 >/dev/null
 ```
 
 좌회전 전용 정사각형-warp artifact는 `speed_cap:=23.0`을 명시한다. 이 model-only
-시험에는 좌회전 감지나 9초 timer가 없고 A hold 동안만 연속 추론한다.
+시험에는 좌회전 감지나 8초 timer가 없고 A hold 동안만 연속 추론한다.
 
 ```bash
-ros2 launch xycar_ai_drive jetson_gpu_policy.launch.py artifact_id:=nice-shortcut-resnet18-squarewarp-speed23-20260821 speed_cap:=23.0 use_camera:=true use_gamepad:=true allow_motion:=true
+ros2 launch xycar_ai_drive jetson_gpu_policy.launch.py artifact_id:=nice-shortcut-resnet18-squarewarp-speed23-45sessions-20260821 speed_cap:=23.0 use_camera:=true use_gamepad:=true allow_motion:=true
 ```
 
 ## Traffic shortcut bundle wrapper
@@ -189,7 +189,7 @@ schema v3에서는 RED·LEFT·STRAIGHT가 각각 5회 연속 판독돼야 확정
 폐기한다.
 
 ```bash
-cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-tl45-votes5-every3-20260821 use_camera:=true use_gamepad:=true allow_motion:=true
+cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-tl45-votes5-every3-45sessions-20260821 use_camera:=true use_gamepad:=true allow_motion:=true
 ```
 
 camera, gamepad와 motor publisher를 시작하므로 실차 실행마다 별도 직전 승인을

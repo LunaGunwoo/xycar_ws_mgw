@@ -429,10 +429,10 @@ ros2 launch xycar_ai_drive jetson_gpu_policy.launch.py \
 연속 inference하며 시험 주행하는 명령은 다음과 같다.
 
 ```bash
-ros2 launch xycar_ai_drive jetson_gpu_policy.launch.py artifact_id:=nice-shortcut-resnet18-squarewarp-speed23-20260821 speed_cap:=23.0 use_camera:=true use_gamepad:=true allow_motion:=true
+ros2 launch xycar_ai_drive jetson_gpu_policy.launch.py artifact_id:=nice-shortcut-resnet18-squarewarp-speed23-45sessions-20260821 speed_cap:=23.0 use_camera:=true use_gamepad:=true allow_motion:=true
 ```
 
-이 명령은 9초 timer나 좌회전 감지 FSM을 포함하지 않는다. 시작은 DRIVE OFF이며
+이 명령은 8초 timer나 좌회전 감지 FSM을 포함하지 않는다. 시작은 DRIVE OFF이며
 A를 누르는 동안만 model output과 speed `23`을 발행하고 A를 놓으면 정지한다.
 camera와 motor publisher를 시작할 수 있으므로 실행 직전 실차 승인, 바퀴 지지 또는
 안전 공간, 전원 차단 수단, `Ctrl+C` 정지와 경쟁 publisher 부재를 확인한다.
@@ -494,12 +494,14 @@ schema v7 `nice-shortcut` ResNet18과 SHA-256
 Jetson host는 NumPy `1.26.4`, ONNX Runtime `1.24.0`, provider 순서
 CUDA→CPU를 exact 검사한다. bundle checksum, 두 socket과 synthetic ONNX preflight가
 끝난 뒤에만 camera/gamepad launch를 시작한다. motor bridge는 포함하지 않는다.
-기존 schema v1 종료 STOP bundle과
+기존 23세션 schema v3 bundle,
+`traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-tl45-votes5-every3-20260821`,
+schema v1 종료 STOP bundle과
 `traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-20260821`
 schema v2 red-3 bundle은 rollback용으로 삭제하거나 덮어쓰지 않는다.
 
 ```bash
-cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-tl45-votes5-every3-20260821 use_camera:=true use_gamepad:=true allow_motion:=true
+cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-tl45-votes5-every3-45sessions-20260821 use_camera:=true use_gamepad:=true allow_motion:=true
 ```
 
 이 launch는 실제 camera와 motor publisher를 열 수 있으므로 매번 직전 승인을 받고
@@ -515,18 +517,18 @@ camera 또는 motor publisher를 열 수 있으므로 정상 wrapper와 같은 �
 
 ```bash
 ros2 run xycar_ai_drive traffic_shortcut_gpu_server -- \
-  --bundle-dir /artifacts/traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-tl45-votes5-every3-20260821 \
+  --bundle-dir /artifacts/traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-tl45-votes5-every3-45sessions-20260821 \
   --base-socket-path /run/user/1000/xycar-ai/traffic-base.sock \
   --shortcut-socket-path /run/user/1000/xycar-ai/traffic-shortcut.sock \
   --device cuda
 
 ros2 launch xycar_ai_drive traffic_shortcut_policy.launch.py \
-  bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-tl45-votes5-every3-20260821 \
+  bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-tl45-votes5-every3-45sessions-20260821 \
   use_camera:=true use_gamepad:=true allow_motion:=true
 
 ros2 run xycar_ai_drive traffic_shortcut_policy --ros-args \
   --params-file /home/xytron/xycar_ws_mgw/install/xycar_ai_drive/share/xycar_ai_drive/config/traffic_shortcut_policy.yaml \
-  -p bundle_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-tl45-votes5-every3-20260821
+  -p bundle_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-tl45-votes5-every3-45sessions-20260821
 ```
 
 ## 대회 signal + shortcut 통합 runtime

@@ -25,7 +25,11 @@ from xycar_ai_drive.traffic_shortcut_fsm import (
     TrafficShortcutFsm,
 )
 from xycar_ai_drive.traffic_shortcut_artifact import (
+    EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID,
+    EXPECTED_EXPANDED_SIGNAL_VOTE_BUNDLE_ID,
+    EXPECTED_SHORTCUT_ARTIFACT_ID,
     EXPECTED_SIGNAL_VOTE_BUNDLE_ID,
+    _expected_shortcut_artifact_id,
     _load_signal_vote_contract,
 )
 from xycar_ai_drive.traffic_shortcut_policy_node import (
@@ -209,6 +213,19 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
         schema_version=3,
         artifact_id=EXPECTED_SIGNAL_VOTE_BUNDLE_ID,
     ) == (5, 5, 5)
+    assert _load_signal_vote_contract(
+        {'signal_vote': signal_vote},
+        schema_version=3,
+        artifact_id=EXPECTED_EXPANDED_SIGNAL_VOTE_BUNDLE_ID,
+    ) == (5, 5, 5)
+    assert _expected_shortcut_artifact_id(
+        schema_version=2,
+        artifact_id='legacy',
+    ) == EXPECTED_SHORTCUT_ARTIFACT_ID
+    assert _expected_shortcut_artifact_id(
+        schema_version=3,
+        artifact_id=EXPECTED_EXPANDED_SIGNAL_VOTE_BUNDLE_ID,
+    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
     with pytest.raises(ArtifactContractError, match='signal vote'):
         _load_signal_vote_contract(
             {
@@ -219,6 +236,12 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
             },
             schema_version=3,
             artifact_id=EXPECTED_SIGNAL_VOTE_BUNDLE_ID,
+        )
+    with pytest.raises(ArtifactContractError, match='not approved'):
+        _load_signal_vote_contract(
+            {'signal_vote': signal_vote},
+            schema_version=3,
+            artifact_id='unapproved-schema3-bundle',
         )
 
 

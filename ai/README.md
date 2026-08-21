@@ -1010,8 +1010,8 @@ eager/trace/reload 출력을 비교한다.
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 /home/xytron/.local/bin/uv run --locked xycar-export-shortcut-angle \
-  --checkpoint artifacts/runs/nice_shortcut_resnet18_squarewarp_seed20260821/best.pt \
-  --artifact-id nice-shortcut-resnet18-squarewarp-speed23-20260821 \
+  --checkpoint artifacts/runs/nice_shortcut_resnet18_squarewarp_45sessions_seed20260821/best.pt \
+  --artifact-id nice-shortcut-resnet18-squarewarp-speed23-45sessions-20260821 \
   --fixed-speed 23 \
   --warp-config config/front_cam_policy_preprocess.yaml
 ```
@@ -1021,16 +1021,17 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 speed `23`, 224 square warp, steering 계약과 ONNX SHA-256을 확인하고 기존 bundle을
 덮어쓰지 않는다. 기본 schema v3 bundle은 bbox 최소 폭 `45`, 모든 유효 신호
 5회 연속 vote와 3 frame 판독 주기를 고정하고, shortcut 중 Base를 self-AR shadow로
-계속 추론해 8초 종료 때 최신 shadow command로 무정지 복귀한다. 기존 schema v1/v2
-bundle은 각각 종료 STOP과 red 3회·left/straight 즉시 판정 rollback으로 보존한다.
+계속 추론해 8초 종료 때 최신 shadow command로 무정지 복귀한다. 기존 23세션
+schema v3 bundle과 schema v1/v2 bundle은 각각 이전 학습 모델, 종료 STOP과 red
+3회·left/straight 즉시 판정 rollback으로 보존한다.
 
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 /home/xytron/.local/bin/uv run --locked xycar-build-traffic-shortcut-bundle \
   --base-artifact artifacts/models/front-cam-policy-vit-small-ar4-v2-nice-adaptive-joint-regression-sequence-init25-window5-20260821 \
-  --shortcut-artifact artifacts/models/nice-shortcut-resnet18-squarewarp-speed23-20260821 \
+  --shortcut-artifact artifacts/models/nice-shortcut-resnet18-squarewarp-speed23-45sessions-20260821 \
   --traffic-model artifacts/sources/traffic_light.onnx \
-  --artifact-id traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-tl45-votes5-every3-20260821 \
+  --artifact-id traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-tl45-votes5-every3-45sessions-20260821 \
   --output-root artifacts/models
 ```
 

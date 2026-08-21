@@ -35,10 +35,23 @@ EXPECTED_BASE_ARTIFACT_ID = (
 EXPECTED_SHORTCUT_ARTIFACT_ID = (
     'nice-shortcut-resnet18-squarewarp-speed23-20260821'
 )
+EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID = (
+    'nice-shortcut-resnet18-squarewarp-speed23-45sessions-20260821'
+)
 EXPECTED_SIGNAL_VOTE_BUNDLE_ID = (
     'traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-'
     'tl45-votes5-every3-20260821'
 )
+EXPECTED_EXPANDED_SIGNAL_VOTE_BUNDLE_ID = (
+    'traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-'
+    'tl45-votes5-every3-45sessions-20260821'
+)
+EXPECTED_SCHEMA3_SHORTCUT_IDS = {
+    EXPECTED_SIGNAL_VOTE_BUNDLE_ID: EXPECTED_SHORTCUT_ARTIFACT_ID,
+    EXPECTED_EXPANDED_SIGNAL_VOTE_BUNDLE_ID: (
+        EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    ),
+}
 EXPECTED_ONNXRUNTIME_VERSION = '1.24.0'
 EXPECTED_NUMPY_VERSION = '1.26.4'
 EXPECTED_PROVIDERS = (
@@ -104,6 +117,10 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
     artifact_id = _required_string(manifest, 'artifact_id', 'manifest')
     if artifact_id != root.name:
         raise ArtifactContractError('traffic shortcut bundle id mismatch')
+    expected_shortcut_artifact_id = _expected_shortcut_artifact_id(
+        schema_version=schema_version,
+        artifact_id=artifact_id,
+    )
 
     components = _required_mapping(manifest, 'components', 'manifest')
     base_contract = _required_mapping(components, 'base', 'components')
@@ -114,7 +131,13 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
     )
     base = _load_component(root, base_contract, 'base')
     shortcut = _load_component(root, shortcut_contract, 'shortcut')
-    _validate_policy_contracts(base, shortcut, base_contract, shortcut_contract)
+    _validate_policy_contracts(
+        base,
+        shortcut,
+        base_contract,
+        shortcut_contract,
+        expected_shortcut_artifact_id=expected_shortcut_artifact_id,
+    )
 
     signal = _required_mapping(components, 'traffic_light', 'components')
     signal_relative = _required_string(signal, 'file', 'traffic_light')
@@ -314,7 +337,7 @@ def _load_signal_vote_contract(
             raise ArtifactContractError('legacy red latch contract mismatch')
         return 3, 1, 1
 
-    if artifact_id != EXPECTED_SIGNAL_VOTE_BUNDLE_ID:
+    if artifact_id not in EXPECTED_SCHEMA3_SHORTCUT_IDS:
         raise ArtifactContractError('schema v3 bundle id is not approved')
     signal_vote = _required_mapping(manifest, 'signal_vote', 'manifest')
     expected = {
@@ -356,15 +379,32 @@ def _load_component(
     return artifact
 
 
+def _expected_shortcut_artifact_id(
+    *,
+    schema_version: int,
+    artifact_id: str,
+) -> str:
+    if schema_version < 3:
+        return EXPECTED_SHORTCUT_ARTIFACT_ID
+    try:
+        return EXPECTED_SCHEMA3_SHORTCUT_IDS[artifact_id]
+    except KeyError as exc:
+        raise ArtifactContractError(
+            'schema v3 bundle id is not approved'
+        ) from exc
+
+
 def _validate_policy_contracts(
     base: PolicyArtifact,
     shortcut: PolicyArtifact,
     base_contract: Mapping[str, object],
     shortcut_contract: Mapping[str, object],
+    *,
+    expected_shortcut_artifact_id: str,
 ) -> None:
     if base.artifact_id != EXPECTED_BASE_ARTIFACT_ID:
         raise ArtifactContractError('base artifact id is not approved')
-    if shortcut.artifact_id != EXPECTED_SHORTCUT_ARTIFACT_ID:
+    if shortcut.artifact_id != expected_shortcut_artifact_id:
         raise ArtifactContractError('shortcut artifact id is not approved')
     if base_contract.get('schema_version') != 6:
         raise ArtifactContractError('base policy schema must be 6')

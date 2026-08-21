@@ -20,20 +20,28 @@ SHADOW_BUNDLE_ID = (
     "traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-"
     "20260821"
 )
-BUNDLE_ID = (
+SIGNAL_VOTE_BUNDLE_ID = (
     "traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-"
     "tl45-votes5-every3-20260821"
 )
-BUNDLE_CONTRACTS = {
-    LEGACY_BUNDLE_ID: (1, 3),
-    SHADOW_BUNDLE_ID: (2, 3),
-    BUNDLE_ID: (3, 5),
-}
 BASE_ID = (
     "front-cam-policy-vit-small-ar4-v2-nice-adaptive-joint-regression-"
     "sequence-init25-window5-20260821"
 )
 SHORTCUT_ID = "nice-shortcut-resnet18-squarewarp-speed23-20260821"
+EXPANDED_SHORTCUT_ID = (
+    "nice-shortcut-resnet18-squarewarp-speed23-45sessions-20260821"
+)
+BUNDLE_ID = (
+    "traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-"
+    "tl45-votes5-every3-45sessions-20260821"
+)
+BUNDLE_CONTRACTS = {
+    LEGACY_BUNDLE_ID: (1, 3, SHORTCUT_ID),
+    SHADOW_BUNDLE_ID: (2, 3, SHORTCUT_ID),
+    SIGNAL_VOTE_BUNDLE_ID: (3, 5, SHORTCUT_ID),
+    BUNDLE_ID: (3, 5, EXPANDED_SHORTCUT_ID),
+}
 TRAFFIC_SHA256 = (
     "24c1a38eacfb065c95e5577be29a2a542b985d6ea1954bf2fc94c52eb674aa41"
 )
@@ -85,7 +93,11 @@ def build_traffic_shortcut_bundle(
             "approved bundle id must be one of "
             + ", ".join(BUNDLE_CONTRACTS)
         )
-    schema_version, consecutive_signal_reads = bundle_contract
+    (
+        schema_version,
+        consecutive_signal_reads,
+        shortcut_artifact_id,
+    ) = bundle_contract
     base_artifact = _verify_policy_artifact(
         base_artifact,
         expected_id=BASE_ID,
@@ -93,7 +105,7 @@ def build_traffic_shortcut_bundle(
     )
     shortcut_artifact = _verify_policy_artifact(
         shortcut_artifact,
-        expected_id=SHORTCUT_ID,
+        expected_id=shortcut_artifact_id,
         expected_schema=7,
     )
     traffic_model = traffic_model.expanduser()
@@ -107,7 +119,11 @@ def build_traffic_shortcut_bundle(
 
     base_manifest = _load_mapping(base_artifact / "manifest.yaml")
     shortcut_manifest = _load_mapping(shortcut_artifact / "manifest.yaml")
-    _validate_policy_manifests(base_manifest, shortcut_manifest)
+    _validate_policy_manifests(
+        base_manifest,
+        shortcut_manifest,
+        expected_shortcut_id=shortcut_artifact_id,
+    )
 
     output_root = output_root.expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
@@ -122,7 +138,10 @@ def build_traffic_shortcut_bundle(
         policies_dir = temporary / "policies"
         policies_dir.mkdir()
         _copy_artifact(base_artifact, policies_dir / BASE_ID)
-        _copy_artifact(shortcut_artifact, policies_dir / SHORTCUT_ID)
+        _copy_artifact(
+            shortcut_artifact,
+            policies_dir / shortcut_artifact_id,
+        )
         signal_dir = temporary / "signal"
         signal_dir.mkdir()
         shutil.copy2(traffic_model, signal_dir / "traffic_light.onnx")
@@ -157,6 +176,7 @@ def build_traffic_shortcut_bundle(
             consecutive_signal_reads=consecutive_signal_reads,
             base_artifact=base_artifact,
             shortcut_artifact=shortcut_artifact,
+            shortcut_artifact_id=shortcut_artifact_id,
         )
         (temporary / "manifest.yaml").write_text(
             yaml.safe_dump(manifest, sort_keys=False),
@@ -168,6 +188,7 @@ def build_traffic_shortcut_bundle(
             expected_id=artifact_id,
             expected_schema=schema_version,
             expected_signal_reads=consecutive_signal_reads,
+            expected_shortcut_id=shortcut_artifact_id,
         )
         temporary.rename(final)
     except BaseException:
@@ -184,6 +205,7 @@ def _bundle_manifest(
     consecutive_signal_reads: int,
     base_artifact: Path,
     shortcut_artifact: Path,
+    shortcut_artifact_id: str,
 ) -> dict[str, object]:
     mission = {
         "states": [
@@ -238,8 +260,8 @@ def _bundle_manifest(
                 ),
             },
             "shortcut": {
-                "directory": f"policies/{SHORTCUT_ID}",
-                "artifact_id": SHORTCUT_ID,
+                "directory": f"policies/{shortcut_artifact_id}",
+                "artifact_id": shortcut_artifact_id,
                 "schema_version": 7,
                 "source_sha256s_sha256": _sha256_file(
                     shortcut_artifact / "SHA256SUMS"
@@ -318,12 +340,14 @@ def _signal_vote_contract(consecutive_reads: int) -> dict[str, object]:
 def _validate_policy_manifests(
     base: Mapping[str, object],
     shortcut: Mapping[str, object],
+    *,
+    expected_shortcut_id: str,
 ) -> None:
     if base.get("schema_version") != 6 or base.get("artifact_id") != BASE_ID:
         raise TrafficBundleBuildError("base manifest contract mismatch")
     if (
         shortcut.get("schema_version") != 7
-        or shortcut.get("artifact_id") != SHORTCUT_ID
+        or shortcut.get("artifact_id") != expected_shortcut_id
     ):
         raise TrafficBundleBuildError("shortcut manifest contract mismatch")
     base_model = _required_mapping(base, "model", "base")
@@ -398,6 +422,7 @@ def _verify_built_bundle(
     expected_id: str,
     expected_schema: int,
     expected_signal_reads: int,
+    expected_shortcut_id: str,
 ) -> None:
     _verify_checksums(root, include_nested_checksum_files=True)
     manifest = _load_mapping(root / "manifest.yaml")
@@ -429,8 +454,8 @@ def _verify_built_bundle(
         expected_schema=6,
     )
     _verify_policy_artifact(
-        root / "policies" / SHORTCUT_ID,
-        expected_id=SHORTCUT_ID,
+        root / "policies" / expected_shortcut_id,
+        expected_id=expected_shortcut_id,
         expected_schema=7,
     )
 
