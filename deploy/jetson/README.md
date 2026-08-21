@@ -145,7 +145,7 @@ CPU fallback 없이 motion OFF와 `[0,0]`으로 처리한다.
 
 기본 GPU runtime은 schema v6, angle-only fixed-speed schema v7과 두 policy 공유
 CUDA IPC를 지원하는
-`xycar/ai-drive:jp6.2.1-pytorch25.06-schema7-traffic-shadow-v2` tag다. 기본 nice_adaptive artifact는
+`xycar/ai-drive:jp6.2.1-pytorch25.06-schema7-traffic-shadow-v3` tag다. 기본 nice_adaptive artifact는
 `front-cam-policy-vit-small-ar4-v2-nice-adaptive-joint-regression-sequence-init25-window5-20260821`
 이며 실차 명령에서 `speed_cap:=25.0`을 명시한다. 일반 policy launch의 하위 호환
 기본 cap `30`은 바꾸지 않는다. 기존 `xycar/ai-drive:jp6.2.1-pytorch25.06` image와
@@ -161,9 +161,9 @@ cd /home/xytron/xycar_ws_mgw
 ./deploy/jetson/install_runtime.sh
 cmp deploy/jetson/images.lock.env \
   /home/xytron/.local/lib/xycar-ai-gpu/images.lock.env
-grep -Fx 'GPU_IMAGE=xycar/ai-drive:jp6.2.1-pytorch25.06-schema7-traffic-shadow-v2' \
+grep -Fx 'GPU_IMAGE=xycar/ai-drive:jp6.2.1-pytorch25.06-schema7-traffic-shadow-v3' \
   /home/xytron/.local/lib/xycar-ai-gpu/images.lock.env
-docker image inspect xycar/ai-drive:jp6.2.1-pytorch25.06-schema7-traffic-shadow-v2 >/dev/null
+docker image inspect xycar/ai-drive:jp6.2.1-pytorch25.06-schema7-traffic-shadow-v3 >/dev/null
 ```
 
 좌회전 전용 정사각형-warp artifact는 `speed_cap:=23.0`을 명시한다. 이 model-only

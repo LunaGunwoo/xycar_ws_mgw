@@ -347,6 +347,25 @@ def preprocess_rgb_frame(
     std: np.ndarray,
     road_warp: RoadWarpParameters | None = None,
 ) -> np.ndarray:
+    resized = prepare_rgb_geometry(
+        rgb_frame,
+        image_size=image_size,
+        road_warp=road_warp,
+    )
+    return normalize_rgb_geometry(
+        resized,
+        image_size=image_size,
+        mean=mean,
+        std=std,
+    )
+
+
+def prepare_rgb_geometry(
+    rgb_frame: np.ndarray,
+    *,
+    image_size: int,
+    road_warp: RoadWarpParameters | None = None,
+) -> np.ndarray:
     if (
         not isinstance(rgb_frame, np.ndarray)
         or rgb_frame.dtype != np.uint8
@@ -364,14 +383,6 @@ def preprocess_rgb_frame(
         rgb_frame.shape[0] < 2 or rgb_frame.shape[1] < 2
     ):
         raise PolicyRuntimeError('road warp requires a frame of at least 2x2')
-    if mean.shape != (1, 1, 3) or std.shape != (1, 1, 3):
-        raise PolicyRuntimeError(
-            'normalization arrays must have shape [1,1,3]'
-        )
-    if not np.isfinite(mean).all() or not np.isfinite(std).all():
-        raise PolicyRuntimeError('normalization arrays must be finite')
-    if np.any(std <= 0.0):
-        raise PolicyRuntimeError('normalization std must be positive')
     geometry_image = (
         _warp_road_image(rgb_frame, road_warp)
         if road_warp is not None
@@ -382,6 +393,32 @@ def preprocess_rgb_frame(
         (image_size, image_size),
         interpolation=cv2.INTER_CUBIC,
     )
+    if resized.shape != (image_size, image_size, 3):
+        raise PolicyRuntimeError('resized image geometry is invalid')
+    return resized
+
+
+def normalize_rgb_geometry(
+    resized: np.ndarray,
+    *,
+    image_size: int,
+    mean: np.ndarray,
+    std: np.ndarray,
+) -> np.ndarray:
+    if (
+        not isinstance(resized, np.ndarray)
+        or resized.dtype != np.uint8
+        or resized.shape != (image_size, image_size, 3)
+    ):
+        raise PolicyRuntimeError('resized image geometry is invalid')
+    if mean.shape != (1, 1, 3) or std.shape != (1, 1, 3):
+        raise PolicyRuntimeError(
+            'normalization arrays must have shape [1,1,3]'
+        )
+    if not np.isfinite(mean).all() or not np.isfinite(std).all():
+        raise PolicyRuntimeError('normalization arrays must be finite')
+    if np.any(std <= 0.0):
+        raise PolicyRuntimeError('normalization std must be positive')
     normalized = (resized.astype(np.float32) / 255.0 - mean) / std
     chw = np.ascontiguousarray(normalized.transpose(2, 0, 1))
     if chw.shape != (3, image_size, image_size) or not np.isfinite(chw).all():

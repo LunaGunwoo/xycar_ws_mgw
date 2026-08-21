@@ -313,12 +313,42 @@ def test_integrated_node_post_reset_timeout_and_actual_history_only():
     assert tuple(history_node._history)[-2:] == ((60, 75), (50, 50))
 
 
+def test_shadow_bundle_requires_verified_paired_server_identity():
+    base_artifact = object()
+    shortcut_artifact = object()
+    node = SimpleNamespace(
+        bundle=SimpleNamespace(
+            base=base_artifact,
+            shortcut=shortcut_artifact,
+            base_shadow_enabled=True,
+        ),
+        _base_policy=SimpleNamespace(
+            _artifact=base_artifact,
+            supports_pair_inference=True,
+            paired_artifact_id='shortcut',
+            paired_artifact_digest='digest',
+        ),
+        _shortcut_policy=SimpleNamespace(
+            _artifact=shortcut_artifact,
+            artifact_id='shortcut',
+            artifact_digest='digest',
+        ),
+    )
+
+    TrafficShortcutPolicyNode._validate_client_artifacts(node)
+    node._base_policy.paired_artifact_digest = 'wrong'
+
+    with pytest.raises(ValueError, match='paired shortcut identity'):
+        TrafficShortcutPolicyNode._validate_client_artifacts(node)
+
+
 def _bind_shadow_methods(node):
     for name in (
         '_decision_from_result',
         '_start_base_shadow_locked',
         '_base_shadow_snapshot_locked',
         '_infer_and_store_base_shadow',
+        '_store_base_shadow_decision_locked',
         '_discard_base_shadow_locked',
         '_promote_base_shadow_locked',
     ):

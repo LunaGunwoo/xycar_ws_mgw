@@ -363,6 +363,17 @@ class TrafficShortcutPolicyNode(Node):
             != self.bundle.shortcut
         ):
             raise ValueError('shortcut IPC client artifact does not match bundle')
+        if self.bundle.base_shadow_enabled and (
+            getattr(self._base_policy, 'supports_pair_inference', False)
+            is not True
+            or getattr(self._base_policy, 'paired_artifact_id', None)
+            != getattr(self._shortcut_policy, 'artifact_id', None)
+            or getattr(self._base_policy, 'paired_artifact_digest', None)
+            != getattr(self._shortcut_policy, 'artifact_digest', None)
+        ):
+            raise ValueError(
+                'Base IPC server paired shortcut identity does not match bundle'
+            )
 
     def _initial_external_history(self):
         history = self.bundle.base.history
@@ -543,6 +554,7 @@ class TrafficShortcutPolicyNode(Node):
                             shadow_work=shadow_work,
                         )
                     continue
+                shadow_decision = None
                 if plan.policy == PolicyChoice.BASE:
                     result = self._base_policy.infer(image, history)
                     decision = self._decision_from_result(
@@ -553,7 +565,20 @@ class TrafficShortcutPolicyNode(Node):
                         sequence=sequence,
                     )
                 elif plan.policy == PolicyChoice.SHORTCUT:
-                    result = self._shortcut_policy.infer(image)
+                    if shadow_work is None:
+                        result = self._shortcut_policy.infer(image)
+                    else:
+                        result, shadow_result = self._base_policy.infer_pair(
+                            image,
+                            shadow_work[1],
+                        )
+                        shadow_decision = self._decision_from_result(
+                            result=shadow_result,
+                            policy=PolicyChoice.BASE,
+                            state=MissionState.SHORTCUT,
+                            source_monotonic=source_monotonic,
+                            sequence=sequence,
+                        )
                     decision = self._decision_from_result(
                         result=result,
                         policy=PolicyChoice.SHORTCUT,
@@ -567,18 +592,13 @@ class TrafficShortcutPolicyNode(Node):
                     if generation != self._mission_generation:
                         continue
                     self._decision = decision
+                    if shadow_decision is not None:
+                        self._store_base_shadow_decision_locked(
+                            epoch=shadow_work[0],
+                            decision=shadow_decision,
+                        )
                     self._accept_post_reset_decision_locked(source_monotonic)
                 self._publish_prediction(decision)
-                if (
-                    plan.policy == PolicyChoice.SHORTCUT
-                    and shadow_work is not None
-                ):
-                    self._infer_and_store_base_shadow(
-                        image=image,
-                        source_monotonic=source_monotonic,
-                        sequence=sequence,
-                        shadow_work=shadow_work,
-                    )
             except Exception as exc:  # noqa: BLE001 - fail-closed boundary
                 self._force_fault(f'mission inference failed: {exc}')
 
@@ -663,20 +683,31 @@ class TrafficShortcutPolicyNode(Node):
             sequence=sequence,
         )
         with self._lock:
-            if (
-                epoch != self._base_shadow_epoch
-                or self._base_shadow_history is None
-                or self._fsm.state
-                not in {
-                    MissionState.SWITCH_TO_SHORTCUT,
-                    MissionState.SHORTCUT,
-                }
-            ):
-                return
-            self._base_shadow_history.append(
-                command_history_token_ids(decision.command)
+            self._store_base_shadow_decision_locked(
+                epoch=epoch,
+                decision=decision,
             )
-            self._base_shadow_decision = decision
+
+    def _store_base_shadow_decision_locked(
+        self,
+        *,
+        epoch: int,
+        decision: MissionDecision,
+    ) -> None:
+        if (
+            epoch != self._base_shadow_epoch
+            or self._base_shadow_history is None
+            or self._fsm.state
+            not in {
+                MissionState.SWITCH_TO_SHORTCUT,
+                MissionState.SHORTCUT,
+            }
+        ):
+            return
+        self._base_shadow_history.append(
+            command_history_token_ids(decision.command)
+        )
+        self._base_shadow_decision = decision
 
     def _discard_base_shadow_locked(self) -> None:
         self._base_shadow_epoch += 1

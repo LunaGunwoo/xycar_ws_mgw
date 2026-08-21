@@ -1,4 +1,5 @@
 import hashlib
+import socket
 import threading
 import time
 from types import SimpleNamespace
@@ -30,6 +31,8 @@ class _FakePolicy:
         self.delay_sec = delay_sec
         self.reset_count = 0
         self.last_history = None
+        self.geometry_count = 0
+        self.tensor_from_geometry_count = 0
 
     def infer(self, _image, history=None):
         self.last_history = history
@@ -39,6 +42,17 @@ class _FakePolicy:
             command=DriveCommand(angle=-18.0, speed=25.0),
             inference_ms=2.5,
         )
+
+    def prepare_geometry(self, image):
+        self.geometry_count += 1
+        return image
+
+    def prepare_tensor_from_geometry(self, geometry):
+        self.tensor_from_geometry_count += 1
+        return geometry
+
+    def infer_preprocessed(self, tensor, history_class_ids=None):
+        return self.infer(tensor, history_class_ids)
 
     def reset_history(self):
         self.reset_count += 1
@@ -116,9 +130,20 @@ def _start_server(socket_path, policy):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     deadline = time.monotonic() + 2.0
-    while not socket_path.exists() and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
+        if socket_path.exists():
+            try:
+                with socket.socket(
+                    socket.AF_UNIX,
+                    socket.SOCK_STREAM,
+                ) as probe:
+                    probe.connect(str(socket_path))
+                break
+            except OSError:
+                pass
         time.sleep(0.01)
-    assert socket_path.exists()
+    else:
+        pytest.fail('policy test server did not become connectable')
     return server, thread
 
 
@@ -143,6 +168,12 @@ def test_ipc_handshake_inference_and_reset(tmp_path):
     result = client.infer(np.zeros((8, 12, 3), dtype=np.uint8))
     assert result.command == DriveCommand(angle=-18.0, speed=25.0)
     assert result.inference_ms == pytest.approx(2.5)
+    assert not client.supports_pair_inference
+    with pytest.raises(PolicyRuntimeError, match='does not support paired'):
+        client.infer_pair(
+            np.zeros((8, 12, 3), dtype=np.uint8),
+            ((90, 120),) * 4,
+        )
     client.reset_history()
     assert policy.reset_count == 1
     _stop_server(client, server, thread)
@@ -231,7 +262,7 @@ def test_dual_policy_service_opens_two_sockets_and_serializes_cuda(
     shortcut_parent = tmp_path / 'shortcut'
     base_parent.mkdir()
     shortcut_parent.mkdir()
-    base_artifact = _artifact(base_parent)
+    base_artifact = _artifact(base_parent, external_history=True)
     shortcut_artifact = _artifact(shortcut_parent)
     concurrency = SimpleNamespace(active=0, maximum=0)
     concurrency_lock = threading.Lock()
@@ -256,8 +287,12 @@ def test_dual_policy_service_opens_two_sockets_and_serializes_cuda(
         str(shortcut_artifact.resolve()): shortcut_artifact,
     }
 
+    policies = {}
+
     def policy_factory(*, artifact_dir, device, **_kwargs):
-        return TrackedPolicy(artifacts[str(artifact_dir)], device=device)
+        policy = TrackedPolicy(artifacts[str(artifact_dir)], device=device)
+        policies[str(artifact_dir)] = policy
+        return policy
 
     monkeypatch.setattr(
         'xycar_ai_drive.dual_policy_ipc.load_traffic_shortcut_bundle',
@@ -306,9 +341,10 @@ def test_dual_policy_service_opens_two_sockets_and_serializes_cuda(
         required_device='cuda',
     )
     image = np.zeros((8, 12, 3), dtype=np.uint8)
+    history = ((90, 120), (91, 121), (92, 122), (93, 123))
     callers = [
-        threading.Thread(target=client.infer, args=(image,))
-        for client in (base_client, shortcut_client)
+        threading.Thread(target=base_client.infer, args=(image, history)),
+        threading.Thread(target=shortcut_client.infer, args=(image,)),
     ]
     for caller in callers:
         caller.start()
@@ -317,6 +353,23 @@ def test_dual_policy_service_opens_two_sockets_and_serializes_cuda(
 
     assert all(not caller.is_alive() for caller in callers)
     assert concurrency.maximum == 1
+    assert base_client.supports_pair_inference
+    assert base_client.paired_artifact_id == shortcut_client.artifact_id
+    assert (
+        base_client.paired_artifact_digest
+        == shortcut_client.artifact_digest
+    )
+
+    shortcut_result, base_result = base_client.infer_pair(image, history)
+
+    assert shortcut_result.command == DriveCommand(-18.0, 25.0)
+    assert base_result.command == DriveCommand(-18.0, 25.0)
+    assert policies[str(base_artifact)].geometry_count == 1
+    assert policies[str(base_artifact)].tensor_from_geometry_count == 1
+    assert policies[str(shortcut_artifact)].tensor_from_geometry_count == 1
+    assert policies[str(base_artifact)].last_history == [
+        list(pair) for pair in history
+    ]
     base_client.close()
     shortcut_client.close()
     service.stop()

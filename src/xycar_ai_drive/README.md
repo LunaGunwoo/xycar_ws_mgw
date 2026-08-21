@@ -482,8 +482,10 @@ schema v7 `nice-shortcut` ResNet18과 SHA-256
 - 실제 실행 history와 미발행 Base shadow history는 분리한다. shadow에는 cap `25`가
   적용된 Base prediction만 compact token으로 추가하고, handoff 성공 때만 활성
   history로 승격한다. 두 policy는 한 CUDA process에서 preload/warm-up하고 서로 다른
-  mode `0600` socket을 공유 CUDA lock으로 직렬화한다. shortcut inference를 먼저
-  갱신하므로 shadow 작업 중에도 실제 선택 policy decision은 최신 상태를 유지한다.
+  mode `0600` socket을 공유 CUDA lock으로 직렬화한다. shortcut 중에는 Base socket의
+  paired RPC가 RGB frame을 한 번만 받고 공통 warp·resize를 한 번만 수행한 뒤, 각
+  artifact의 서로 다른 normalization을 적용해 shortcut과 Base를 차례로 추론한다.
+  따라서 Base self-AR를 계속 갱신하면서도 실제 선택 policy decision을 함께 반환한다.
 - 시작은 OFF이고 A hold/release grace `0.12s` 계약을 유지한다. Joy/camera/IPC
   stale, ONNX shape·NaN/Inf, 경쟁 publisher와 motor subscriber 소실은 FAULT와
   `[0,0]`이다.

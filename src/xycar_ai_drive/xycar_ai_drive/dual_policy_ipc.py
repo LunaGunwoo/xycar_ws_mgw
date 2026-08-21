@@ -7,7 +7,7 @@ import signal
 import threading
 
 from xycar_ai_drive.gpu_runtime import DeviceTorchScriptPolicy
-from xycar_ai_drive.policy_ipc import PolicyIpcServer
+from xycar_ai_drive.policy_ipc import PolicyIpcServer, artifact_identity
 from xycar_ai_drive.policy_runtime import PolicyRuntimeError
 from xycar_ai_drive.traffic_shortcut_artifact import (
     load_traffic_shortcut_bundle,
@@ -28,6 +28,53 @@ class _LockedPolicy:
     def reset_history(self) -> None:
         with self._lock:
             self._policy.reset_history()
+
+
+class _PairedBasePolicy:
+    """Serve Base alone or both policies from one shared image geometry."""
+
+    def __init__(
+        self,
+        base_policy: object,
+        shortcut_policy: object,
+        lock: threading.RLock,
+    ) -> None:
+        self._base_policy = base_policy
+        self._shortcut_policy = shortcut_policy
+        self._lock = lock
+        self.artifact = base_policy.artifact
+        self.device_name = base_policy.device_name
+        (
+            self.paired_artifact_id,
+            self.paired_artifact_digest,
+        ) = artifact_identity(shortcut_policy.artifact.root)
+
+    def infer(self, *args, **kwargs):
+        with self._lock:
+            return self._base_policy.infer(*args, **kwargs)
+
+    def infer_pair(self, image, history_class_ids):
+        with self._lock:
+            geometry = self._base_policy.prepare_geometry(image)
+            shortcut_tensor = (
+                self._shortcut_policy.prepare_tensor_from_geometry(geometry)
+            )
+            base_tensor = self._base_policy.prepare_tensor_from_geometry(
+                geometry
+            )
+            shortcut_result = self._shortcut_policy.infer_preprocessed(
+                shortcut_tensor
+            )
+            base_result = self._base_policy.infer_preprocessed(
+                base_tensor,
+                history_class_ids=history_class_ids,
+            )
+            return shortcut_result, base_result
+
+    def reset_history(self) -> None:
+        with self._lock:
+            self._base_policy.reset_history()
+            self._shortcut_policy.reset_history()
 
 
 class DualPolicyIpcService:
@@ -66,7 +113,11 @@ class DualPolicyIpcService:
         )
         self.base_server = PolicyIpcServer(
             socket_path=base_socket_path,
-            policy=_LockedPolicy(base_policy, shared_lock),
+            policy=_PairedBasePolicy(
+                base_policy,
+                shortcut_policy,
+                shared_lock,
+            ),
         )
         self.shortcut_server = PolicyIpcServer(
             socket_path=shortcut_socket_path,

@@ -30,11 +30,12 @@ _HISTORY_CLASS_IDS = struct.Struct('!8B')
 _HELLO = 1
 _INFER = 2
 _RESET = 3
+_INFER_PAIR = 4
 _ERROR = 255
 _MAX_PAYLOAD = 16 * 1024 * 1024
 
 
-def _artifact_identity(artifact_dir: str | Path) -> tuple[str, str]:
+def artifact_identity(artifact_dir: str | Path) -> tuple[str, str]:
     artifact = load_policy_artifact(artifact_dir)
     checksum_path = artifact.root / 'SHA256SUMS'
     digest = hashlib.sha256(checksum_path.read_bytes()).hexdigest()
@@ -62,12 +63,17 @@ class UnixSocketPolicyClient:
         self._timeout_sec = float(timeout_sec)
         self._required_device = required_device
         self._artifact = load_policy_artifact(artifact_dir)
-        self._artifact_id, self._artifact_digest = _artifact_identity(
+        self._artifact_id, self._artifact_digest = artifact_identity(
             artifact_dir
         )
+        self.artifact_id = self._artifact_id
+        self.artifact_digest = self._artifact_digest
         self._request_id = 0
         self._lock = threading.RLock()
         self._socket: socket.socket | None = None
+        self.supports_pair_inference = False
+        self.paired_artifact_id: str | None = None
+        self.paired_artifact_digest: str | None = None
         self._connect_and_verify()
 
     def infer(
@@ -75,6 +81,51 @@ class UnixSocketPolicyClient:
         rgb_frame: np.ndarray,
         history_class_ids=None,
     ) -> InferenceResult:
+        payload = self._build_infer_payload(
+            rgb_frame,
+            history_class_ids=history_class_ids,
+        )
+        response = self._request(_INFER, payload)
+        try:
+            result = json.loads(response.decode('utf-8'))
+            return self._decode_result(result)
+        except (KeyError, TypeError, ValueError, UnicodeDecodeError) as exc:
+            self.close()
+            raise PolicyRuntimeError(
+                'GPU server returned a malformed inference result'
+            ) from exc
+
+    def infer_pair(
+        self,
+        rgb_frame: np.ndarray,
+        history_class_ids,
+    ) -> tuple[InferenceResult, InferenceResult]:
+        if not self.supports_pair_inference:
+            raise PolicyRuntimeError(
+                'GPU server does not support paired policy inference'
+            )
+        payload = self._build_infer_payload(
+            rgb_frame,
+            history_class_ids=history_class_ids,
+        )
+        response = self._request(_INFER_PAIR, payload)
+        try:
+            result = json.loads(response.decode('utf-8'))
+            shortcut = self._decode_result(result['shortcut'])
+            base = self._decode_result(result['base'])
+            return shortcut, base
+        except (KeyError, TypeError, ValueError, UnicodeDecodeError) as exc:
+            self.close()
+            raise PolicyRuntimeError(
+                'GPU server returned a malformed paired inference result'
+            ) from exc
+
+    def _build_infer_payload(
+        self,
+        rgb_frame: np.ndarray,
+        *,
+        history_class_ids,
+    ) -> bytes:
         if (
             not isinstance(rgb_frame, np.ndarray)
             or rgb_frame.dtype != np.uint8
@@ -95,17 +146,12 @@ class UnixSocketPolicyClient:
                 'deployed policy does not accept executed history'
             )
         payload += frame.tobytes()
-        response = self._request(_INFER, payload)
-        try:
-            result = json.loads(response.decode('utf-8'))
-            angle = float(result['angle'])
-            speed = float(result['speed'])
-            inference_ms = float(result['inference_ms'])
-        except (KeyError, TypeError, ValueError, UnicodeDecodeError) as exc:
-            self.close()
-            raise PolicyRuntimeError(
-                'GPU server returned a malformed inference result'
-            ) from exc
+        return payload
+
+    def _decode_result(self, result) -> InferenceResult:
+        angle = float(result['angle'])
+        speed = float(result['speed'])
+        inference_ms = float(result['inference_ms'])
         if not all(math.isfinite(value) for value in (angle, speed, inference_ms)):
             self.close()
             raise PolicyRuntimeError(
@@ -155,6 +201,15 @@ class UnixSocketPolicyClient:
             raise PolicyRuntimeError(
                 f'GPU server identity mismatch: expected {expected}, got {identity}'
             )
+        self.supports_pair_inference = identity.get('pair_inference') is True
+        paired_id = identity.get('paired_artifact_id')
+        paired_digest = identity.get('paired_artifact_digest')
+        self.paired_artifact_id = (
+            str(paired_id) if isinstance(paired_id, str) else None
+        )
+        self.paired_artifact_digest = (
+            str(paired_digest) if isinstance(paired_digest, str) else None
+        )
 
     def _request(
         self,
@@ -238,7 +293,7 @@ class PolicyIpcServer:
         self.socket_path = Path(socket_path)
         self.policy = policy
         self.artifact = load_policy_artifact(policy.artifact.root)
-        self.artifact_id, self.artifact_digest = _artifact_identity(
+        self.artifact_id, self.artifact_digest = artifact_identity(
             policy.artifact.root
         )
         self.device = str(policy.device_name)
@@ -352,20 +407,39 @@ class PolicyIpcServer:
         if opcode == _HELLO:
             if payload:
                 raise PolicyRuntimeError('hello payload must be empty')
-            return json.dumps(
-                {
-                    'artifact_id': self.artifact_id,
-                    'artifact_digest': self.artifact_digest,
-                    'device': self.device,
-                },
-                sort_keys=True,
-            ).encode('utf-8')
+            identity = {
+                'artifact_id': self.artifact_id,
+                'artifact_digest': self.artifact_digest,
+                'device': self.device,
+            }
+            paired_artifact_id = getattr(
+                self.policy,
+                'paired_artifact_id',
+                None,
+            )
+            paired_artifact_digest = getattr(
+                self.policy,
+                'paired_artifact_digest',
+                None,
+            )
+            if paired_artifact_id is not None:
+                identity.update(
+                    {
+                        'pair_inference': True,
+                        'paired_artifact_id': paired_artifact_id,
+                        'paired_artifact_digest': paired_artifact_digest,
+                    }
+                )
+            return json.dumps(identity, sort_keys=True).encode('utf-8')
         if opcode == _RESET:
             if payload:
                 raise PolicyRuntimeError('reset payload must be empty')
             self.policy.reset_history()
             return b''
-        if opcode != _INFER or len(payload) < _IMAGE_HEADER.size:
+        if (
+            opcode not in {_INFER, _INFER_PAIR}
+            or len(payload) < _IMAGE_HEADER.size
+        ):
             raise PolicyRuntimeError('unsupported GPU policy request')
         height, width, channels = _IMAGE_HEADER.unpack(
             payload[: _IMAGE_HEADER.size]
@@ -399,18 +473,38 @@ class PolicyIpcServer:
             width,
             channels,
         )
+        if opcode == _INFER_PAIR:
+            if external_history is None:
+                raise PolicyRuntimeError(
+                    'paired inference requires external Base history'
+                )
+            shortcut_result, base_result = self.policy.infer_pair(
+                image,
+                external_history,
+            )
+            return json.dumps(
+                {
+                    'shortcut': _result_payload(shortcut_result),
+                    'base': _result_payload(base_result),
+                },
+                separators=(',', ':'),
+            ).encode('utf-8')
         if external_history is None:
             result = self.policy.infer(image)
         else:
             result = self.policy.infer(image, external_history)
         return json.dumps(
-            {
-                'angle': float(result.command.angle),
-                'speed': float(result.command.speed),
-                'inference_ms': float(result.inference_ms),
-            },
+            _result_payload(result),
             separators=(',', ':'),
         ).encode('utf-8')
+
+
+def _result_payload(result) -> dict[str, float]:
+    return {
+        'angle': float(result.command.angle),
+        'speed': float(result.command.speed),
+        'inference_ms': float(result.inference_ms),
+    }
 
 
 def _recv_exact_socket(connection: socket.socket, size: int) -> bytes:

@@ -24,7 +24,8 @@ from xycar_ai_drive.control import (
 from xycar_ai_drive.policy_runtime import (
     InferenceResult,
     PolicyRuntimeError,
-    preprocess_rgb_frame,
+    normalize_rgb_geometry,
+    prepare_rgb_geometry,
 )
 
 
@@ -146,18 +147,41 @@ class DeviceTorchScriptPolicy:
         rgb_frame: np.ndarray,
         history_class_ids: Sequence[Sequence[int]] | None = None,
     ) -> InferenceResult:
-        chw = preprocess_rgb_frame(
+        tensor = self.prepare_tensor(rgb_frame)
+        return self.infer_preprocessed(
+            tensor,
+            history_class_ids=history_class_ids,
+        )
+
+    def prepare_tensor(self, rgb_frame: np.ndarray):
+        geometry = self.prepare_geometry(rgb_frame)
+        return self.prepare_tensor_from_geometry(geometry)
+
+    def prepare_geometry(self, rgb_frame: np.ndarray) -> np.ndarray:
+        return prepare_rgb_geometry(
             rgb_frame,
+            image_size=self.artifact.image_size,
+            road_warp=self.artifact.road_warp,
+        )
+
+    def prepare_tensor_from_geometry(self, geometry: np.ndarray):
+        chw = normalize_rgb_geometry(
+            geometry,
             image_size=self.artifact.image_size,
             mean=self._mean,
             std=self._std,
-            road_warp=self.artifact.road_warp,
         )
-        tensor = (
+        return (
             self._torch.from_numpy(chw)
             .unsqueeze(0)
             .to(self._device, non_blocking=False)
         )
+
+    def infer_preprocessed(
+        self,
+        tensor,
+        history_class_ids: Sequence[Sequence[int]] | None = None,
+    ) -> InferenceResult:
         now = time.monotonic()
         try:
             with self._history_lock:
