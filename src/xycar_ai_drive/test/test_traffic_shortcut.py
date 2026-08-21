@@ -8,6 +8,7 @@ from types import MethodType, SimpleNamespace
 import numpy as np
 import pytest
 
+from xycar_ai_drive.artifact import ArtifactContractError
 from xycar_ai_drive.traffic_light_detector import (
     DetectionBox,
     LampAction,
@@ -22,6 +23,10 @@ from xycar_ai_drive.traffic_shortcut_fsm import (
     MissionState,
     PolicyChoice,
     TrafficShortcutFsm,
+)
+from xycar_ai_drive.traffic_shortcut_artifact import (
+    EXPECTED_SIGNAL_VOTE_BUNDLE_ID,
+    _load_signal_vote_contract,
 )
 from xycar_ai_drive.traffic_shortcut_policy_node import (
     MissionDecision,
@@ -125,23 +130,96 @@ def test_detector_rejects_wrong_shape_and_nonfinite_output():
         )
 
 
-def test_lamp_width_gate_red_votes_priority_and_latch_clearing():
+def test_lamp_width_gate_five_votes_priority_and_latch_clearing():
     latch = TrafficLampLatch()
-    red = _reading((255, 10, 220, 230))
+    red = _reading((255, 10, 220, 230), width=45)
     left = _reading((10, 10, 220, 230))
     green = _reading((10, 10, 10, 230))
     unknown = _reading((10, 10, 10, 10))
 
     assert latch.observe(_reading((255, 10, 10, 10), width=44)) == LampAction.UNKNOWN
-    assert latch.observe(red) == LampAction.UNKNOWN
-    assert latch.observe(red) == LampAction.UNKNOWN
+    for _ in range(4):
+        assert latch.observe(red) == LampAction.UNKNOWN
     assert latch.observe(red) == LampAction.RED
     assert latch.red_latched
     assert latch.observe(None) == LampAction.RED
     assert latch.observe(unknown) == LampAction.RED
+    for _ in range(4):
+        assert latch.observe(left) == LampAction.RED
     assert latch.observe(left) == LampAction.LEFT
     assert not latch.red_latched
+
+    latch.reset()
+    for _ in range(2):
+        assert latch.observe(left) == LampAction.UNKNOWN
+    assert latch.observe(unknown) == LampAction.UNKNOWN
+    for _ in range(4):
+        assert latch.observe(left) == LampAction.UNKNOWN
+    assert latch.observe(left) == LampAction.LEFT
+
+    latch.reset()
+    for _ in range(2):
+        assert latch.observe(green) == LampAction.UNKNOWN
+    assert latch.observe(left) == LampAction.UNKNOWN
+    for _ in range(4):
+        assert latch.observe(green) == LampAction.UNKNOWN
     assert latch.observe(green) == LampAction.STRAIGHT
+
+
+def test_legacy_lamp_votes_keep_red_three_and_other_actions_immediate():
+    latch = TrafficLampLatch(
+        red_consecutive_reads=3,
+        left_consecutive_reads=1,
+        straight_consecutive_reads=1,
+    )
+    red = _reading((255, 10, 220, 230), width=45)
+    left = _reading((10, 10, 220, 230))
+
+    assert latch.observe(red) == LampAction.UNKNOWN
+    assert latch.observe(red) == LampAction.UNKNOWN
+    assert latch.observe(red) == LampAction.RED
+    assert latch.observe(left) == LampAction.LEFT
+    assert not latch.red_latched
+
+
+def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
+    legacy = {
+        'red_latch': {
+            'consecutive_red_reads': 3,
+            'unknown_behavior': 'retain_latch',
+            'clear_actions': ['LEFT', 'STRAIGHT'],
+        }
+    }
+    signal_vote = {
+        'actions': ['RED', 'LEFT', 'STRAIGHT'],
+        'consecutive_reads': 5,
+        'unknown_behavior': 'reset_candidate',
+        'different_action_behavior': 'restart_candidate_at_one',
+        'red_latch_behavior': 'retain_until_confirmed_clear_action',
+        'red_clear_actions': ['LEFT', 'STRAIGHT'],
+    }
+
+    assert _load_signal_vote_contract(
+        legacy,
+        schema_version=2,
+        artifact_id='legacy',
+    ) == (3, 1, 1)
+    assert _load_signal_vote_contract(
+        {'signal_vote': signal_vote},
+        schema_version=3,
+        artifact_id=EXPECTED_SIGNAL_VOTE_BUNDLE_ID,
+    ) == (5, 5, 5)
+    with pytest.raises(ArtifactContractError, match='signal vote'):
+        _load_signal_vote_contract(
+            {
+                'signal_vote': {
+                    **signal_vote,
+                    'consecutive_reads': 4,
+                }
+            },
+            schema_version=3,
+            artifact_id=EXPECTED_SIGNAL_VOTE_BUNDLE_ID,
+        )
 
 
 def test_fsm_base_transition_exact_eight_seconds_and_one_shot():

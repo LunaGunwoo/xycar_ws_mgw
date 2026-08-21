@@ -16,10 +16,19 @@ import yaml
 BUNDLE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 BUNDLE_KIND = "traffic_shortcut_bundle"
 LEGACY_BUNDLE_ID = "traffic-shortcut-nice-regression-resnet18-8s-20260821"
-BUNDLE_ID = (
+SHADOW_BUNDLE_ID = (
     "traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-"
     "20260821"
 )
+BUNDLE_ID = (
+    "traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-"
+    "tl45-votes5-every3-20260821"
+)
+BUNDLE_CONTRACTS = {
+    LEGACY_BUNDLE_ID: (1, 3),
+    SHADOW_BUNDLE_ID: (2, 3),
+    BUNDLE_ID: (3, 5),
+}
 BASE_ID = (
     "front-cam-policy-vit-small-ar4-v2-nice-adaptive-joint-regression-"
     "sequence-init25-window5-20260821"
@@ -70,12 +79,13 @@ def build_traffic_shortcut_bundle(
 ) -> Path:
     if not BUNDLE_ID_PATTERN.fullmatch(artifact_id):
         raise TrafficBundleBuildError(f"invalid bundle id: {artifact_id}")
-    if artifact_id not in {LEGACY_BUNDLE_ID, BUNDLE_ID}:
+    bundle_contract = BUNDLE_CONTRACTS.get(artifact_id)
+    if bundle_contract is None:
         raise TrafficBundleBuildError(
-            "approved bundle id must be "
-            f"{LEGACY_BUNDLE_ID} or {BUNDLE_ID}"
+            "approved bundle id must be one of "
+            + ", ".join(BUNDLE_CONTRACTS)
         )
-    schema_version = 1 if artifact_id == LEGACY_BUNDLE_ID else 2
+    schema_version, consecutive_signal_reads = bundle_contract
     base_artifact = _verify_policy_artifact(
         base_artifact,
         expected_id=BASE_ID,
@@ -144,6 +154,7 @@ def build_traffic_shortcut_bundle(
         manifest = _bundle_manifest(
             artifact_id=artifact_id,
             schema_version=schema_version,
+            consecutive_signal_reads=consecutive_signal_reads,
             base_artifact=base_artifact,
             shortcut_artifact=shortcut_artifact,
         )
@@ -156,6 +167,7 @@ def build_traffic_shortcut_bundle(
             temporary,
             expected_id=artifact_id,
             expected_schema=schema_version,
+            expected_signal_reads=consecutive_signal_reads,
         )
         temporary.rename(final)
     except BaseException:
@@ -169,6 +181,7 @@ def _bundle_manifest(
     *,
     artifact_id: str,
     schema_version: int,
+    consecutive_signal_reads: int,
     base_artifact: Path,
     shortcut_artifact: Path,
 ) -> dict[str, object]:
@@ -210,7 +223,7 @@ def _bundle_manifest(
             "failure_behavior": "fault_stop",
             "red_behavior": "discard",
         }
-    return {
+    manifest = {
         "schema_version": schema_version,
         "artifact_kind": BUNDLE_KIND,
         "artifact_id": artifact_id,
@@ -265,11 +278,6 @@ def _bundle_manifest(
                 "straight_requires_red_off": True,
             },
         },
-        "red_latch": {
-            "consecutive_red_reads": 3,
-            "unknown_behavior": "retain_latch",
-            "clear_actions": ["LEFT", "STRAIGHT"],
-        },
         "mission": mission,
         "host_runtime": {
             "onnxruntime_version": "1.24.0",
@@ -278,6 +286,32 @@ def _bundle_manifest(
             "policies_preloaded": True,
             "shared_cuda_lock": True,
         },
+    }
+    if schema_version < 3:
+        manifest["red_latch"] = _legacy_red_latch_contract()
+    else:
+        manifest["signal_vote"] = _signal_vote_contract(
+            consecutive_signal_reads
+        )
+    return manifest
+
+
+def _legacy_red_latch_contract() -> dict[str, object]:
+    return {
+        "consecutive_red_reads": 3,
+        "unknown_behavior": "retain_latch",
+        "clear_actions": ["LEFT", "STRAIGHT"],
+    }
+
+
+def _signal_vote_contract(consecutive_reads: int) -> dict[str, object]:
+    return {
+        "actions": ["RED", "LEFT", "STRAIGHT"],
+        "consecutive_reads": consecutive_reads,
+        "unknown_behavior": "reset_candidate",
+        "different_action_behavior": "restart_candidate_at_one",
+        "red_latch_behavior": "retain_until_confirmed_clear_action",
+        "red_clear_actions": ["LEFT", "STRAIGHT"],
     }
 
 
@@ -363,6 +397,7 @@ def _verify_built_bundle(
     *,
     expected_id: str,
     expected_schema: int,
+    expected_signal_reads: int,
 ) -> None:
     _verify_checksums(root, include_nested_checksum_files=True)
     manifest = _load_mapping(root / "manifest.yaml")
@@ -374,6 +409,20 @@ def _verify_built_bundle(
         raise TrafficBundleBuildError("built bundle identity mismatch")
     if _sha256_file(root / "signal" / "traffic_light.onnx") != TRAFFIC_SHA256:
         raise TrafficBundleBuildError("built bundle traffic ONNX mismatch")
+    if expected_schema < 3:
+        if (
+            manifest.get("red_latch") != _legacy_red_latch_contract()
+            or "signal_vote" in manifest
+        ):
+            raise TrafficBundleBuildError(
+                "built bundle legacy red latch mismatch"
+            )
+    elif (
+        manifest.get("signal_vote")
+        != _signal_vote_contract(expected_signal_reads)
+        or "red_latch" in manifest
+    ):
+        raise TrafficBundleBuildError("built bundle signal vote mismatch")
     _verify_policy_artifact(
         root / "policies" / BASE_ID,
         expected_id=BASE_ID,

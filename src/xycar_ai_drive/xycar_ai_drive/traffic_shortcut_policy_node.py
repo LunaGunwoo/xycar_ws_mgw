@@ -100,6 +100,12 @@ class TrafficShortcutPolicyNode(Node):
             bbox_width_min=self.bundle.detector.bbox_width_min,
             bbox_width_max=self.bundle.detector.bbox_width_max,
             red_consecutive_reads=self.bundle.detector.red_consecutive_reads,
+            left_consecutive_reads=(
+                self.bundle.detector.left_consecutive_reads
+            ),
+            straight_consecutive_reads=(
+                self.bundle.detector.straight_consecutive_reads
+            ),
         )
         self._detector = (
             detector_factory(self.bundle)
@@ -319,6 +325,24 @@ class TrafficShortcutPolicyNode(Node):
             raise ValueError('traffic shortcut runtime requires CUDA IPC')
 
     def _validate_bundle_runtime_contract(self) -> None:
+        detector = self.bundle.detector
+        expected_votes = (
+            (5, 5, 5)
+            if self.bundle.schema_version == 3
+            else (3, 1, 1)
+        )
+        if (
+            detector.bbox_width_min != 45
+            or detector.bbox_width_max != 200
+            or detector.inference_every_n_frames != 3
+            or (
+                detector.red_consecutive_reads,
+                detector.left_consecutive_reads,
+                detector.straight_consecutive_reads,
+            )
+            != expected_votes
+        ):
+            raise ValueError('traffic detector 45/votes/every contract mismatch')
         if self.bundle.base_speed_cap != 25.0:
             raise ValueError('bundle Base speed cap must be 25')
         if (

@@ -161,23 +161,37 @@ class TrafficLightDetector:
 
 
 class TrafficLampLatch:
-    """Apply width gating, relative brightness and the three-read red latch."""
+    """Vote on lamp actions while retaining a confirmed red stop."""
 
     def __init__(
         self,
         *,
         bbox_width_min: int = 45,
         bbox_width_max: int = 200,
-        red_consecutive_reads: int = 3,
+        red_consecutive_reads: int = 5,
+        left_consecutive_reads: int = 5,
+        straight_consecutive_reads: int = 5,
     ) -> None:
         if bbox_width_min < 1 or bbox_width_max < bbox_width_min:
             raise ValueError('invalid traffic bbox width gate')
-        if red_consecutive_reads < 1:
-            raise ValueError('red_consecutive_reads must be positive')
+        if any(
+            value < 1
+            for value in (
+                red_consecutive_reads,
+                left_consecutive_reads,
+                straight_consecutive_reads,
+            )
+        ):
+            raise ValueError('signal consecutive reads must be positive')
         self._bbox_width_min = bbox_width_min
         self._bbox_width_max = bbox_width_max
-        self._red_consecutive_reads = red_consecutive_reads
-        self._red_reads = 0
+        self._consecutive_reads = {
+            LampAction.RED: red_consecutive_reads,
+            LampAction.LEFT: left_consecutive_reads,
+            LampAction.STRAIGHT: straight_consecutive_reads,
+        }
+        self._candidate: LampAction | None = None
+        self._candidate_reads = 0
         self._red_latched = False
 
     @property
@@ -186,25 +200,47 @@ class TrafficLampLatch:
 
     @property
     def red_reads(self) -> int:
-        return self._red_reads
+        return (
+            self._candidate_reads
+            if self._candidate == LampAction.RED
+            else 0
+        )
 
     def reset(self) -> None:
-        self._red_reads = 0
+        self._candidate = None
+        self._candidate_reads = 0
         self._red_latched = False
 
     def observe(self, reading: LampReading | None) -> LampAction:
         raw = self._classify(reading)
-        if raw == LampAction.RED:
-            self._red_reads += 1
-            if self._red_reads >= self._red_consecutive_reads:
-                self._red_latched = True
-            return LampAction.RED if self._red_latched else LampAction.UNKNOWN
-        if raw in {LampAction.LEFT, LampAction.STRAIGHT}:
-            self._red_reads = 0
+        if raw == LampAction.UNKNOWN:
+            self._candidate = None
+            self._candidate_reads = 0
+            return (
+                LampAction.RED
+                if self._red_latched
+                else LampAction.UNKNOWN
+            )
+
+        if raw == self._candidate:
+            self._candidate_reads += 1
+        else:
+            self._candidate = raw
+            self._candidate_reads = 1
+        required = self._consecutive_reads[raw]
+        self._candidate_reads = min(self._candidate_reads, required)
+        confirmed = self._candidate_reads >= required
+
+        if self._red_latched:
+            if raw == LampAction.RED or not confirmed:
+                return LampAction.RED
             self._red_latched = False
             return raw
-        self._red_reads = 0
-        return LampAction.RED if self._red_latched else LampAction.UNKNOWN
+        if not confirmed:
+            return LampAction.UNKNOWN
+        if raw == LampAction.RED:
+            self._red_latched = True
+        return raw
 
     def _classify(self, reading: LampReading | None) -> LampAction:
         if reading is None or not (

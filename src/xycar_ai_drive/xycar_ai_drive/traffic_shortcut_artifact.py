@@ -22,7 +22,7 @@ from xycar_ai_drive.artifact import (
 from xycar_ai_drive.steering_contract import NORMALIZED_STEERING_CONTRACT
 
 BUNDLE_KIND = 'traffic_shortcut_bundle'
-SUPPORTED_BUNDLE_SCHEMA_VERSIONS = {1, 2}
+SUPPORTED_BUNDLE_SCHEMA_VERSIONS = {1, 2, 3}
 BUNDLE_MANIFEST = 'manifest.yaml'
 BUNDLE_CHECKSUMS = 'SHA256SUMS'
 TRAFFIC_MODEL_SHA256 = (
@@ -34,6 +34,10 @@ EXPECTED_BASE_ARTIFACT_ID = (
 )
 EXPECTED_SHORTCUT_ARTIFACT_ID = (
     'nice-shortcut-resnet18-squarewarp-speed23-20260821'
+)
+EXPECTED_SIGNAL_VOTE_BUNDLE_ID = (
+    'traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-'
+    'tl45-votes5-every3-20260821'
 )
 EXPECTED_ONNXRUNTIME_VERSION = '1.24.0'
 EXPECTED_NUMPY_VERSION = '1.26.4'
@@ -55,6 +59,8 @@ class TrafficDetectorContract:
     left_indices: tuple[int, int]
     straight_index: int
     red_consecutive_reads: int
+    left_consecutive_reads: int
+    straight_consecutive_reads: int
 
 
 @dataclass(frozen=True)
@@ -91,7 +97,7 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
         or schema_version not in SUPPORTED_BUNDLE_SCHEMA_VERSIONS
     ):
         raise ArtifactContractError(
-            'traffic shortcut bundle schema must be 1 or 2'
+            'traffic shortcut bundle schema must be 1, 2 or 3'
         )
     if manifest.get('artifact_kind') != BUNDLE_KIND:
         raise ArtifactContractError('artifact is not a traffic shortcut bundle')
@@ -156,13 +162,15 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
     percentile = _exact_number(lamp, 'percentile', 80.0)
     inference_every = _exact_int(detector, 'inference_every_n_frames', 3)
 
-    red_latch = _required_mapping(manifest, 'red_latch', 'manifest')
-    if (
-        red_latch.get('consecutive_red_reads') != 3
-        or red_latch.get('unknown_behavior') != 'retain_latch'
-        or red_latch.get('clear_actions') != ['LEFT', 'STRAIGHT']
-    ):
-        raise ArtifactContractError('red latch contract mismatch')
+    (
+        red_consecutive_reads,
+        left_consecutive_reads,
+        straight_consecutive_reads,
+    ) = _load_signal_vote_contract(
+        manifest,
+        schema_version=schema_version,
+        artifact_id=artifact_id,
+    )
 
     mission = _required_mapping(manifest, 'mission', 'manifest')
     if mission.get('states') != [
@@ -196,7 +204,7 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
             != 'latest_base_shadow_prediction'
         ):
             raise ArtifactContractError(
-                'schema v2 shortcut transition contract mismatch'
+                'schema v2/v3 shortcut transition contract mismatch'
             )
         shadow = _required_mapping(mission, 'base_shadow', 'mission')
         if (
@@ -211,7 +219,7 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
             or shadow.get('red_behavior') != 'discard'
         ):
             raise ArtifactContractError(
-                'schema v2 Base shadow contract mismatch'
+                'schema v2/v3 Base shadow contract mismatch'
             )
         shortcut_entry_stop_control_cycles = 1
         shortcut_exit_stop_control_cycles = 0
@@ -265,7 +273,9 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
             red_index=0,
             left_indices=(2, 3),
             straight_index=3,
-            red_consecutive_reads=3,
+            red_consecutive_reads=red_consecutive_reads,
+            left_consecutive_reads=left_consecutive_reads,
+            straight_consecutive_reads=straight_consecutive_reads,
         ),
         base_speed_cap=base_speed_cap,
         shortcut_speed=shortcut_speed,
@@ -285,6 +295,39 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
         numpy_version=EXPECTED_NUMPY_VERSION,
         providers=EXPECTED_PROVIDERS,
     )
+
+
+def _load_signal_vote_contract(
+    manifest: Mapping[str, object],
+    *,
+    schema_version: int,
+    artifact_id: str,
+) -> tuple[int, int, int]:
+    if schema_version < 3:
+        red_latch = _required_mapping(manifest, 'red_latch', 'manifest')
+        if (
+            red_latch.get('consecutive_red_reads') != 3
+            or red_latch.get('unknown_behavior') != 'retain_latch'
+            or red_latch.get('clear_actions') != ['LEFT', 'STRAIGHT']
+            or 'signal_vote' in manifest
+        ):
+            raise ArtifactContractError('legacy red latch contract mismatch')
+        return 3, 1, 1
+
+    if artifact_id != EXPECTED_SIGNAL_VOTE_BUNDLE_ID:
+        raise ArtifactContractError('schema v3 bundle id is not approved')
+    signal_vote = _required_mapping(manifest, 'signal_vote', 'manifest')
+    expected = {
+        'actions': ['RED', 'LEFT', 'STRAIGHT'],
+        'consecutive_reads': 5,
+        'unknown_behavior': 'reset_candidate',
+        'different_action_behavior': 'restart_candidate_at_one',
+        'red_latch_behavior': 'retain_until_confirmed_clear_action',
+        'red_clear_actions': ['LEFT', 'STRAIGHT'],
+    }
+    if signal_vote != expected or 'red_latch' in manifest:
+        raise ArtifactContractError('schema v3 signal vote contract mismatch')
+    return 5, 5, 5
 
 
 def _load_component(
