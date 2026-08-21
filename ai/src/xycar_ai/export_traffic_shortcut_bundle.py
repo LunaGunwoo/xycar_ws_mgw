@@ -15,7 +15,11 @@ import yaml
 
 BUNDLE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 BUNDLE_KIND = "traffic_shortcut_bundle"
-BUNDLE_ID = "traffic-shortcut-nice-regression-resnet18-8s-20260821"
+LEGACY_BUNDLE_ID = "traffic-shortcut-nice-regression-resnet18-8s-20260821"
+BUNDLE_ID = (
+    "traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-"
+    "20260821"
+)
 BASE_ID = (
     "front-cam-policy-vit-small-ar4-v2-nice-adaptive-joint-regression-"
     "sequence-init25-window5-20260821"
@@ -66,8 +70,12 @@ def build_traffic_shortcut_bundle(
 ) -> Path:
     if not BUNDLE_ID_PATTERN.fullmatch(artifact_id):
         raise TrafficBundleBuildError(f"invalid bundle id: {artifact_id}")
-    if artifact_id != BUNDLE_ID:
-        raise TrafficBundleBuildError(f"approved bundle id must be {BUNDLE_ID}")
+    if artifact_id not in {LEGACY_BUNDLE_ID, BUNDLE_ID}:
+        raise TrafficBundleBuildError(
+            "approved bundle id must be "
+            f"{LEGACY_BUNDLE_ID} or {BUNDLE_ID}"
+        )
+    schema_version = 1 if artifact_id == LEGACY_BUNDLE_ID else 2
     base_artifact = _verify_policy_artifact(
         base_artifact,
         expected_id=BASE_ID,
@@ -135,6 +143,7 @@ def build_traffic_shortcut_bundle(
         )
         manifest = _bundle_manifest(
             artifact_id=artifact_id,
+            schema_version=schema_version,
             base_artifact=base_artifact,
             shortcut_artifact=shortcut_artifact,
         )
@@ -143,7 +152,11 @@ def build_traffic_shortcut_bundle(
             encoding="utf-8",
         )
         _write_checksums(temporary)
-        _verify_built_bundle(temporary, expected_id=artifact_id)
+        _verify_built_bundle(
+            temporary,
+            expected_id=artifact_id,
+            expected_schema=schema_version,
+        )
         temporary.rename(final)
     except BaseException:
         if temporary.is_dir():
@@ -155,11 +168,50 @@ def build_traffic_shortcut_bundle(
 def _bundle_manifest(
     *,
     artifact_id: str,
+    schema_version: int,
     base_artifact: Path,
     shortcut_artifact: Path,
 ) -> dict[str, object]:
+    mission = {
+        "states": [
+            "OFF",
+            "BASE",
+            "RED_STOP",
+            "SWITCH_TO_SHORTCUT",
+            "SHORTCUT",
+            "SWITCH_TO_BASE",
+            "FAULT",
+        ],
+        "action_priority": ["STOP", "LEFT", "STRAIGHT"],
+        "a_hold_release_grace_sec": 0.12,
+        "shortcut_duration_sec": 8.0,
+        "successful_shortcut_once": True,
+        "red_cancels_shortcut": True,
+        "red_cancel_consumes_success": False,
+        "base_speed_cap": 25.0,
+        "shortcut_speed": 23.0,
+    }
+    if schema_version == 1:
+        mission["transition_stop_control_cycles"] = 1
+    else:
+        mission["transition"] = {
+            "shortcut_entry_stop_control_cycles": 1,
+            "shortcut_exit_stop_control_cycles": 0,
+            "shortcut_exit_command_source": (
+                "latest_base_shadow_prediction"
+            ),
+        }
+        mission["base_shadow"] = {
+            "enabled_states": ["SWITCH_TO_SHORTCUT", "SHORTCUT"],
+            "history_seed": "active_base_history_before_entry_stop",
+            "history_update": "capped_prediction_commands",
+            "motor_publish_during_shortcut": False,
+            "stale_timeout_sec": 0.25,
+            "failure_behavior": "fault_stop",
+            "red_behavior": "discard",
+        }
     return {
-        "schema_version": 1,
+        "schema_version": schema_version,
         "artifact_kind": BUNDLE_KIND,
         "artifact_id": artifact_id,
         "created_at": datetime.now(UTC).isoformat(),
@@ -218,26 +270,7 @@ def _bundle_manifest(
             "unknown_behavior": "retain_latch",
             "clear_actions": ["LEFT", "STRAIGHT"],
         },
-        "mission": {
-            "states": [
-                "OFF",
-                "BASE",
-                "RED_STOP",
-                "SWITCH_TO_SHORTCUT",
-                "SHORTCUT",
-                "SWITCH_TO_BASE",
-                "FAULT",
-            ],
-            "action_priority": ["STOP", "LEFT", "STRAIGHT"],
-            "a_hold_release_grace_sec": 0.12,
-            "transition_stop_control_cycles": 1,
-            "shortcut_duration_sec": 8.0,
-            "successful_shortcut_once": True,
-            "red_cancels_shortcut": True,
-            "red_cancel_consumes_success": False,
-            "base_speed_cap": 25.0,
-            "shortcut_speed": 23.0,
-        },
+        "mission": mission,
         "host_runtime": {
             "onnxruntime_version": "1.24.0",
             "numpy_version": "1.26.4",
@@ -325,11 +358,16 @@ def _copy_artifact(source: Path, destination: Path) -> None:
     shutil.copytree(source, destination, copy_function=shutil.copy2)
 
 
-def _verify_built_bundle(root: Path, *, expected_id: str) -> None:
+def _verify_built_bundle(
+    root: Path,
+    *,
+    expected_id: str,
+    expected_schema: int,
+) -> None:
     _verify_checksums(root, include_nested_checksum_files=True)
     manifest = _load_mapping(root / "manifest.yaml")
     if (
-        manifest.get("schema_version") != 1
+        manifest.get("schema_version") != expected_schema
         or manifest.get("artifact_kind") != BUNDLE_KIND
         or manifest.get("artifact_id") != expected_id
     ):

@@ -30,18 +30,25 @@ class FramePlan:
     state: MissionState
     policy: PolicyChoice
     publish_stop: bool
+    promote_base_shadow: bool = False
 
 
 class TrafficShortcutFsm:
     """Enforce red priority, transition stops and a successful one-shot."""
 
-    def __init__(self, *, shortcut_duration_sec: float = 8.0) -> None:
+    def __init__(
+        self,
+        *,
+        shortcut_duration_sec: float = 8.0,
+        seamless_base_handoff: bool = False,
+    ) -> None:
         if (
             not math.isfinite(shortcut_duration_sec)
             or shortcut_duration_sec <= 0.0
         ):
             raise ValueError('shortcut_duration_sec must be finite and positive')
         self.shortcut_duration_sec = float(shortcut_duration_sec)
+        self.seamless_base_handoff = bool(seamless_base_handoff)
         self.state = MissionState.OFF
         self.shortcut_completed = False
         self.shortcut_started_monotonic: float | None = None
@@ -92,8 +99,6 @@ class TrafficShortcutFsm:
             return self._policy_plan(PolicyChoice.SHORTCUT)
 
         if self.state == MissionState.SHORTCUT:
-            if self._shortcut_deadline_reached(now_monotonic):
-                return self._complete_shortcut()
             return self._policy_plan(PolicyChoice.SHORTCUT)
 
         if self.state == MissionState.SWITCH_TO_BASE:
@@ -108,6 +113,16 @@ class TrafficShortcutFsm:
             raise RuntimeError('shortcut command published outside SHORTCUT state')
         if self.shortcut_started_monotonic is None:
             self.shortcut_started_monotonic = now_monotonic
+
+    def on_base_shadow_promoted(self) -> None:
+        if not self.seamless_base_handoff:
+            raise RuntimeError('Base shadow promotion is not enabled')
+        if self.state != MissionState.SWITCH_TO_BASE:
+            raise RuntimeError(
+                'Base shadow promoted outside SWITCH_TO_BASE state'
+            )
+        self.shortcut_completed = True
+        self.state = MissionState.BASE
 
     def on_control_tick(self, *, now_monotonic: float) -> FramePlan | None:
         self._validate_now(now_monotonic)
@@ -126,8 +141,16 @@ class TrafficShortcutFsm:
         )
 
     def _complete_shortcut(self) -> FramePlan:
-        self.shortcut_completed = True
         self.shortcut_started_monotonic = None
+        if self.seamless_base_handoff:
+            self.state = MissionState.SWITCH_TO_BASE
+            return FramePlan(
+                state=self.state,
+                policy=PolicyChoice.BASE,
+                publish_stop=False,
+                promote_base_shadow=True,
+            )
+        self.shortcut_completed = True
         self.state = MissionState.SWITCH_TO_BASE
         return self._stop_plan()
 

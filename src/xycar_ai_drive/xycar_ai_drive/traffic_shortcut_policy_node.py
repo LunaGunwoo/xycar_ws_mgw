@@ -93,7 +93,8 @@ class TrafficShortcutPolicyNode(Node):
         self._frame_condition = threading.Condition(self._lock)
         self._drive_gate = HoldDriveGate(self.a_release_grace_sec)
         self._fsm = TrafficShortcutFsm(
-            shortcut_duration_sec=self.bundle.shortcut_duration_sec
+            shortcut_duration_sec=self.bundle.shortcut_duration_sec,
+            seamless_base_handoff=self.bundle.base_shadow_enabled,
         )
         self._lamp_latch = TrafficLampLatch(
             bbox_width_min=self.bundle.detector.bbox_width_min,
@@ -123,6 +124,9 @@ class TrafficShortcutPolicyNode(Node):
         self._decision: MissionDecision | None = None
         self._last_executed_decision_sequence = 0
         self._history = self._initial_external_history()
+        self._base_shadow_history: deque[tuple[int, int]] | None = None
+        self._base_shadow_decision: MissionDecision | None = None
+        self._base_shadow_epoch = 0
         self._last_joy_monotonic: float | None = None
         self._joy_valid = False
         self._last_camera_monotonic: float | None = None
@@ -188,6 +192,7 @@ class TrafficShortcutPolicyNode(Node):
             f'{self.bundle.base_speed_cap:g}, shortcut_speed='
             f'{self.bundle.shortcut_speed:g}, shortcut_duration='
             f'{self.bundle.shortcut_duration_sec:g}s, '
+            f'base_shadow={self.bundle.base_shadow_enabled}, '
             f'A_release_grace={self.a_release_grace_sec:g}s'
         )
 
@@ -321,6 +326,20 @@ class TrafficShortcutPolicyNode(Node):
             or self.bundle.shortcut.fixed_speed != 23.0
         ):
             raise ValueError('bundle shortcut speed must be 23')
+        if self.bundle.shortcut_entry_stop_control_cycles != 1:
+            raise ValueError('shortcut entry stop must be one control cycle')
+        if self.bundle.base_shadow_enabled:
+            if (
+                self.bundle.shortcut_exit_stop_control_cycles != 0
+                or self.bundle.base_shadow_history_update
+                != 'capped_prediction_commands'
+                or self.bundle.base_shadow_max_age_sec is None
+                or self.bundle.base_shadow_max_age_sec
+                > self.inference_timeout_sec
+            ):
+                raise ValueError('Base shadow handoff contract is invalid')
+        elif self.bundle.shortcut_exit_stop_control_cycles != 1:
+            raise ValueError('legacy shortcut exit stop must be one cycle')
 
     def _create_policy_client(
         self,
@@ -385,6 +404,7 @@ class TrafficShortcutPolicyNode(Node):
                     self._lamp_latch.reset()
                     self._last_signal = LampAction.UNKNOWN
                     self._history = self._initial_external_history()
+                    self._discard_base_shadow_locked()
                     self._decision = None
                     self._last_executed_decision_sequence = 0
                     self._awaiting_post_reset_decision = True
@@ -400,6 +420,7 @@ class TrafficShortcutPolicyNode(Node):
                 self._awaiting_post_reset_decision = False
                 self._history_reset_monotonic = None
                 self._transition_stop_pending = False
+                self._discard_base_shadow_locked()
                 self._mission_generation += 1
         if action == ToggleAction.ENABLED:
             self.get_logger().warning('Traffic shortcut motion enabled by A hold.')
@@ -464,7 +485,6 @@ class TrafficShortcutPolicyNode(Node):
                 ):
                     continue
                 generation = self._mission_generation
-                history = tuple(self._history)
                 signal = self._last_signal
             try:
                 reading_observed = False
@@ -491,66 +511,177 @@ class TrafficShortcutPolicyNode(Node):
                         if plan.state == MissionState.SWITCH_TO_SHORTCUT:
                             self._transition_stop_pending = True
                             self._decision = None
+                            shadow_work = (
+                                self._start_base_shadow_locked()
+                            )
                         else:
+                            self._discard_base_shadow_locked()
                             self._store_stop_decision_locked(
                                 sequence=sequence,
                                 source_monotonic=source_monotonic,
                             )
+                            shadow_work = None
                         self._accept_post_reset_decision_locked(
                             source_monotonic
                         )
-                        continue
-                    generation = self._mission_generation
-                    history = tuple(self._history)
-                started = time.monotonic()
+                    else:
+                        shadow_work = None
+                        if plan.policy == PolicyChoice.BASE:
+                            self._discard_base_shadow_locked()
+                            history = tuple(self._history)
+                        elif plan.policy == PolicyChoice.SHORTCUT:
+                            shadow_work = (
+                                self._base_shadow_snapshot_locked()
+                            )
+                        generation = self._mission_generation
+                if plan.publish_stop:
+                    if shadow_work is not None:
+                        self._infer_and_store_base_shadow(
+                            image=image,
+                            source_monotonic=source_monotonic,
+                            sequence=sequence,
+                            shadow_work=shadow_work,
+                        )
+                    continue
                 if plan.policy == PolicyChoice.BASE:
                     result = self._base_policy.infer(image, history)
+                    decision = self._decision_from_result(
+                        result=result,
+                        policy=PolicyChoice.BASE,
+                        state=plan.state,
+                        source_monotonic=source_monotonic,
+                        sequence=sequence,
+                    )
                 elif plan.policy == PolicyChoice.SHORTCUT:
                     result = self._shortcut_policy.infer(image)
+                    decision = self._decision_from_result(
+                        result=result,
+                        policy=PolicyChoice.SHORTCUT,
+                        state=plan.state,
+                        source_monotonic=source_monotonic,
+                        sequence=sequence,
+                    )
                 else:
                     raise RuntimeError('FSM selected no policy without STOP')
-                completed = time.monotonic()
-                command = result.command
-                inference_ms = float(result.inference_ms)
-                if not all(
-                    math.isfinite(value)
-                    for value in (
-                        command.angle,
-                        command.speed,
-                        inference_ms,
-                        completed - started,
-                    )
-                ):
-                    raise ValueError('policy output contains NaN or Inf')
-                if plan.policy == PolicyChoice.BASE:
-                    command = cap_command_speed(
-                        command,
-                        self.bundle.base_speed_cap,
-                    )
-                elif not math.isclose(
-                    command.speed,
-                    self.bundle.shortcut_speed,
-                    rel_tol=0.0,
-                    abs_tol=1e-6,
-                ):
-                    raise ValueError('shortcut policy speed is not exactly 23')
-                decision = MissionDecision(
-                    command=command,
-                    policy=plan.policy,
-                    state=plan.state,
-                    source_monotonic=source_monotonic,
-                    completed_monotonic=completed,
-                    inference_ms=inference_ms,
-                    frame_sequence=sequence,
-                )
                 with self._lock:
                     if generation != self._mission_generation:
                         continue
                     self._decision = decision
                     self._accept_post_reset_decision_locked(source_monotonic)
                 self._publish_prediction(decision)
+                if (
+                    plan.policy == PolicyChoice.SHORTCUT
+                    and shadow_work is not None
+                ):
+                    self._infer_and_store_base_shadow(
+                        image=image,
+                        source_monotonic=source_monotonic,
+                        sequence=sequence,
+                        shadow_work=shadow_work,
+                    )
             except Exception as exc:  # noqa: BLE001 - fail-closed boundary
                 self._force_fault(f'mission inference failed: {exc}')
+
+    def _decision_from_result(
+        self,
+        *,
+        result,
+        policy: PolicyChoice,
+        state: MissionState,
+        source_monotonic: float,
+        sequence: int,
+    ) -> MissionDecision:
+        completed = time.monotonic()
+        command = result.command
+        inference_ms = float(result.inference_ms)
+        if not all(
+            math.isfinite(value)
+            for value in (
+                command.angle,
+                command.speed,
+                inference_ms,
+                completed - source_monotonic,
+            )
+        ):
+            raise ValueError('policy output contains NaN or Inf')
+        if policy == PolicyChoice.BASE:
+            command = cap_command_speed(
+                command,
+                self.bundle.base_speed_cap,
+            )
+        elif not math.isclose(
+            command.speed,
+            self.bundle.shortcut_speed,
+            rel_tol=0.0,
+            abs_tol=1e-6,
+        ):
+            raise ValueError('shortcut policy speed is not exactly 23')
+        return MissionDecision(
+            command=command,
+            policy=policy,
+            state=state,
+            source_monotonic=source_monotonic,
+            completed_monotonic=completed,
+            inference_ms=inference_ms,
+            frame_sequence=sequence,
+        )
+
+    def _start_base_shadow_locked(self):
+        if not self.bundle.base_shadow_enabled:
+            return None
+        self._base_shadow_epoch += 1
+        self._base_shadow_history = deque(
+            self._history,
+            maxlen=self._history.maxlen,
+        )
+        self._base_shadow_decision = None
+        return self._base_shadow_snapshot_locked()
+
+    def _base_shadow_snapshot_locked(self):
+        if (
+            not self.bundle.base_shadow_enabled
+            or self._base_shadow_history is None
+        ):
+            return None
+        return self._base_shadow_epoch, tuple(self._base_shadow_history)
+
+    def _infer_and_store_base_shadow(
+        self,
+        *,
+        image: np.ndarray,
+        source_monotonic: float,
+        sequence: int,
+        shadow_work,
+    ) -> None:
+        epoch, history = shadow_work
+        result = self._base_policy.infer(image, history)
+        decision = self._decision_from_result(
+            result=result,
+            policy=PolicyChoice.BASE,
+            state=MissionState.SHORTCUT,
+            source_monotonic=source_monotonic,
+            sequence=sequence,
+        )
+        with self._lock:
+            if (
+                epoch != self._base_shadow_epoch
+                or self._base_shadow_history is None
+                or self._fsm.state
+                not in {
+                    MissionState.SWITCH_TO_SHORTCUT,
+                    MissionState.SHORTCUT,
+                }
+            ):
+                return
+            self._base_shadow_history.append(
+                command_history_token_ids(decision.command)
+            )
+            self._base_shadow_decision = decision
+
+    def _discard_base_shadow_locked(self) -> None:
+        self._base_shadow_epoch += 1
+        self._base_shadow_history = None
+        self._base_shadow_decision = None
 
     def _accept_post_reset_decision_locked(
         self,
@@ -593,17 +724,24 @@ class TrafficShortcutPolicyNode(Node):
                     now_monotonic=now
                 )
                 if deadline_plan is not None:
-                    self._mission_generation += 1
-                    self._minimum_next_frame_sequence = self._frame_sequence
-                    self._decision = None
-                    self._awaiting_post_reset_decision = True
-                    self._history_reset_monotonic = now
-                    self._publish_and_record_locked(
-                        STOP_COMMAND,
-                        decision_sequence=None,
-                    )
-                    return
-                if self._transition_stop_pending:
+                    if deadline_plan.promote_base_shadow:
+                        reason = self._promote_base_shadow_locked(now)
+                        if reason is None:
+                            return
+                    else:
+                        self._mission_generation += 1
+                        self._minimum_next_frame_sequence = (
+                            self._frame_sequence
+                        )
+                        self._decision = None
+                        self._awaiting_post_reset_decision = True
+                        self._history_reset_monotonic = now
+                        self._publish_and_record_locked(
+                            STOP_COMMAND,
+                            decision_sequence=None,
+                        )
+                        return
+                if reason is None and self._transition_stop_pending:
                     self._publish_and_record_locked(
                         STOP_COMMAND,
                         decision_sequence=None,
@@ -616,7 +754,7 @@ class TrafficShortcutPolicyNode(Node):
                     self._history_reset_monotonic = now
                     return
                 decision = self._decision
-                if decision is not None:
+                if reason is None and decision is not None:
                     self._publish_and_record_locked(
                         decision.command,
                         decision_sequence=decision.frame_sequence,
@@ -634,6 +772,45 @@ class TrafficShortcutPolicyNode(Node):
             self._force_fault(reason)
             return
         self._publish_stop()
+
+    def _promote_base_shadow_locked(self, now: float) -> str | None:
+        decision = self._base_shadow_decision
+        history = self._base_shadow_history
+        max_age = self.bundle.base_shadow_max_age_sec
+        if not self.bundle.base_shadow_enabled or max_age is None:
+            return 'Base shadow handoff was requested by a legacy bundle'
+        if decision is None or history is None:
+            return 'Base shadow prediction is missing at shortcut handoff'
+        age = now - decision.source_monotonic
+        if not math.isfinite(age) or age < 0.0 or age > max_age:
+            return (
+                'Base shadow prediction is stale at shortcut handoff: '
+                f'age={age:.3f}s'
+            )
+        promoted = MissionDecision(
+            command=decision.command,
+            policy=PolicyChoice.BASE,
+            state=MissionState.BASE,
+            source_monotonic=decision.source_monotonic,
+            completed_monotonic=decision.completed_monotonic,
+            inference_ms=decision.inference_ms,
+            frame_sequence=decision.frame_sequence,
+        )
+        promoted_history = deque(history, maxlen=history.maxlen)
+        self._discard_base_shadow_locked()
+        self._fsm.on_base_shadow_promoted()
+        self._history = promoted_history
+        self._decision = promoted
+        self._last_executed_decision_sequence = promoted.frame_sequence
+        self._mission_generation += 1
+        self._minimum_next_frame_sequence = promoted.frame_sequence
+        self._awaiting_post_reset_decision = False
+        self._history_reset_monotonic = None
+        self._transition_stop_pending = False
+        self._stop_reason = None
+        self._publish(promoted.command)
+        self._publish_prediction(promoted)
+        return None
 
     def _publish_and_record_locked(
         self,
@@ -742,6 +919,7 @@ class TrafficShortcutPolicyNode(Node):
             self._awaiting_post_reset_decision = False
             self._history_reset_monotonic = None
             self._transition_stop_pending = False
+            self._discard_base_shadow_locked()
             self._mission_generation += 1
             self._publish_stop()
         if was_enabled:

@@ -2,7 +2,8 @@
 # Licensed under the Apache License, Version 2.0
 
 from collections import deque
-from types import SimpleNamespace
+import threading
+from types import MethodType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -168,6 +169,34 @@ def test_fsm_base_transition_exact_eight_seconds_and_one_shot():
     assert ignored_left.policy == PolicyChoice.BASE
 
 
+def test_fsm_shadow_handoff_has_no_exit_stop_and_completes_on_promotion():
+    fsm = TrafficShortcutFsm(
+        shortcut_duration_sec=8.0,
+        seamless_base_handoff=True,
+    )
+    fsm.enable()
+    assert fsm.on_frame(
+        LampAction.LEFT,
+        now_monotonic=1.0,
+    ).publish_stop
+    assert fsm.on_frame(
+        LampAction.LEFT,
+        now_monotonic=1.1,
+    ).policy == PolicyChoice.SHORTCUT
+    fsm.on_shortcut_command_published(now_monotonic=2.0)
+
+    handoff = fsm.on_control_tick(now_monotonic=10.0)
+
+    assert handoff is not None
+    assert not handoff.publish_stop
+    assert handoff.promote_base_shadow
+    assert handoff.state == MissionState.SWITCH_TO_BASE
+    assert not fsm.shortcut_completed
+    fsm.on_base_shadow_promoted()
+    assert fsm.state == MissionState.BASE
+    assert fsm.shortcut_completed
+
+
 def test_fsm_red_cancels_without_consuming_and_allows_retry():
     fsm = TrafficShortcutFsm()
     fsm.enable()
@@ -282,3 +311,154 @@ def test_integrated_node_post_reset_timeout_and_actual_history_only():
     method(history_node, DriveCommand(), decision_sequence=None)
     assert len(published) == 3
     assert tuple(history_node._history)[-2:] == ((60, 75), (50, 50))
+
+
+def _bind_shadow_methods(node):
+    for name in (
+        '_decision_from_result',
+        '_start_base_shadow_locked',
+        '_base_shadow_snapshot_locked',
+        '_infer_and_store_base_shadow',
+        '_discard_base_shadow_locked',
+        '_promote_base_shadow_locked',
+    ):
+        setattr(
+            node,
+            name,
+            MethodType(getattr(TrafficShortcutPolicyNode, name), node),
+        )
+    return node
+
+
+def test_base_shadow_recursively_uses_capped_predictions_without_publish():
+    histories = []
+    outputs = iter(
+        (
+            DriveCommand(angle=20.0, speed=30.0),
+            DriveCommand(angle=30.0, speed=24.0),
+        )
+    )
+
+    class FakeBasePolicy:
+        def infer(self, _image, history):
+            histories.append(tuple(history))
+            return SimpleNamespace(
+                command=next(outputs),
+                inference_ms=2.0,
+            )
+
+    node = _bind_shadow_methods(
+        SimpleNamespace(
+            bundle=SimpleNamespace(
+                base_shadow_enabled=True,
+                base_speed_cap=25.0,
+                shortcut_speed=23.0,
+            ),
+            _history=deque([(50, 75)] * 4, maxlen=4),
+            _base_shadow_history=None,
+            _base_shadow_decision=None,
+            _base_shadow_epoch=0,
+            _base_policy=FakeBasePolicy(),
+            _fsm=SimpleNamespace(state=MissionState.SHORTCUT),
+            _lock=threading.RLock(),
+        )
+    )
+    image = np.zeros((8, 12, 3), dtype=np.uint8)
+    first = node._start_base_shadow_locked()
+    node._infer_and_store_base_shadow(
+        image=image,
+        source_monotonic=1.0,
+        sequence=1,
+        shadow_work=first,
+    )
+    second = node._base_shadow_snapshot_locked()
+    node._infer_and_store_base_shadow(
+        image=image,
+        source_monotonic=1.1,
+        sequence=2,
+        shadow_work=second,
+    )
+
+    assert histories[0] == ((50, 75),) * 4
+    assert histories[1][-1] == (60, 75)
+    assert tuple(node._history) == ((50, 75),) * 4
+    assert tuple(node._base_shadow_history)[-2:] == ((60, 75), (65, 74))
+    assert node._base_shadow_decision.command == DriveCommand(30.0, 24.0)
+
+
+def _shadow_handoff_node(*, source_monotonic=9.9):
+    fsm = TrafficShortcutFsm(seamless_base_handoff=True)
+    fsm.enable()
+    fsm.state = MissionState.SWITCH_TO_BASE
+    published = []
+    predictions = []
+    node = _bind_shadow_methods(
+        SimpleNamespace(
+            bundle=SimpleNamespace(
+                base_shadow_enabled=True,
+                base_shadow_max_age_sec=0.25,
+            ),
+            _base_shadow_decision=MissionDecision(
+                command=DriveCommand(12.0, 22.0),
+                policy=PolicyChoice.BASE,
+                state=MissionState.SHORTCUT,
+                source_monotonic=source_monotonic,
+                completed_monotonic=source_monotonic + 0.01,
+                inference_ms=2.0,
+                frame_sequence=42,
+            ),
+            _base_shadow_history=deque(
+                [(55, 70), (56, 71), (57, 72), (62, 72)],
+                maxlen=4,
+            ),
+            _base_shadow_epoch=1,
+            _fsm=fsm,
+            _history=deque([(50, 75)] * 4, maxlen=4),
+            _decision=None,
+            _last_executed_decision_sequence=7,
+            _mission_generation=3,
+            _minimum_next_frame_sequence=0,
+            _awaiting_post_reset_decision=True,
+            _history_reset_monotonic=8.0,
+            _transition_stop_pending=False,
+            _stop_reason='old',
+            _publish=lambda command: published.append(command),
+            _publish_prediction=lambda decision: predictions.append(decision),
+        )
+    )
+    return node, published, predictions
+
+
+def test_fresh_shadow_handoff_promotes_history_without_stop():
+    node, published, predictions = _shadow_handoff_node()
+
+    assert node._promote_base_shadow_locked(10.0) is None
+
+    assert published == [DriveCommand(12.0, 22.0)]
+    assert published[0] != DriveCommand()
+    assert len(predictions) == 1
+    assert node._fsm.state == MissionState.BASE
+    assert node._fsm.shortcut_completed
+    assert tuple(node._history) == (
+        (55, 70),
+        (56, 71),
+        (57, 72),
+        (62, 72),
+    )
+    assert node._decision.policy == PolicyChoice.BASE
+    assert node._base_shadow_history is None
+
+
+def test_stale_shadow_handoff_fails_without_publish_and_red_discards():
+    node, published, _predictions = _shadow_handoff_node(
+        source_monotonic=9.0
+    )
+
+    reason = node._promote_base_shadow_locked(10.0)
+
+    assert 'stale' in reason
+    assert not published
+    assert node._fsm.state == MissionState.SWITCH_TO_BASE
+    node._discard_base_shadow_locked()
+    assert node._base_shadow_history is None
+    assert node._base_shadow_decision is None

@@ -22,7 +22,7 @@ from xycar_ai_drive.artifact import (
 from xycar_ai_drive.steering_contract import NORMALIZED_STEERING_CONTRACT
 
 BUNDLE_KIND = 'traffic_shortcut_bundle'
-BUNDLE_SCHEMA_VERSION = 1
+SUPPORTED_BUNDLE_SCHEMA_VERSIONS = {1, 2}
 BUNDLE_MANIFEST = 'manifest.yaml'
 BUNDLE_CHECKSUMS = 'SHA256SUMS'
 TRAFFIC_MODEL_SHA256 = (
@@ -61,12 +61,18 @@ class TrafficDetectorContract:
 class TrafficShortcutBundle:
     root: Path
     artifact_id: str
+    schema_version: int
     base: PolicyArtifact
     shortcut: PolicyArtifact
     detector: TrafficDetectorContract
     base_speed_cap: float
     shortcut_speed: float
     shortcut_duration_sec: float
+    shortcut_entry_stop_control_cycles: int
+    shortcut_exit_stop_control_cycles: int
+    base_shadow_enabled: bool
+    base_shadow_history_update: str | None
+    base_shadow_max_age_sec: float | None
     successful_shortcut_once: bool
     action_priority: tuple[str, str, str]
     onnxruntime_version: str
@@ -78,8 +84,15 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
     root = _safe_root(root)
     _verify_bundle_checksums(root)
     manifest = _load_mapping(root / BUNDLE_MANIFEST)
-    if manifest.get('schema_version') != BUNDLE_SCHEMA_VERSION:
-        raise ArtifactContractError('traffic shortcut bundle schema must be 1')
+    schema_version = manifest.get('schema_version')
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version not in SUPPORTED_BUNDLE_SCHEMA_VERSIONS
+    ):
+        raise ArtifactContractError(
+            'traffic shortcut bundle schema must be 1 or 2'
+        )
     if manifest.get('artifact_kind') != BUNDLE_KIND:
         raise ArtifactContractError('artifact is not a traffic shortcut bundle')
     artifact_id = _required_string(manifest, 'artifact_id', 'manifest')
@@ -164,8 +177,51 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
         raise ArtifactContractError('mission state contract mismatch')
     if mission.get('action_priority') != ['STOP', 'LEFT', 'STRAIGHT']:
         raise ArtifactContractError('mission action priority mismatch')
-    if mission.get('transition_stop_control_cycles') != 1:
-        raise ArtifactContractError('mission transition stop must be one cycle')
+    if schema_version == 1:
+        if mission.get('transition_stop_control_cycles') != 1:
+            raise ArtifactContractError(
+                'mission transition stop must be one cycle'
+            )
+        shortcut_entry_stop_control_cycles = 1
+        shortcut_exit_stop_control_cycles = 1
+        base_shadow_enabled = False
+        base_shadow_history_update = None
+        base_shadow_max_age_sec = None
+    else:
+        transition = _required_mapping(mission, 'transition', 'mission')
+        if (
+            transition.get('shortcut_entry_stop_control_cycles') != 1
+            or transition.get('shortcut_exit_stop_control_cycles') != 0
+            or transition.get('shortcut_exit_command_source')
+            != 'latest_base_shadow_prediction'
+        ):
+            raise ArtifactContractError(
+                'schema v2 shortcut transition contract mismatch'
+            )
+        shadow = _required_mapping(mission, 'base_shadow', 'mission')
+        if (
+            shadow.get('enabled_states')
+            != ['SWITCH_TO_SHORTCUT', 'SHORTCUT']
+            or shadow.get('history_seed')
+            != 'active_base_history_before_entry_stop'
+            or shadow.get('history_update')
+            != 'capped_prediction_commands'
+            or shadow.get('motor_publish_during_shortcut') is not False
+            or shadow.get('failure_behavior') != 'fault_stop'
+            or shadow.get('red_behavior') != 'discard'
+        ):
+            raise ArtifactContractError(
+                'schema v2 Base shadow contract mismatch'
+            )
+        shortcut_entry_stop_control_cycles = 1
+        shortcut_exit_stop_control_cycles = 0
+        base_shadow_enabled = True
+        base_shadow_history_update = 'capped_prediction_commands'
+        base_shadow_max_age_sec = _exact_number(
+            shadow,
+            'stale_timeout_sec',
+            0.25,
+        )
     if mission.get('red_cancels_shortcut') is not True:
         raise ArtifactContractError('red must cancel the shortcut attempt')
     if mission.get('red_cancel_consumes_success') is not False:
@@ -196,6 +252,7 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
     return TrafficShortcutBundle(
         root=root,
         artifact_id=artifact_id,
+        schema_version=schema_version,
         base=base,
         shortcut=shortcut,
         detector=TrafficDetectorContract(
@@ -213,6 +270,15 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
         base_speed_cap=base_speed_cap,
         shortcut_speed=shortcut_speed,
         shortcut_duration_sec=shortcut_duration,
+        shortcut_entry_stop_control_cycles=(
+            shortcut_entry_stop_control_cycles
+        ),
+        shortcut_exit_stop_control_cycles=(
+            shortcut_exit_stop_control_cycles
+        ),
+        base_shadow_enabled=base_shadow_enabled,
+        base_shadow_history_update=base_shadow_history_update,
+        base_shadow_max_age_sec=base_shadow_max_age_sec,
         successful_shortcut_once=True,
         action_priority=('STOP', 'LEFT', 'STRAIGHT'),
         onnxruntime_version=EXPECTED_ONNXRUNTIME_VERSION,

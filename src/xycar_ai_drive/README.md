@@ -474,11 +474,16 @@ schema v7 `nice-shortcut` ResNet18과 SHA-256
 - red는 3회 연속 판독 뒤 latch하고 unknown에서 유지한다. green 또는 새 left만
   latch를 해제한다.
 - left frame에서는 한 제어 주기 STOP, 다음 fresh frame부터 speed `23` ResNet18을
-  사용한다. 첫 실제 shortcut 명령부터 8초에 STOP하고 다음 fresh frame부터 Base로
-  복귀한다. 성공은 process당 한 번이고 red 취소는 성공을 소비하지 않는다.
-- Base external AR history에는 실제 발행한 Base, shortcut과 transition/red STOP만
-  compact token으로 추가한다. 두 policy는 한 CUDA process에서 preload/warm-up하고
-  서로 다른 mode `0600` socket을 공유 CUDA lock으로 직렬화한다.
+  사용한다. 동시에 Base는 진입 전 history에서 시작한 self-AR shadow prediction을
+  매 fresh frame 계속 갱신하지만 motor에는 발행하지 않는다. 첫 실제 shortcut
+  명령부터 8초에 최신 0.25초 이내 shadow command를 즉시 발행해 STOP 없이 Base로
+  복귀한다. 성공은 process당 한 번이고 red 취소는 shadow와 시도를 폐기하되 성공을
+  소비하지 않는다.
+- 실제 실행 history와 미발행 Base shadow history는 분리한다. shadow에는 cap `25`가
+  적용된 Base prediction만 compact token으로 추가하고, handoff 성공 때만 활성
+  history로 승격한다. 두 policy는 한 CUDA process에서 preload/warm-up하고 서로 다른
+  mode `0600` socket을 공유 CUDA lock으로 직렬화한다. shortcut inference를 먼저
+  갱신하므로 shadow 작업 중에도 실제 선택 policy decision은 최신 상태를 유지한다.
 - 시작은 OFF이고 A hold/release grace `0.12s` 계약을 유지한다. Joy/camera/IPC
   stale, ONNX shape·NaN/Inf, 경쟁 publisher와 motor subscriber 소실은 FAULT와
   `[0,0]`이다.
@@ -486,9 +491,11 @@ schema v7 `nice-shortcut` ResNet18과 SHA-256
 Jetson host는 NumPy `1.26.4`, ONNX Runtime `1.24.0`, provider 순서
 CUDA→CPU를 exact 검사한다. bundle checksum, 두 socket과 synthetic ONNX preflight가
 끝난 뒤에만 camera/gamepad launch를 시작한다. motor bridge는 포함하지 않는다.
+기존 `traffic-shortcut-nice-regression-resnet18-8s-20260821` schema v1 bundle은
+종료 STOP 동작을 재현하는 rollback용으로 삭제하거나 덮어쓰지 않는다.
 
 ```bash
-cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-20260821 use_camera:=true use_gamepad:=true allow_motion:=true
+cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-20260821 use_camera:=true use_gamepad:=true allow_motion:=true
 ```
 
 이 launch는 실제 camera와 motor publisher를 열 수 있으므로 매번 직전 승인을 받고
@@ -504,18 +511,18 @@ camera 또는 motor publisher를 열 수 있으므로 정상 wrapper와 같은 �
 
 ```bash
 ros2 run xycar_ai_drive traffic_shortcut_gpu_server -- \
-  --bundle-dir /artifacts/traffic-shortcut-nice-regression-resnet18-8s-20260821 \
+  --bundle-dir /artifacts/traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-20260821 \
   --base-socket-path /run/user/1000/xycar-ai/traffic-base.sock \
   --shortcut-socket-path /run/user/1000/xycar-ai/traffic-shortcut.sock \
   --device cuda
 
 ros2 launch xycar_ai_drive traffic_shortcut_policy.launch.py \
-  bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-20260821 \
+  bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-20260821 \
   use_camera:=true use_gamepad:=true allow_motion:=true
 
 ros2 run xycar_ai_drive traffic_shortcut_policy --ros-args \
   --params-file /home/xytron/xycar_ws_mgw/install/xycar_ai_drive/share/xycar_ai_drive/config/traffic_shortcut_policy.yaml \
-  -p bundle_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/traffic-shortcut-nice-regression-resnet18-8s-20260821
+  -p bundle_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-20260821
 ```
 
 ## 대회 signal + shortcut 통합 runtime
