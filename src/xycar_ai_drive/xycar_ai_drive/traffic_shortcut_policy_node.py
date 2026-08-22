@@ -224,6 +224,7 @@ class TrafficShortcutPolicyNode(Node):
         self.declare_parameter('enabled_topic', '/traffic_shortcut/enabled')
         self.declare_parameter('a_button_index', 0)
         self.declare_parameter('a_release_grace_sec', 0.12)
+        self.declare_parameter('require_gamepad_hold', True)
         self.declare_parameter('allow_motion', True)
         self.declare_parameter('publish_rate_hz', 20.0)
         self.declare_parameter('joy_timeout_sec', 0.25)
@@ -258,6 +259,9 @@ class TrafficShortcutPolicyNode(Node):
         self.a_button_index = int(self.get_parameter('a_button_index').value)
         self.a_release_grace_sec = float(
             self.get_parameter('a_release_grace_sec').value
+        )
+        self.require_gamepad_hold = bool(
+            self.get_parameter('require_gamepad_hold').value
         )
         self.allow_motion = bool(self.get_parameter('allow_motion').value)
         self.publish_rate_hz = float(
@@ -420,6 +424,8 @@ class TrafficShortcutPolicyNode(Node):
         )
 
     def _on_joy(self, message: Joy) -> None:
+        if not self.require_gamepad_hold:
+            return
         now = time.monotonic()
         if len(message.buttons) <= self.a_button_index:
             with self._lock:
@@ -431,43 +437,10 @@ class TrafficShortcutPolicyNode(Node):
         with self._lock:
             self._joy_valid = True
             self._last_joy_monotonic = now
-            action = self._drive_gate.observe(
+            action = self._observe_drive_gate_locked(
                 pressed=pressed,
-                can_enable=self._can_enable_locked(now),
-                now_monotonic=now,
+                now=now,
             )
-            if action == ToggleAction.ENABLED:
-                try:
-                    self._base_policy.reset_history()
-                    self._shortcut_policy.reset_history()
-                except Exception as exc:  # noqa: BLE001 - IPC boundary
-                    self._drive_gate.fault()
-                    self._fsm.fault()
-                    action = ToggleAction.REJECTED
-                    self._stop_reason = f'policy reset failed: {exc}'
-                else:
-                    self._fsm.enable()
-                    self._lamp_latch.reset()
-                    self._last_signal = LampAction.UNKNOWN
-                    self._history = self._initial_external_history()
-                    self._discard_base_shadow_locked()
-                    self._decision = None
-                    self._last_executed_decision_sequence = 0
-                    self._awaiting_post_reset_decision = True
-                    self._history_reset_monotonic = now
-                    self._transition_stop_pending = False
-                    self._minimum_next_frame_sequence = self._frame_sequence
-                    self._mission_generation += 1
-                    self._stop_reason = None
-                    self._publish_enabled(True)
-            elif action == ToggleAction.DISABLED:
-                self._fsm.disable()
-                self._decision = None
-                self._awaiting_post_reset_decision = False
-                self._history_reset_monotonic = None
-                self._transition_stop_pending = False
-                self._discard_base_shadow_locked()
-                self._mission_generation += 1
         if action == ToggleAction.ENABLED:
             self.get_logger().warning('Traffic shortcut motion enabled by A hold.')
         elif action == ToggleAction.DISABLED:
@@ -481,6 +454,50 @@ class TrafficShortcutPolicyNode(Node):
                 'A hold rejected; release A, restore prerequisites, then hold again.',
                 throttle_duration_sec=1.0,
             )
+
+    def _observe_drive_gate_locked(
+        self,
+        *,
+        pressed: bool,
+        now: float,
+    ) -> ToggleAction:
+        action = self._drive_gate.observe(
+            pressed=pressed,
+            can_enable=self._can_enable_locked(now),
+            now_monotonic=now,
+        )
+        if action == ToggleAction.ENABLED:
+            try:
+                self._base_policy.reset_history()
+                self._shortcut_policy.reset_history()
+            except Exception as exc:  # noqa: BLE001 - IPC boundary
+                self._drive_gate.fault()
+                self._fsm.fault()
+                self._stop_reason = f'policy reset failed: {exc}'
+                return ToggleAction.REJECTED
+            self._fsm.enable()
+            self._lamp_latch.reset()
+            self._last_signal = LampAction.UNKNOWN
+            self._history = self._initial_external_history()
+            self._discard_base_shadow_locked()
+            self._decision = None
+            self._last_executed_decision_sequence = 0
+            self._awaiting_post_reset_decision = True
+            self._history_reset_monotonic = now
+            self._transition_stop_pending = False
+            self._minimum_next_frame_sequence = self._frame_sequence
+            self._mission_generation += 1
+            self._stop_reason = None
+            self._publish_enabled(True)
+        elif action == ToggleAction.DISABLED:
+            self._fsm.disable()
+            self._decision = None
+            self._awaiting_post_reset_decision = False
+            self._history_reset_monotonic = None
+            self._transition_stop_pending = False
+            self._discard_base_shadow_locked()
+            self._mission_generation += 1
+        return action
 
     def _on_camera(self, message: Image) -> None:
         try:
@@ -786,7 +803,17 @@ class TrafficShortcutPolicyNode(Node):
         now = time.monotonic()
         if now >= self._next_graph_check_monotonic:
             self._refresh_graph(now)
+        auto_action = None
         with self._lock:
+            if (
+                not self.require_gamepad_hold
+                and not self._drive_gate.enabled
+                and self._can_enable_locked(now)
+            ):
+                auto_action = self._observe_drive_gate_locked(
+                    pressed=True,
+                    now=now,
+                )
             reason = None
             if self._drive_gate.enabled:
                 reason = self._unsafe_reason_locked(now)
@@ -839,6 +866,16 @@ class TrafficShortcutPolicyNode(Node):
                         )
                     self._stop_reason = None
                     return
+        if auto_action == ToggleAction.ENABLED:
+            self.get_logger().warning(
+                'Traffic shortcut motion enabled without Gamepad hold.'
+            )
+        elif auto_action == ToggleAction.REJECTED:
+            self._force_fault(
+                self._stop_reason
+                or 'automatic traffic shortcut start failed'
+            )
+            return
         if reason is not None:
             self._force_fault(reason)
             return
@@ -904,10 +941,13 @@ class TrafficShortcutPolicyNode(Node):
             )
         if not self._has_motor_subscriber:
             return 'no motor subscriber'
-        if not self._joy_valid or not is_fresh(
-            now,
-            self._last_joy_monotonic,
-            self.joy_timeout_sec,
+        if self.require_gamepad_hold and (
+            not self._joy_valid
+            or not is_fresh(
+                now,
+                self._last_joy_monotonic,
+                self.joy_timeout_sec,
+            )
         ):
             return 'Joy input is missing or stale'
         if not is_fresh(
@@ -938,10 +978,13 @@ class TrafficShortcutPolicyNode(Node):
             return False
         if self._competitors or not self._has_motor_subscriber:
             return False
-        if not self._joy_valid or not is_fresh(
-            now,
-            self._last_joy_monotonic,
-            self.joy_timeout_sec,
+        if self.require_gamepad_hold and (
+            not self._joy_valid
+            or not is_fresh(
+                now,
+                self._last_joy_monotonic,
+                self.joy_timeout_sec,
+            )
         ):
             return False
         return is_fresh(

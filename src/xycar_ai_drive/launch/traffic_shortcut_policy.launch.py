@@ -102,6 +102,10 @@ def generate_launch_description():
                             allow_motion,
                             value_type=bool,
                         ),
+                        'require_gamepad_hold': ParameterValue(
+                            use_gamepad,
+                            value_type=bool,
+                        ),
                         'inference_device': 'cuda',
                         'base_socket_path': base_socket_path,
                         'shortcut_socket_path': shortcut_socket_path,

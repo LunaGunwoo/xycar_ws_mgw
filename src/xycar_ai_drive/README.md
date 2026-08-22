@@ -488,9 +488,11 @@ schema v7 `nice-shortcut` ResNet18과 SHA-256
   paired RPC가 RGB frame을 한 번만 받고 공통 warp·resize를 한 번만 수행한 뒤, 각
   artifact의 서로 다른 normalization을 적용해 shortcut과 Base를 차례로 추론한다.
   따라서 Base self-AR를 계속 갱신하면서도 실제 선택 policy decision을 함께 반환한다.
-- 시작은 OFF이고 A hold/release grace `0.12s` 계약을 유지한다. Joy/camera/IPC
-  stale, ONNX shape·NaN/Inf, 경쟁 publisher와 motor subscriber 소실은 FAULT와
-  `[0,0]`이다.
+- `use_gamepad:=true`에서는 OFF로 시작하고 A hold/release grace `0.12s` 계약을
+  유지한다. `use_gamepad:=false`에서는 A-hold/Joy stale 검사를 쓰지 않고,
+  camera와 motor subscriber가 준비되면 자동으로 ON이 되어 `Ctrl+C` 또는 fault까지
+  계속 주행한다. camera/IPC stale, ONNX shape·NaN/Inf, 경쟁 publisher와 motor
+  subscriber 소실은 어느 mode에서나 FAULT와 `[0,0]`이다.
 
 Jetson host는 NumPy `1.26.4`, ONNX Runtime `1.24.0`, provider 순서
 CUDA→CPU를 exact 검사한다. bundle checksum, 두 socket과 synthetic ONNX preflight가
@@ -503,6 +505,12 @@ schema v2 red-3 bundle은 rollback용으로 삭제하거나 덮어쓰지 않는�
 
 ```bash
 cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-yolo-cls-tl45-votes2-every3-45sessions-20260822 use_camera:=true use_gamepad:=true allow_motion:=true
+```
+
+대회 연속 주행은 Gamepad를 시작하지 않고 다음처럼 실행한다.
+
+```bash
+cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-yolo-cls-tl45-votes2-every3-45sessions-20260822 use_camera:=true use_gamepad:=false allow_motion:=true
 ```
 
 이 launch는 실제 camera와 motor publisher를 열 수 있으므로 매번 직전 승인을 받고

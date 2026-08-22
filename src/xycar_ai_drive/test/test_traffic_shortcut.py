@@ -3,6 +3,7 @@
 
 from collections import deque
 import threading
+from pathlib import Path
 from types import MethodType, SimpleNamespace
 
 import numpy as np
@@ -459,6 +460,8 @@ def _safe_node_state():
     return SimpleNamespace(
         _competitors=(),
         _has_motor_subscriber=True,
+        require_gamepad_hold=True,
+        allow_motion=True,
         _joy_valid=True,
         _last_joy_monotonic=0.95,
         joy_timeout_sec=0.25,
@@ -532,6 +535,28 @@ def test_integrated_node_post_reset_timeout_and_actual_history_only():
     method(history_node, DriveCommand(), decision_sequence=None)
     assert len(published) == 3
     assert tuple(history_node._history)[-2:] == ((60, 75), (50, 50))
+
+
+def test_integrated_node_without_gamepad_does_not_require_joy():
+    node = _safe_node_state()
+    node.require_gamepad_hold = False
+    node._joy_valid = False
+    node._last_joy_monotonic = None
+
+    assert TrafficShortcutPolicyNode._unsafe_reason_locked(node, 1.0) is None
+    assert TrafficShortcutPolicyNode._can_enable_locked(node, 1.0)
+
+
+def test_traffic_shortcut_launch_ties_gamepad_to_hold_gate():
+    launch_path = (
+        Path(__file__).parents[1]
+        / 'launch'
+        / 'traffic_shortcut_policy.launch.py'
+    )
+    launch_text = launch_path.read_text(encoding='utf-8')
+
+    assert "'require_gamepad_hold': ParameterValue(" in launch_text
+    assert 'use_gamepad,' in launch_text
 
 
 def test_shadow_bundle_requires_verified_paired_server_identity():
