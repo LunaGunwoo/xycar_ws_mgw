@@ -37,8 +37,10 @@ from xycar_ai_drive.front_cam_policy_node import (
 from xycar_ai_drive.policy_ipc import UnixSocketPolicyClient
 from xycar_ai_drive.traffic_light_detector import (
     LampAction,
+    TrafficClassifierDetector,
     TrafficLampLatch,
     TrafficLightDetector,
+    TrafficSignalLatch,
 )
 from xycar_ai_drive.traffic_shortcut_artifact import (
     EXPECTED_NUMPY_VERSION,
@@ -96,17 +98,24 @@ class TrafficShortcutPolicyNode(Node):
             shortcut_duration_sec=self.bundle.shortcut_duration_sec,
             seamless_base_handoff=self.bundle.base_shadow_enabled,
         )
-        self._lamp_latch = TrafficLampLatch(
-            bbox_width_min=self.bundle.detector.bbox_width_min,
-            bbox_width_max=self.bundle.detector.bbox_width_max,
-            red_consecutive_reads=self.bundle.detector.red_consecutive_reads,
-            left_consecutive_reads=(
-                self.bundle.detector.left_consecutive_reads
-            ),
-            straight_consecutive_reads=(
-                self.bundle.detector.straight_consecutive_reads
-            ),
-        )
+        if self.bundle.detector.mode == 'yolo_cnn_classifier':
+            self._lamp_latch = TrafficSignalLatch(
+                bbox_width_min=self.bundle.detector.bbox_width_min,
+                bbox_width_max=self.bundle.detector.bbox_width_max,
+                consecutive_reads=self.bundle.detector.red_consecutive_reads,
+            )
+        else:
+            self._lamp_latch = TrafficLampLatch(
+                bbox_width_min=self.bundle.detector.bbox_width_min,
+                bbox_width_max=self.bundle.detector.bbox_width_max,
+                red_consecutive_reads=self.bundle.detector.red_consecutive_reads,
+                left_consecutive_reads=(
+                    self.bundle.detector.left_consecutive_reads
+                ),
+                straight_consecutive_reads=(
+                    self.bundle.detector.straight_consecutive_reads
+                ),
+            )
         self._detector = (
             detector_factory(self.bundle)
             if detector_factory is not None
@@ -327,7 +336,9 @@ class TrafficShortcutPolicyNode(Node):
     def _validate_bundle_runtime_contract(self) -> None:
         detector = self.bundle.detector
         expected_votes = (
-            (5, 5, 5)
+            (2, 2, 2)
+            if self.bundle.schema_version == 4
+            else (5, 5, 5)
             if self.bundle.schema_version == 3
             else (3, 1, 1)
         )
@@ -530,7 +541,7 @@ class TrafficShortcutPolicyNode(Node):
                     == 0
                 ):
                     bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-                    reading = self._detector.read_lamp(bgr)
+                    reading = self._read_detector(bgr)
                     reading_observed = True
                 with self._lock:
                     if generation != self._mission_generation:
@@ -625,6 +636,11 @@ class TrafficShortcutPolicyNode(Node):
                 self._publish_prediction(decision)
             except Exception as exc:  # noqa: BLE001 - fail-closed boundary
                 self._force_fault(f'mission inference failed: {exc}')
+
+    def _read_detector(self, bgr: np.ndarray):
+        if self.bundle.detector.mode == 'yolo_cnn_classifier':
+            return self._detector.read_signal(bgr)
+        return self._detector.read_lamp(bgr)
 
     def _decision_from_result(
         self,
@@ -1030,7 +1046,9 @@ class TrafficShortcutPolicyNode(Node):
         self.publish_stop_burst()
 
 
-def _create_onnx_detector(bundle: TrafficShortcutBundle) -> TrafficLightDetector:
+def _create_onnx_detector(
+    bundle: TrafficShortcutBundle,
+) -> TrafficLightDetector | TrafficClassifierDetector:
     if np.__version__ != EXPECTED_NUMPY_VERSION:
         raise ValueError(
             f'host NumPy must be {EXPECTED_NUMPY_VERSION}, got {np.__version__}'
@@ -1068,10 +1086,44 @@ def _create_onnx_detector(bundle: TrafficShortcutBundle) -> TrafficLightDetector
         or list(outputs[0].shape) != [1, 5, 8400]
     ):
         raise ValueError('traffic ONNX output metadata mismatch')
-    return TrafficLightDetector(
-        session=session,
+    if bundle.detector.mode == 'hsv_lamp':
+        return TrafficLightDetector(
+            session=session,
+            confidence_threshold=bundle.detector.confidence_threshold,
+            percentile=bundle.detector.percentile,
+        )
+    classifier_path = bundle.detector.classifier_model_path
+    if classifier_path is None or bundle.detector.classifier_crop_padding is None:
+        raise ValueError('classifier bundle is missing classifier contract')
+    classifier = ort.InferenceSession(
+        str(classifier_path),
+        providers=list(bundle.providers),
+    )
+    if tuple(classifier.get_providers()) != bundle.providers:
+        raise ValueError(
+            'traffic classifier active providers do not match CUDA then CPU contract'
+        )
+    classifier_inputs = classifier.get_inputs()
+    classifier_outputs = classifier.get_outputs()
+    if (
+        len(classifier_inputs) != 1
+        or classifier_inputs[0].name != 'image'
+        or classifier_inputs[0].type != 'tensor(float)'
+        or list(classifier_inputs[0].shape) != [1, 3, 48, 96]
+    ):
+        raise ValueError('traffic classifier ONNX input metadata mismatch')
+    if (
+        len(classifier_outputs) != 1
+        or classifier_outputs[0].name != 'logits'
+        or classifier_outputs[0].type != 'tensor(float)'
+        or list(classifier_outputs[0].shape) != [1, 4]
+    ):
+        raise ValueError('traffic classifier ONNX output metadata mismatch')
+    return TrafficClassifierDetector(
+        yolo_session=session,
+        classifier_session=classifier,
         confidence_threshold=bundle.detector.confidence_threshold,
-        percentile=bundle.detector.percentile,
+        crop_padding=bundle.detector.classifier_crop_padding,
     )
 
 

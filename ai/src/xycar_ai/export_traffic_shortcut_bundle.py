@@ -36,17 +36,25 @@ BUNDLE_ID = (
     "traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-"
     "tl45-votes5-every3-45sessions-20260821"
 )
+CLASSIFIER_BUNDLE_ID = (
+    "traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-"
+    "yolo-cls-tl45-votes2-every3-45sessions-20260822"
+)
 BUNDLE_CONTRACTS = {
     LEGACY_BUNDLE_ID: (1, 3, SHORTCUT_ID),
     SHADOW_BUNDLE_ID: (2, 3, SHORTCUT_ID),
     SIGNAL_VOTE_BUNDLE_ID: (3, 5, SHORTCUT_ID),
     BUNDLE_ID: (3, 5, EXPANDED_SHORTCUT_ID),
+    CLASSIFIER_BUNDLE_ID: (4, 2, EXPANDED_SHORTCUT_ID),
 }
 TRAFFIC_SHA256 = (
     "24c1a38eacfb065c95e5577be29a2a542b985d6ea1954bf2fc94c52eb674aa41"
 )
+CLASSIFIER_SHA256 = (
+    "3ddb126483e03211f59cd15eb1f96632b9c3d5ac0d42544ccd999601643b806b"
+)
 YOLO_REFERENCE_SHA256 = (
-    "8d437d1b216b2165f7f781e61b9c2e42860acfbc8eed9fcb9d570ca515869898"
+    "50b2071a765d74add0c51bd91c3392d3ce8d08e24302dbe4f9389809b3ee7262"
 )
 SHORTCUT_REFERENCE_SHA256 = (
     "389ad9074a97ecb8ab65fa3ebb1de0a37d6a8cf1729b2a9364c8db76c3ee9d06"
@@ -64,6 +72,7 @@ def main(argv: Iterable[str] | None = None) -> None:
     parser.add_argument("--base-artifact", required=True)
     parser.add_argument("--shortcut-artifact", required=True)
     parser.add_argument("--traffic-model", required=True)
+    parser.add_argument("--traffic-classifier")
     parser.add_argument("--artifact-id", default=BUNDLE_ID)
     parser.add_argument("--output-root", default="artifacts/models")
     arguments = parser.parse_args(argv)
@@ -71,6 +80,11 @@ def main(argv: Iterable[str] | None = None) -> None:
         base_artifact=Path(arguments.base_artifact),
         shortcut_artifact=Path(arguments.shortcut_artifact),
         traffic_model=Path(arguments.traffic_model),
+        traffic_classifier=(
+            Path(arguments.traffic_classifier)
+            if arguments.traffic_classifier is not None
+            else None
+        ),
         artifact_id=arguments.artifact_id,
         output_root=Path(arguments.output_root),
     )
@@ -82,6 +96,7 @@ def build_traffic_shortcut_bundle(
     base_artifact: Path,
     shortcut_artifact: Path,
     traffic_model: Path,
+    traffic_classifier: Path | None,
     artifact_id: str,
     output_root: Path,
 ) -> Path:
@@ -116,6 +131,18 @@ def build_traffic_shortcut_bundle(
         raise TrafficBundleBuildError(f"traffic ONNX is missing: {traffic_model}")
     if _sha256_file(traffic_model) != TRAFFIC_SHA256:
         raise TrafficBundleBuildError("traffic ONNX SHA-256 mismatch")
+    if schema_version == 4:
+        if traffic_classifier is None:
+            raise TrafficBundleBuildError("traffic classifier is required")
+        traffic_classifier = _verify_onnx_file(
+            traffic_classifier,
+            expected_sha256=CLASSIFIER_SHA256,
+            label="traffic classifier ONNX",
+        )
+    elif traffic_classifier is not None:
+        raise TrafficBundleBuildError(
+            "traffic classifier is only valid for schema v4"
+        )
 
     base_manifest = _load_mapping(base_artifact / "manifest.yaml")
     shortcut_manifest = _load_mapping(shortcut_artifact / "manifest.yaml")
@@ -145,6 +172,8 @@ def build_traffic_shortcut_bundle(
         signal_dir = temporary / "signal"
         signal_dir.mkdir()
         shutil.copy2(traffic_model, signal_dir / "traffic_light.onnx")
+        if traffic_classifier is not None:
+            shutil.copy2(traffic_classifier, signal_dir / "tl_cls.onnx")
         provenance_dir = temporary / "provenance"
         provenance_dir.mkdir()
         provenance = {
@@ -164,6 +193,10 @@ def build_traffic_shortcut_bundle(
                     "read_only_path": "/home/xytron/traffic_light.onnx",
                     "sha256": TRAFFIC_SHA256,
                 },
+                "tl_cls_onnx": {
+                    "read_only_path": "/home/xytron/tl_cls.onnx",
+                    "sha256": CLASSIFIER_SHA256,
+                },
             },
         }
         (provenance_dir / "references.yaml").write_text(
@@ -177,6 +210,7 @@ def build_traffic_shortcut_bundle(
             base_artifact=base_artifact,
             shortcut_artifact=shortcut_artifact,
             shortcut_artifact_id=shortcut_artifact_id,
+            traffic_classifier=traffic_classifier,
         )
         (temporary / "manifest.yaml").write_text(
             yaml.safe_dump(manifest, sort_keys=False),
@@ -189,6 +223,7 @@ def build_traffic_shortcut_bundle(
             expected_schema=schema_version,
             expected_signal_reads=consecutive_signal_reads,
             expected_shortcut_id=shortcut_artifact_id,
+            expected_classifier=traffic_classifier is not None,
         )
         temporary.rename(final)
     except BaseException:
@@ -206,6 +241,7 @@ def _bundle_manifest(
     base_artifact: Path,
     shortcut_artifact: Path,
     shortcut_artifact_id: str,
+    traffic_classifier: Path | None,
 ) -> dict[str, object]:
     mission = {
         "states": [
@@ -309,10 +345,56 @@ def _bundle_manifest(
             "shared_cuda_lock": True,
         },
     }
+    if schema_version == 4:
+        assert traffic_classifier is not None
+        manifest["components"]["traffic_classifier"] = {
+            "format": "onnx",
+            "file": "signal/tl_cls.onnx",
+            "sha256": CLASSIFIER_SHA256,
+            "input": {
+                "name": "image",
+                "dtype": "float32",
+                "shape": [1, 3, 48, 96],
+            },
+            "output": {
+                "name": "logits",
+                "dtype": "float32",
+                "shape": [1, 4],
+            },
+            "classes": [
+                "red",
+                "yellow",
+                "left_green",
+                "straight_green",
+            ],
+        }
+        manifest["detector"] = {
+            "confidence_threshold": 0.25,
+            "bbox_width_px": [45, 200],
+            "inference_every_n_frames": 3,
+            "preprocessing": "resize_640_bgr_to_rgb_float32_nchw_div255",
+            "selection": "maximum_confidence_box",
+            "classifier": {
+                "crop_padding_fraction": 0.15,
+                "resize_width": 96,
+                "resize_height": 48,
+                "interpolation": "area",
+                "color_space": "RGB",
+                "normalization": {
+                    "mean": [0.485, 0.456, 0.406],
+                    "std": [0.229, 0.224, 0.225],
+                },
+                "decision": "softmax_argmax_without_threshold",
+            },
+        }
     if schema_version < 3:
         manifest["red_latch"] = _legacy_red_latch_contract()
-    else:
+    elif schema_version == 3:
         manifest["signal_vote"] = _signal_vote_contract(
+            consecutive_signal_reads
+        )
+    else:
+        manifest["signal_vote"] = _classifier_signal_vote_contract(
             consecutive_signal_reads
         )
     return manifest
@@ -334,6 +416,23 @@ def _signal_vote_contract(consecutive_reads: int) -> dict[str, object]:
         "different_action_behavior": "restart_candidate_at_one",
         "red_latch_behavior": "retain_until_confirmed_clear_action",
         "red_clear_actions": ["LEFT", "STRAIGHT"],
+    }
+
+
+def _classifier_signal_vote_contract(consecutive_reads: int) -> dict[str, object]:
+    return {
+        "raw_classes": [
+            "red",
+            "yellow",
+            "left_green",
+            "straight_green",
+        ],
+        "consecutive_reads": consecutive_reads,
+        "unknown_behavior": "reset_candidate",
+        "different_raw_class_behavior": "restart_candidate_at_one",
+        "stop_classes": ["red", "yellow"],
+        "stop_latch_behavior": "retain_until_confirmed_green_class",
+        "stop_clear_classes": ["left_green", "straight_green"],
     }
 
 
@@ -409,6 +508,23 @@ def _verify_policy_artifact(
     return root
 
 
+def _verify_onnx_file(
+    path: Path,
+    *,
+    expected_sha256: str,
+    label: str,
+) -> Path:
+    root = path.expanduser()
+    if root.is_symlink():
+        raise TrafficBundleBuildError(f"{label} must not be a symlink")
+    root = root.resolve()
+    if not root.is_file():
+        raise TrafficBundleBuildError(f"{label} is missing: {root}")
+    if _sha256_file(root) != expected_sha256:
+        raise TrafficBundleBuildError(f"{label} SHA-256 mismatch")
+    return root
+
+
 def _copy_artifact(source: Path, destination: Path) -> None:
     for path in source.rglob("*"):
         if path.is_symlink():
@@ -423,6 +539,7 @@ def _verify_built_bundle(
     expected_schema: int,
     expected_signal_reads: int,
     expected_shortcut_id: str,
+    expected_classifier: bool,
 ) -> None:
     _verify_checksums(root, include_nested_checksum_files=True)
     manifest = _load_mapping(root / "manifest.yaml")
@@ -434,6 +551,14 @@ def _verify_built_bundle(
         raise TrafficBundleBuildError("built bundle identity mismatch")
     if _sha256_file(root / "signal" / "traffic_light.onnx") != TRAFFIC_SHA256:
         raise TrafficBundleBuildError("built bundle traffic ONNX mismatch")
+    classifier_path = root / "signal" / "tl_cls.onnx"
+    if expected_classifier:
+        if _sha256_file(classifier_path) != CLASSIFIER_SHA256:
+            raise TrafficBundleBuildError(
+                "built bundle traffic classifier ONNX mismatch"
+            )
+    elif classifier_path.exists():
+        raise TrafficBundleBuildError("legacy bundle must not contain classifier")
     if expected_schema < 3:
         if (
             manifest.get("red_latch") != _legacy_red_latch_contract()
@@ -442,12 +567,20 @@ def _verify_built_bundle(
             raise TrafficBundleBuildError(
                 "built bundle legacy red latch mismatch"
             )
-    elif (
+    elif expected_schema == 3 and (
         manifest.get("signal_vote")
         != _signal_vote_contract(expected_signal_reads)
         or "red_latch" in manifest
     ):
         raise TrafficBundleBuildError("built bundle signal vote mismatch")
+    elif expected_schema == 4 and (
+        manifest.get("signal_vote")
+        != _classifier_signal_vote_contract(expected_signal_reads)
+        or "red_latch" in manifest
+    ):
+        raise TrafficBundleBuildError(
+            "built bundle classifier signal vote mismatch"
+        )
     _verify_policy_artifact(
         root / "policies" / BASE_ID,
         expected_id=BASE_ID,

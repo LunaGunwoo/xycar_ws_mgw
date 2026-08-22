@@ -22,6 +22,16 @@ class LampAction(str, Enum):
     STRAIGHT = 'STRAIGHT'
 
 
+class SignalClass(str, Enum):
+    """Raw CNN traffic-light classes before mission action mapping."""
+
+    UNKNOWN = 'UNKNOWN'
+    RED = 'red'
+    YELLOW = 'yellow'
+    LEFT_GREEN = 'left_green'
+    STRAIGHT_GREEN = 'straight_green'
+
+
 @dataclass(frozen=True)
 class DetectionBox:
     x: int
@@ -34,6 +44,14 @@ class DetectionBox:
 @dataclass(frozen=True)
 class LampReading:
     scores: tuple[float, float, float, float]
+    bbox_width: int
+    confidence: float
+
+
+@dataclass(frozen=True)
+class SignalReading:
+    signal_class: SignalClass
+    probability: float
     bbox_width: int
     confidence: float
 
@@ -160,6 +178,118 @@ class TrafficLightDetector:
         )
 
 
+class TrafficClassifierDetector:
+    """Run team YOLO box detection followed by the CNN signal classifier."""
+
+    _CLASS_ORDER = (
+        SignalClass.RED,
+        SignalClass.YELLOW,
+        SignalClass.LEFT_GREEN,
+        SignalClass.STRAIGHT_GREEN,
+    )
+    _IMAGE_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    _IMAGE_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+    def __init__(
+        self,
+        *,
+        yolo_session: _OnnxSession,
+        classifier_session: _OnnxSession,
+        confidence_threshold: float = 0.25,
+        crop_padding: float = 0.15,
+    ) -> None:
+        if not math.isfinite(crop_padding) or crop_padding < 0.0:
+            raise ValueError('classifier crop padding must be finite and non-negative')
+        self._yolo_session = yolo_session
+        self._classifier_session = classifier_session
+        self._confidence_threshold = float(confidence_threshold)
+        self._crop_padding = float(crop_padding)
+
+    def read_signal(self, bgr_frame: np.ndarray) -> SignalReading | None:
+        _validate_bgr_frame(bgr_frame)
+        height, width = bgr_frame.shape[:2]
+        resized = cv2.resize(bgr_frame, (640, 640))
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        yolo_tensor = np.expand_dims(np.transpose(rgb, (2, 0, 1)), 0)
+        try:
+            outputs = self._yolo_session.run(None, {'images': yolo_tensor})
+        except Exception as exc:  # noqa: BLE001 - runtime boundary
+            raise TrafficLightError(f'traffic ONNX inference failed: {exc}') from exc
+        if not isinstance(outputs, (list, tuple)) or len(outputs) != 1:
+            raise TrafficLightError('traffic ONNX must return exactly one output')
+        box = decode_detection_box(
+            outputs[0],
+            frame_height=height,
+            frame_width=width,
+            confidence_threshold=self._confidence_threshold,
+        )
+        if box is None:
+            return None
+        crop = self._crop(bgr_frame, box)
+        classifier_tensor = self._classifier_tensor(crop)
+        try:
+            outputs = self._classifier_session.run(
+                None,
+                {'image': classifier_tensor},
+            )
+        except Exception as exc:  # noqa: BLE001 - runtime boundary
+            raise TrafficLightError(
+                f'traffic classifier ONNX inference failed: {exc}'
+            ) from exc
+        signal_class, probability = _decode_classifier_logits(outputs)
+        return SignalReading(
+            signal_class=signal_class,
+            probability=probability,
+            bbox_width=box.width,
+            confidence=box.confidence,
+        )
+
+    def _crop(self, frame: np.ndarray, box: DetectionBox) -> np.ndarray:
+        pad_x = int(box.width * self._crop_padding)
+        pad_y = int(box.height * self._crop_padding)
+        x1 = max(0, box.x - pad_x)
+        y1 = max(0, box.y - pad_y)
+        x2 = min(frame.shape[1], box.x + box.width + pad_x)
+        y2 = min(frame.shape[0], box.y + box.height + pad_y)
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            raise TrafficLightError('traffic classifier crop is empty')
+        return crop
+
+    def _classifier_tensor(self, crop: np.ndarray) -> np.ndarray:
+        resized = cv2.resize(crop, (96, 48), interpolation=cv2.INTER_AREA)
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        rgb = (rgb - self._IMAGE_MEAN) / self._IMAGE_STD
+        tensor = np.expand_dims(np.transpose(rgb, (2, 0, 1)), 0).astype(
+            np.float32
+        )
+        if tensor.shape != (1, 3, 48, 96) or not np.isfinite(tensor).all():
+            raise TrafficLightError('traffic classifier input is invalid')
+        return tensor
+
+
+def _decode_classifier_logits(outputs) -> tuple[SignalClass, float]:
+    if not isinstance(outputs, (list, tuple)) or len(outputs) != 1:
+        raise TrafficLightError('traffic classifier must return exactly one output')
+    logits = outputs[0]
+    if (
+        not isinstance(logits, np.ndarray)
+        or logits.shape != (1, 4)
+        or logits.dtype.kind not in {'f'}
+    ):
+        raise TrafficLightError('traffic classifier output must be [1,4] float')
+    if not np.isfinite(logits).all():
+        raise TrafficLightError('traffic classifier output contains NaN or Inf')
+    values = logits[0]
+    shifted = values - np.max(values)
+    exponential = np.exp(shifted)
+    probabilities = exponential / np.sum(exponential)
+    if not np.isfinite(probabilities).all():
+        raise TrafficLightError('traffic classifier probabilities are invalid')
+    index = int(np.argmax(probabilities))
+    return TrafficClassifierDetector._CLASS_ORDER[index], float(probabilities[index])
+
+
 class TrafficLampLatch:
     """Vote on lamp actions while retaining a confirmed red stop."""
 
@@ -261,6 +391,88 @@ class TrafficLampLatch:
         if lit[3] and not lit[0]:
             return LampAction.STRAIGHT
         return LampAction.UNKNOWN
+
+
+class TrafficSignalLatch:
+    """Vote raw CNN classes while retaining confirmed red/yellow stops."""
+
+    def __init__(
+        self,
+        *,
+        bbox_width_min: int = 45,
+        bbox_width_max: int = 200,
+        consecutive_reads: int = 2,
+    ) -> None:
+        if bbox_width_min < 1 or bbox_width_max < bbox_width_min:
+            raise ValueError('invalid traffic bbox width gate')
+        if consecutive_reads < 1:
+            raise ValueError('signal consecutive reads must be positive')
+        self._bbox_width_min = bbox_width_min
+        self._bbox_width_max = bbox_width_max
+        self._consecutive_reads = consecutive_reads
+        self._candidate = SignalClass.UNKNOWN
+        self._candidate_reads = 0
+        self._stop_latched = False
+
+    @property
+    def stop_latched(self) -> bool:
+        return self._stop_latched
+
+    def reset(self) -> None:
+        self._candidate = SignalClass.UNKNOWN
+        self._candidate_reads = 0
+        self._stop_latched = False
+
+    def observe(self, reading: SignalReading | None) -> LampAction:
+        raw = self._raw_class(reading)
+        if raw == SignalClass.UNKNOWN:
+            self._candidate = SignalClass.UNKNOWN
+            self._candidate_reads = 0
+            return LampAction.RED if self._stop_latched else LampAction.UNKNOWN
+        if raw == self._candidate:
+            self._candidate_reads += 1
+        else:
+            self._candidate = raw
+            self._candidate_reads = 1
+        self._candidate_reads = min(
+            self._candidate_reads,
+            self._consecutive_reads,
+        )
+        confirmed = self._candidate_reads >= self._consecutive_reads
+        action = _signal_class_action(raw)
+        if self._stop_latched:
+            if action == LampAction.RED or not confirmed:
+                return LampAction.RED
+            self._stop_latched = False
+            return action
+        if not confirmed:
+            return LampAction.UNKNOWN
+        if action == LampAction.RED:
+            self._stop_latched = True
+        return action
+
+    def _raw_class(self, reading: SignalReading | None) -> SignalClass:
+        if reading is None or not (
+            self._bbox_width_min <= reading.bbox_width <= self._bbox_width_max
+        ):
+            return SignalClass.UNKNOWN
+        if (
+            reading.signal_class == SignalClass.UNKNOWN
+            or not math.isfinite(reading.probability)
+            or not math.isfinite(reading.confidence)
+        ):
+            raise TrafficLightError('traffic classifier reading is invalid')
+        return reading.signal_class
+
+
+def _signal_class_action(signal_class: SignalClass) -> LampAction:
+    if signal_class in {SignalClass.RED, SignalClass.YELLOW}:
+        return LampAction.RED
+    if signal_class == SignalClass.LEFT_GREEN:
+        return LampAction.LEFT
+    if signal_class == SignalClass.STRAIGHT_GREEN:
+        return LampAction.STRAIGHT
+    return LampAction.UNKNOWN
 
 
 def _validate_bgr_frame(frame: np.ndarray) -> None:

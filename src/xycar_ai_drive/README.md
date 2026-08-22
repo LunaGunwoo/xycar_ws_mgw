@@ -464,16 +464,17 @@ launch의 camera와 gamepad를 종료하고 CUDA container를 정리한다.
 `/xycar_motor`를 독점 발행한다. versioned bundle은 schema v6 nice_adaptive Base,
 schema v7 `nice-shortcut` ResNet18과 SHA-256
 `24c1a38eacfb065c95e5577be29a2a542b985d6ea1954bf2fc94c52eb674aa41`의
-`traffic_light.onnx` 전체를 포함한다. `/home/xytron/yolo_tl.py`나
+`traffic_light.onnx`와 `tl_cls.onnx` 전체를 포함한다. `/home/xytron/yolo_tl.py`나
 `xycar_ws_minju`를 import하지 않는다.
 
 - ONNX는 BGR 640 resize, RGB float32 NCHW 입력과 maximum-confidence bbox를
   사용한다. bbox 폭 `45..200`, confidence `0.25`, 3 frame마다 판독한다.
-- 네 lamp의 HSV V 80 percentile을 `(min+max)/2`와 비교한다. red index `0`, left는
-  `2+3`, straight-green은 `3 && !0`이며 우선순위는 STOP > LEFT > STRAIGHT다.
-- RED·LEFT·STRAIGHT는 각각 같은 action이 5회 연속 판독돼야 확정된다. unknown이나
-  다른 action은 후보 vote를 초기화하고, red latch는 확정된 LEFT/STRAIGHT 5회
-  전까지 유지한다.
+- padding `15%` box crop을 96×48 RGB ImageNet normalization으로 CNN에 넣는다.
+  raw class는 `red`, `yellow`, `left_green`, `straight_green` 순서이며 HSV lamp
+  점수는 schema v4에서 사용하지 않는다.
+- 동일 raw class가 3 frame마다 2회 연속이어야 확정된다. red/yellow는 STOP으로
+  latch하며 서로 교대하면 vote를 다시 센다. 확정된 left/straight-green 2회만
+  STOP latch를 해제한다.
 - left frame에서는 한 제어 주기 STOP, 다음 fresh frame부터 speed `23` ResNet18을
   사용한다. 동시에 Base는 진입 전 history에서 시작한 self-AR shadow prediction을
   매 fresh frame 계속 갱신하지만 motor에는 발행하지 않는다. 첫 실제 shortcut
@@ -494,14 +495,14 @@ schema v7 `nice-shortcut` ResNet18과 SHA-256
 Jetson host는 NumPy `1.26.4`, ONNX Runtime `1.24.0`, provider 순서
 CUDA→CPU를 exact 검사한다. bundle checksum, 두 socket과 synthetic ONNX preflight가
 끝난 뒤에만 camera/gamepad launch를 시작한다. motor bridge는 포함하지 않는다.
-기존 23세션 schema v3 bundle,
+기존 schema v3 HSV bundle,
 `traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-tl45-votes5-every3-20260821`,
 schema v1 종료 STOP bundle과
 `traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-20260821`
 schema v2 red-3 bundle은 rollback용으로 삭제하거나 덮어쓰지 않는다.
 
 ```bash
-cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-tl45-votes5-every3-45sessions-20260821 use_camera:=true use_gamepad:=true allow_motion:=true
+cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-yolo-cls-tl45-votes2-every3-45sessions-20260822 use_camera:=true use_gamepad:=true allow_motion:=true
 ```
 
 이 launch는 실제 camera와 motor publisher를 열 수 있으므로 매번 직전 승인을 받고
@@ -517,18 +518,18 @@ camera 또는 motor publisher를 열 수 있으므로 정상 wrapper와 같은 �
 
 ```bash
 ros2 run xycar_ai_drive traffic_shortcut_gpu_server -- \
-  --bundle-dir /artifacts/traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-tl45-votes5-every3-45sessions-20260821 \
+  --bundle-dir /artifacts/traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-yolo-cls-tl45-votes2-every3-45sessions-20260822 \
   --base-socket-path /run/user/1000/xycar-ai/traffic-base.sock \
   --shortcut-socket-path /run/user/1000/xycar-ai/traffic-shortcut.sock \
   --device cuda
 
 ros2 launch xycar_ai_drive traffic_shortcut_policy.launch.py \
-  bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-tl45-votes5-every3-45sessions-20260821 \
+  bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-yolo-cls-tl45-votes2-every3-45sessions-20260822 \
   use_camera:=true use_gamepad:=true allow_motion:=true
 
 ros2 run xycar_ai_drive traffic_shortcut_policy --ros-args \
   --params-file /home/xytron/xycar_ws_mgw/install/xycar_ai_drive/share/xycar_ai_drive/config/traffic_shortcut_policy.yaml \
-  -p bundle_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-tl45-votes5-every3-45sessions-20260821
+  -p bundle_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-yolo-cls-tl45-votes2-every3-45sessions-20260822
 ```
 
 ## 대회 signal + shortcut 통합 runtime

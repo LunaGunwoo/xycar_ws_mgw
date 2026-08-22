@@ -88,6 +88,35 @@ image = np.zeros((1, 3, 640, 640), dtype=np.float32)
 prediction = session.run(None, {'images': image})[0]
 if prediction.shape != (1, 5, 8400) or not np.isfinite(prediction).all():
     raise SystemExit('[ERROR] traffic ONNX synthetic inference failed')
+if bundle.detector.mode == 'yolo_cnn_classifier':
+    if bundle.detector.classifier_model_path is None:
+        raise SystemExit('[ERROR] traffic classifier path is missing')
+    classifier = ort.InferenceSession(
+        str(bundle.detector.classifier_model_path),
+        providers=list(bundle.providers),
+    )
+    if tuple(classifier.get_providers()) != bundle.providers:
+        raise SystemExit('[ERROR] traffic classifier ONNX provider mismatch')
+    classifier_inputs = classifier.get_inputs()
+    classifier_outputs = classifier.get_outputs()
+    if (
+        len(classifier_inputs) != 1
+        or classifier_inputs[0].name != 'image'
+        or list(classifier_inputs[0].shape) != [1, 3, 48, 96]
+    ):
+        raise SystemExit('[ERROR] traffic classifier ONNX input metadata mismatch')
+    if (
+        len(classifier_outputs) != 1
+        or classifier_outputs[0].name != 'logits'
+        or list(classifier_outputs[0].shape) != [1, 4]
+    ):
+        raise SystemExit('[ERROR] traffic classifier ONNX output metadata mismatch')
+    logits = classifier.run(
+        None,
+        {'image': np.zeros((1, 3, 48, 96), dtype=np.float32)},
+    )[0]
+    if logits.shape != (1, 4) or not np.isfinite(logits).all():
+        raise SystemExit('[ERROR] traffic classifier synthetic inference failed')
 cv2.cvtColor(np.zeros((2, 2, 3), dtype=np.uint8), cv2.COLOR_RGB2BGR)
 PY
 

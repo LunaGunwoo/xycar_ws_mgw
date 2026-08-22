@@ -13,9 +13,13 @@ from xycar_ai_drive.traffic_light_detector import (
     DetectionBox,
     LampAction,
     LampReading,
+    SignalClass,
+    SignalReading,
+    TrafficClassifierDetector,
     TrafficLampLatch,
     TrafficLightDetector,
     TrafficLightError,
+    TrafficSignalLatch,
     decode_detection_box,
     lamp_scores,
 )
@@ -27,6 +31,7 @@ from xycar_ai_drive.traffic_shortcut_fsm import (
 from xycar_ai_drive.traffic_shortcut_artifact import (
     EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID,
     EXPECTED_EXPANDED_SIGNAL_VOTE_BUNDLE_ID,
+    EXPECTED_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SHORTCUT_ARTIFACT_ID,
     EXPECTED_SIGNAL_VOTE_BUNDLE_ID,
     _expected_shortcut_artifact_id,
@@ -50,6 +55,10 @@ class _FakeOnnxSession:
         return [self.output]
 
 
+class _FakeClassifierSession(_FakeOnnxSession):
+    pass
+
+
 def _output_with_candidates(*candidates):
     output = np.zeros((1, 5, 8400), dtype=np.float32)
     for index, values in enumerate(candidates):
@@ -60,6 +69,15 @@ def _output_with_candidates(*candidates):
 def _reading(scores, width=100):
     return LampReading(
         scores=tuple(float(value) for value in scores),
+        bbox_width=width,
+        confidence=0.9,
+    )
+
+
+def _signal(signal_class, width=100):
+    return SignalReading(
+        signal_class=signal_class,
+        probability=0.9,
         bbox_width=width,
         confidence=0.9,
     )
@@ -124,6 +142,79 @@ def test_detector_rejects_wrong_shape_and_nonfinite_output():
             frame_height=480,
             frame_width=640,
         )
+
+
+def test_classifier_detector_uses_yolo_box_padding_and_cnn_argmax():
+    yolo = _FakeOnnxSession(
+        _output_with_candidates((320.0, 240.0, 100.0, 40.0, 0.9))
+    )
+    classifier = _FakeClassifierSession(
+        np.array([[0.0, 1.0, 4.0, 2.0]], dtype=np.float32)
+    )
+    detector = TrafficClassifierDetector(
+        yolo_session=yolo,
+        classifier_session=classifier,
+    )
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    frame[215:265, 255:385] = (10, 20, 30)
+    reading = detector.read_signal(frame)
+
+    assert reading is not None
+    assert reading.signal_class == SignalClass.LEFT_GREEN
+    assert reading.bbox_width == 100
+    assert reading.probability > 0.8
+    tensor = classifier.inputs[0]['image']
+    assert tensor.shape == (1, 3, 48, 96)
+    assert tensor.dtype == np.float32
+    assert np.isfinite(tensor).all()
+
+
+@pytest.mark.parametrize(
+    'logits, expected',
+    [
+        ([4, 0, 0, 0], SignalClass.RED),
+        ([0, 4, 0, 0], SignalClass.YELLOW),
+        ([0, 0, 4, 0], SignalClass.LEFT_GREEN),
+        ([0, 0, 0, 4], SignalClass.STRAIGHT_GREEN),
+    ],
+)
+def test_classifier_detector_decodes_all_signal_classes(logits, expected):
+    yolo = _FakeOnnxSession(
+        _output_with_candidates((320.0, 240.0, 100.0, 40.0, 0.9))
+    )
+    classifier = _FakeClassifierSession(
+        np.array([logits], dtype=np.float32)
+    )
+    detector = TrafficClassifierDetector(
+        yolo_session=yolo,
+        classifier_session=classifier,
+    )
+    reading = detector.read_signal(np.zeros((480, 640, 3), dtype=np.uint8))
+    assert reading is not None and reading.signal_class == expected
+
+
+def test_classifier_detector_rejects_bad_logits_and_empty_crop():
+    yolo = _FakeOnnxSession(
+        _output_with_candidates((320.0, 240.0, 100.0, 40.0, 0.9))
+    )
+    bad = _FakeClassifierSession(np.zeros((1, 5), dtype=np.float32))
+    detector = TrafficClassifierDetector(
+        yolo_session=yolo,
+        classifier_session=bad,
+    )
+    with pytest.raises(TrafficLightError, match=r'\[1,4\]'):
+        detector.read_signal(np.zeros((480, 640, 3), dtype=np.uint8))
+    empty_yolo = _FakeOnnxSession(
+        _output_with_candidates((2000.0, 2000.0, 20.0, 20.0, 0.9))
+    )
+    detector = TrafficClassifierDetector(
+        yolo_session=empty_yolo,
+        classifier_session=_FakeClassifierSession(
+            np.zeros((1, 4), dtype=np.float32)
+        ),
+    )
+    with pytest.raises(TrafficLightError, match='crop is empty'):
+        detector.read_signal(np.zeros((100, 100, 3), dtype=np.uint8))
     output = np.zeros((1, 5, 8400), dtype=np.float32)
     output[0, 0, 0] = np.nan
     with pytest.raises(TrafficLightError, match='NaN or Inf'):
@@ -186,6 +277,21 @@ def test_legacy_lamp_votes_keep_red_three_and_other_actions_immediate():
     assert not latch.red_latched
 
 
+def test_classifier_latch_requires_same_raw_class_and_retains_stop():
+    latch = TrafficSignalLatch()
+    assert latch.observe(_signal(SignalClass.RED, width=44)) == LampAction.UNKNOWN
+    assert latch.observe(_signal(SignalClass.RED)) == LampAction.UNKNOWN
+    assert latch.observe(_signal(SignalClass.YELLOW)) == LampAction.UNKNOWN
+    assert latch.observe(_signal(SignalClass.YELLOW)) == LampAction.RED
+    assert latch.stop_latched
+    assert latch.observe(None) == LampAction.RED
+    assert latch.observe(_signal(SignalClass.LEFT_GREEN)) == LampAction.RED
+    assert latch.observe(_signal(SignalClass.LEFT_GREEN)) == LampAction.LEFT
+    assert not latch.stop_latched
+    assert latch.observe(_signal(SignalClass.STRAIGHT_GREEN)) == LampAction.UNKNOWN
+    assert latch.observe(_signal(SignalClass.STRAIGHT_GREEN)) == LampAction.STRAIGHT
+
+
 def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
     legacy = {
         'red_latch': {
@@ -201,6 +307,15 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
         'different_action_behavior': 'restart_candidate_at_one',
         'red_latch_behavior': 'retain_until_confirmed_clear_action',
         'red_clear_actions': ['LEFT', 'STRAIGHT'],
+    }
+    classifier_vote = {
+        'raw_classes': ['red', 'yellow', 'left_green', 'straight_green'],
+        'consecutive_reads': 2,
+        'unknown_behavior': 'reset_candidate',
+        'different_raw_class_behavior': 'restart_candidate_at_one',
+        'stop_classes': ['red', 'yellow'],
+        'stop_latch_behavior': 'retain_until_confirmed_green_class',
+        'stop_clear_classes': ['left_green', 'straight_green'],
     }
 
     assert _load_signal_vote_contract(
@@ -226,6 +341,11 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
         schema_version=3,
         artifact_id=EXPECTED_EXPANDED_SIGNAL_VOTE_BUNDLE_ID,
     ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert _load_signal_vote_contract(
+        {'signal_vote': classifier_vote},
+        schema_version=4,
+        artifact_id=EXPECTED_CLASSIFIER_BUNDLE_ID,
+    ) == (2, 2, 2)
     with pytest.raises(ArtifactContractError, match='signal vote'):
         _load_signal_vote_contract(
             {

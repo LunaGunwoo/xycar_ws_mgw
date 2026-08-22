@@ -22,11 +22,14 @@ from xycar_ai_drive.artifact import (
 from xycar_ai_drive.steering_contract import NORMALIZED_STEERING_CONTRACT
 
 BUNDLE_KIND = 'traffic_shortcut_bundle'
-SUPPORTED_BUNDLE_SCHEMA_VERSIONS = {1, 2, 3}
+SUPPORTED_BUNDLE_SCHEMA_VERSIONS = {1, 2, 3, 4}
 BUNDLE_MANIFEST = 'manifest.yaml'
 BUNDLE_CHECKSUMS = 'SHA256SUMS'
 TRAFFIC_MODEL_SHA256 = (
     '24c1a38eacfb065c95e5577be29a2a542b985d6ea1954bf2fc94c52eb674aa41'
+)
+TRAFFIC_CLASSIFIER_SHA256 = (
+    '3ddb126483e03211f59cd15eb1f96632b9c3d5ac0d42544ccd999601643b806b'
 )
 EXPECTED_BASE_ARTIFACT_ID = (
     'front-cam-policy-vit-small-ar4-v2-nice-adaptive-joint-regression-'
@@ -46,11 +49,16 @@ EXPECTED_EXPANDED_SIGNAL_VOTE_BUNDLE_ID = (
     'traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-'
     'tl45-votes5-every3-45sessions-20260821'
 )
-EXPECTED_SCHEMA3_SHORTCUT_IDS = {
+EXPECTED_CLASSIFIER_BUNDLE_ID = (
+    'traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-'
+    'yolo-cls-tl45-votes2-every3-45sessions-20260822'
+)
+EXPECTED_SIGNAL_BUNDLE_SHORTCUT_IDS = {
     EXPECTED_SIGNAL_VOTE_BUNDLE_ID: EXPECTED_SHORTCUT_ARTIFACT_ID,
     EXPECTED_EXPANDED_SIGNAL_VOTE_BUNDLE_ID: (
         EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
     ),
+    EXPECTED_CLASSIFIER_BUNDLE_ID: EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID,
 }
 EXPECTED_ONNXRUNTIME_VERSION = '1.24.0'
 EXPECTED_NUMPY_VERSION = '1.26.4'
@@ -63,6 +71,8 @@ EXPECTED_PROVIDERS = (
 @dataclass(frozen=True)
 class TrafficDetectorContract:
     model_path: Path
+    classifier_model_path: Path | None
+    mode: str
     confidence_threshold: float
     bbox_width_min: int
     bbox_width_max: int
@@ -74,6 +84,7 @@ class TrafficDetectorContract:
     red_consecutive_reads: int
     left_consecutive_reads: int
     straight_consecutive_reads: int
+    classifier_crop_padding: float | None
 
 
 @dataclass(frozen=True)
@@ -110,7 +121,7 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
         or schema_version not in SUPPORTED_BUNDLE_SCHEMA_VERSIONS
     ):
         raise ArtifactContractError(
-            'traffic shortcut bundle schema must be 1, 2 or 3'
+            'traffic shortcut bundle schema must be 1, 2, 3 or 4'
         )
     if manifest.get('artifact_kind') != BUNDLE_KIND:
         raise ArtifactContractError('artifact is not a traffic shortcut bundle')
@@ -165,25 +176,43 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
         raise ArtifactContractError('traffic light ONNX output contract mismatch')
 
     detector = _required_mapping(manifest, 'detector', 'manifest')
-    lamp = _required_mapping(detector, 'lamp', 'detector')
     bbox_width = detector.get('bbox_width_px')
     if bbox_width != [45, 200]:
         raise ArtifactContractError('detector bbox width gate must be [45,200]')
-    if lamp.get('count') != 4 or lamp.get('score') != 'hsv_v_percentile':
-        raise ArtifactContractError('traffic lamp score contract mismatch')
-    if lamp.get('red_index') != 0:
-        raise ArtifactContractError('traffic lamp red index must be 0')
-    if lamp.get('left_indices') != [2, 3]:
-        raise ArtifactContractError('traffic lamp left indices must be [2,3]')
-    if lamp.get('straight_index') != 3:
-        raise ArtifactContractError('traffic lamp straight index must be 3')
-    if lamp.get('straight_requires_red_off') is not True:
-        raise ArtifactContractError('straight lamp must require red off')
-    if lamp.get('relative_threshold') != '(min + max) / 2':
-        raise ArtifactContractError('traffic lamp relative threshold mismatch')
     confidence = _exact_number(detector, 'confidence_threshold', 0.25)
-    percentile = _exact_number(lamp, 'percentile', 80.0)
     inference_every = _exact_int(detector, 'inference_every_n_frames', 3)
+    classifier_path: Path | None = None
+    classifier_crop_padding: float | None = None
+    if schema_version == 4:
+        classifier_path, classifier_crop_padding = _load_classifier_contract(
+            root,
+            components,
+            detector,
+        )
+        mode = 'yolo_cnn_classifier'
+        percentile = 0.0
+        red_index = 0
+        left_indices = (2, 3)
+        straight_index = 3
+    else:
+        lamp = _required_mapping(detector, 'lamp', 'detector')
+        if lamp.get('count') != 4 or lamp.get('score') != 'hsv_v_percentile':
+            raise ArtifactContractError('traffic lamp score contract mismatch')
+        if lamp.get('red_index') != 0:
+            raise ArtifactContractError('traffic lamp red index must be 0')
+        if lamp.get('left_indices') != [2, 3]:
+            raise ArtifactContractError('traffic lamp left indices must be [2,3]')
+        if lamp.get('straight_index') != 3:
+            raise ArtifactContractError('traffic lamp straight index must be 3')
+        if lamp.get('straight_requires_red_off') is not True:
+            raise ArtifactContractError('straight lamp must require red off')
+        if lamp.get('relative_threshold') != '(min + max) / 2':
+            raise ArtifactContractError('traffic lamp relative threshold mismatch')
+        mode = 'hsv_lamp'
+        percentile = _exact_number(lamp, 'percentile', 80.0)
+        red_index = 0
+        left_indices = (2, 3)
+        straight_index = 3
 
     (
         red_consecutive_reads,
@@ -288,17 +317,20 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
         shortcut=shortcut,
         detector=TrafficDetectorContract(
             model_path=signal_path,
+            classifier_model_path=classifier_path,
+            mode=mode,
             confidence_threshold=confidence,
             bbox_width_min=45,
             bbox_width_max=200,
             inference_every_n_frames=inference_every,
             percentile=percentile,
-            red_index=0,
-            left_indices=(2, 3),
-            straight_index=3,
+            red_index=red_index,
+            left_indices=left_indices,
+            straight_index=straight_index,
             red_consecutive_reads=red_consecutive_reads,
             left_consecutive_reads=left_consecutive_reads,
             straight_consecutive_reads=straight_consecutive_reads,
+            classifier_crop_padding=classifier_crop_padding,
         ),
         base_speed_cap=base_speed_cap,
         shortcut_speed=shortcut_speed,
@@ -337,9 +369,34 @@ def _load_signal_vote_contract(
             raise ArtifactContractError('legacy red latch contract mismatch')
         return 3, 1, 1
 
-    if artifact_id not in EXPECTED_SCHEMA3_SHORTCUT_IDS:
-        raise ArtifactContractError('schema v3 bundle id is not approved')
+    if schema_version == 3 and artifact_id not in {
+        EXPECTED_SIGNAL_VOTE_BUNDLE_ID,
+        EXPECTED_EXPANDED_SIGNAL_VOTE_BUNDLE_ID,
+    }:
+        raise ArtifactContractError('signal bundle id is not approved')
+    if schema_version == 4 and artifact_id != EXPECTED_CLASSIFIER_BUNDLE_ID:
+        raise ArtifactContractError('signal bundle id is not approved')
     signal_vote = _required_mapping(manifest, 'signal_vote', 'manifest')
+    if schema_version == 4:
+        expected = {
+            'raw_classes': [
+                'red',
+                'yellow',
+                'left_green',
+                'straight_green',
+            ],
+            'consecutive_reads': 2,
+            'unknown_behavior': 'reset_candidate',
+            'different_raw_class_behavior': 'restart_candidate_at_one',
+            'stop_classes': ['red', 'yellow'],
+            'stop_latch_behavior': 'retain_until_confirmed_green_class',
+            'stop_clear_classes': ['left_green', 'straight_green'],
+        }
+        if signal_vote != expected or 'red_latch' in manifest:
+            raise ArtifactContractError(
+                'schema v4 classifier signal vote contract mismatch'
+            )
+        return 2, 2, 2
     expected = {
         'actions': ['RED', 'LEFT', 'STRAIGHT'],
         'consecutive_reads': 5,
@@ -351,6 +408,65 @@ def _load_signal_vote_contract(
     if signal_vote != expected or 'red_latch' in manifest:
         raise ArtifactContractError('schema v3 signal vote contract mismatch')
     return 5, 5, 5
+
+
+def _load_classifier_contract(
+    root: Path,
+    components: Mapping[str, object],
+    detector: Mapping[str, object],
+) -> tuple[Path, float]:
+    classifier = _required_mapping(
+        components,
+        'traffic_classifier',
+        'components',
+    )
+    relative = _required_string(classifier, 'file', 'traffic_classifier')
+    _validate_relative_path(relative)
+    path = root / relative
+    if path.is_symlink() or not path.is_file():
+        raise ArtifactContractError('traffic classifier ONNX is missing or unsafe')
+    if (
+        classifier.get('format') != 'onnx'
+        or classifier.get('sha256') != TRAFFIC_CLASSIFIER_SHA256
+        or _sha256_file(path) != TRAFFIC_CLASSIFIER_SHA256
+    ):
+        raise ArtifactContractError('traffic classifier ONNX checksum mismatch')
+    if classifier.get('input') != {
+        'name': 'image',
+        'dtype': 'float32',
+        'shape': [1, 3, 48, 96],
+    } or classifier.get('output') != {
+        'name': 'logits',
+        'dtype': 'float32',
+        'shape': [1, 4],
+    } or classifier.get('classes') != [
+        'red',
+        'yellow',
+        'left_green',
+        'straight_green',
+    ]:
+        raise ArtifactContractError('traffic classifier ONNX contract mismatch')
+    classifier_detector = _required_mapping(detector, 'classifier', 'detector')
+    if (
+        classifier_detector.get('resize_width') != 96
+        or classifier_detector.get('resize_height') != 48
+        or classifier_detector.get('interpolation') != 'area'
+        or classifier_detector.get('color_space') != 'RGB'
+        or classifier_detector.get('decision')
+        != 'softmax_argmax_without_threshold'
+        or classifier_detector.get('normalization')
+        != {
+            'mean': [0.485, 0.456, 0.406],
+            'std': [0.229, 0.224, 0.225],
+        }
+    ):
+        raise ArtifactContractError('traffic classifier preprocessing mismatch')
+    padding = _exact_number(
+        classifier_detector,
+        'crop_padding_fraction',
+        0.15,
+    )
+    return path, padding
 
 
 def _load_component(
@@ -386,11 +502,18 @@ def _expected_shortcut_artifact_id(
 ) -> str:
     if schema_version < 3:
         return EXPECTED_SHORTCUT_ARTIFACT_ID
+    if schema_version == 3 and artifact_id not in {
+        EXPECTED_SIGNAL_VOTE_BUNDLE_ID,
+        EXPECTED_EXPANDED_SIGNAL_VOTE_BUNDLE_ID,
+    }:
+        raise ArtifactContractError('signal bundle id is not approved')
+    if schema_version == 4 and artifact_id != EXPECTED_CLASSIFIER_BUNDLE_ID:
+        raise ArtifactContractError('signal bundle id is not approved')
     try:
-        return EXPECTED_SCHEMA3_SHORTCUT_IDS[artifact_id]
+        return EXPECTED_SIGNAL_BUNDLE_SHORTCUT_IDS[artifact_id]
     except KeyError as exc:
         raise ArtifactContractError(
-            'schema v3 bundle id is not approved'
+            'signal bundle id is not approved'
         ) from exc
 
 
