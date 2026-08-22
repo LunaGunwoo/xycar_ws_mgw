@@ -493,6 +493,11 @@ schema v7 `nice-shortcut` ResNet18과 SHA-256
   camera와 motor subscriber가 준비되면 자동으로 ON이 되어 `Ctrl+C` 또는 fault까지
   계속 주행한다. camera/IPC stale, ONNX shape·NaN/Inf, 경쟁 publisher와 motor
   subscriber 소실은 어느 mode에서나 FAULT와 `[0,0]`이다.
+- schema v5의 red/yellow STOP은 YOLO가 confidence `0.25` 이상 box를 10번 연속
+  찾지 못하면(매 3 frame 판독, 총 30 camera frame·약 1초) 예외적으로 latch를
+  해제하고 Base로 재출발한다. 폭 gate 실패나 classifier UNKNOWN은 YOLO box가
+  검출된 것으로 보고 이 counter를 즉시 초기화하며, ONNX 오류는 release가 아니라
+  FAULT/[0,0]이다.
 
 Jetson host는 NumPy `1.26.4`, ONNX Runtime `1.24.0`, provider 순서
 CUDA→CPU를 exact 검사한다. bundle checksum, 두 socket과 synthetic ONNX preflight가
@@ -504,13 +509,13 @@ schema v1 종료 STOP bundle과
 schema v2 red-3 bundle은 rollback용으로 삭제하거나 덮어쓰지 않는다.
 
 ```bash
-cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-yolo-cls-tl45-votes2-every3-45sessions-20260822 use_camera:=true use_gamepad:=true allow_motion:=true
+cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-yolo-cls-tl45-votes2-every3-yolo-miss30-release-45sessions-20260822 use_camera:=true use_gamepad:=true allow_motion:=true
 ```
 
 대회 연속 주행은 Gamepad를 시작하지 않고 다음처럼 실행한다.
 
 ```bash
-cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-yolo-cls-tl45-votes2-every3-45sessions-20260822 use_camera:=true use_gamepad:=false allow_motion:=true
+cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-yolo-cls-tl45-votes2-every3-yolo-miss30-release-45sessions-20260822 use_camera:=true use_gamepad:=false allow_motion:=true
 ```
 
 이 launch는 실제 camera와 motor publisher를 열 수 있으므로 매번 직전 승인을 받고

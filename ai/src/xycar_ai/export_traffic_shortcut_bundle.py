@@ -40,12 +40,17 @@ CLASSIFIER_BUNDLE_ID = (
     "traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-"
     "yolo-cls-tl45-votes2-every3-45sessions-20260822"
 )
+YOLO_MISSING_RELEASE_BUNDLE_ID = (
+    "traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-"
+    "yolo-cls-tl45-votes2-every3-yolo-miss30-release-45sessions-20260822"
+)
 BUNDLE_CONTRACTS = {
     LEGACY_BUNDLE_ID: (1, 3, SHORTCUT_ID),
     SHADOW_BUNDLE_ID: (2, 3, SHORTCUT_ID),
     SIGNAL_VOTE_BUNDLE_ID: (3, 5, SHORTCUT_ID),
     BUNDLE_ID: (3, 5, EXPANDED_SHORTCUT_ID),
     CLASSIFIER_BUNDLE_ID: (4, 2, EXPANDED_SHORTCUT_ID),
+    YOLO_MISSING_RELEASE_BUNDLE_ID: (5, 2, EXPANDED_SHORTCUT_ID),
 }
 TRAFFIC_SHA256 = (
     "24c1a38eacfb065c95e5577be29a2a542b985d6ea1954bf2fc94c52eb674aa41"
@@ -131,7 +136,7 @@ def build_traffic_shortcut_bundle(
         raise TrafficBundleBuildError(f"traffic ONNX is missing: {traffic_model}")
     if _sha256_file(traffic_model) != TRAFFIC_SHA256:
         raise TrafficBundleBuildError("traffic ONNX SHA-256 mismatch")
-    if schema_version == 4:
+    if schema_version >= 4:
         if traffic_classifier is None:
             raise TrafficBundleBuildError("traffic classifier is required")
         traffic_classifier = _verify_onnx_file(
@@ -141,7 +146,7 @@ def build_traffic_shortcut_bundle(
         )
     elif traffic_classifier is not None:
         raise TrafficBundleBuildError(
-            "traffic classifier is only valid for schema v4"
+            "traffic classifier is only valid for schema v4/v5"
         )
 
     base_manifest = _load_mapping(base_artifact / "manifest.yaml")
@@ -262,6 +267,8 @@ def _bundle_manifest(
         "base_speed_cap": 25.0,
         "shortcut_speed": 23.0,
     }
+    if schema_version == 5:
+        mission["red_stop_yolo_missing_release_frames"] = 30
     if schema_version == 1:
         mission["transition_stop_control_cycles"] = 1
     else:
@@ -345,7 +352,7 @@ def _bundle_manifest(
             "shared_cuda_lock": True,
         },
     }
-    if schema_version == 4:
+    if schema_version >= 4:
         assert traffic_classifier is not None
         manifest["components"]["traffic_classifier"] = {
             "format": "onnx",
@@ -573,13 +580,23 @@ def _verify_built_bundle(
         or "red_latch" in manifest
     ):
         raise TrafficBundleBuildError("built bundle signal vote mismatch")
-    elif expected_schema == 4 and (
+    elif expected_schema >= 4 and (
         manifest.get("signal_vote")
         != _classifier_signal_vote_contract(expected_signal_reads)
         or "red_latch" in manifest
     ):
         raise TrafficBundleBuildError(
             "built bundle classifier signal vote mismatch"
+        )
+    if (
+        expected_schema == 5
+        and _required_mapping(manifest, "mission", "bundle").get(
+            "red_stop_yolo_missing_release_frames"
+        )
+        != 30
+    ):
+        raise TrafficBundleBuildError(
+            "built bundle YOLO missing-release contract mismatch"
         )
     _verify_policy_artifact(
         root / "policies" / BASE_ID,

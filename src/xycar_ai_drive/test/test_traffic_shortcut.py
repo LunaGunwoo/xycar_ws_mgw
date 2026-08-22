@@ -40,6 +40,7 @@ from xycar_ai_drive.traffic_shortcut_artifact import (
     EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID,
     EXPECTED_EXPANDED_SIGNAL_VOTE_BUNDLE_ID,
     EXPECTED_CLASSIFIER_BUNDLE_ID,
+    EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID,
     EXPECTED_SHORTCUT_ARTIFACT_ID,
     EXPECTED_SIGNAL_VOTE_BUNDLE_ID,
     _expected_shortcut_artifact_id,
@@ -48,6 +49,7 @@ from xycar_ai_drive.traffic_shortcut_artifact import (
 from xycar_ai_drive.traffic_shortcut_policy_node import (
     MissionDecision,
     TrafficShortcutPolicyNode,
+    YoloMissingReleaseCounter,
 )
 from xycar_ai_drive.control import DriveCommand
 
@@ -362,6 +364,11 @@ def test_classifier_latch_requires_same_raw_class_and_retains_stop():
     assert latch.stop_latched
     assert latch.snapshot.stop_latched
     assert latch.observe(None) == LampAction.RED
+    latch.release_stop_latch()
+    assert not latch.stop_latched
+    assert latch.observe(None) == LampAction.UNKNOWN
+    assert latch.observe(_signal(SignalClass.YELLOW)) == LampAction.UNKNOWN
+    assert latch.observe(_signal(SignalClass.YELLOW)) == LampAction.RED
     assert latch.observe(_signal(SignalClass.LEFT_GREEN)) == LampAction.RED
     assert latch.observe(_signal(SignalClass.LEFT_GREEN)) == LampAction.LEFT
     assert not latch.stop_latched
@@ -433,6 +440,15 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
         schema_version=4,
         artifact_id=EXPECTED_CLASSIFIER_BUNDLE_ID,
     ) == (2, 2, 2)
+    assert _load_signal_vote_contract(
+        {'signal_vote': classifier_vote},
+        schema_version=5,
+        artifact_id=EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID,
+    ) == (2, 2, 2)
+    assert _expected_shortcut_artifact_id(
+        schema_version=5,
+        artifact_id=EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID,
+    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
     with pytest.raises(ArtifactContractError, match='signal vote'):
         _load_signal_vote_contract(
             {
@@ -450,6 +466,61 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
             schema_version=3,
             artifact_id='unapproved-schema3-bundle',
         )
+
+
+def test_yolo_missing_release_requires_ten_scheduled_misses():
+    counter = YoloMissingReleaseCounter(
+        release_frames=30,
+        inference_every_n_frames=3,
+    )
+    fsm = TrafficShortcutFsm()
+    fsm.enable()
+    assert fsm.on_frame(
+        LampAction.RED,
+        now_monotonic=0.0,
+    ).state == MissionState.RED_STOP
+
+    for step in range(9):
+        assert not counter.observe(
+            red_stop_active=True,
+            detector_observed=True,
+            yolo_box_found=False,
+        )
+        assert counter.missing_frames == (step + 1) * 3
+        assert fsm.on_frame(
+            LampAction.UNKNOWN,
+            now_monotonic=0.1 + step,
+        ).publish_stop
+
+    assert counter.observe(
+        red_stop_active=True,
+        detector_observed=True,
+        yolo_box_found=True,
+    ) is False
+    assert counter.missing_frames == 0
+
+    for _ in range(9):
+        assert not counter.observe(
+            red_stop_active=True,
+            detector_observed=True,
+            yolo_box_found=False,
+        )
+    assert counter.observe(
+        red_stop_active=True,
+        detector_observed=True,
+        yolo_box_found=False,
+    )
+    assert counter.missing_frames == 0
+    resumed = fsm.on_frame(LampAction.STRAIGHT, now_monotonic=20.0)
+    assert resumed.state == MissionState.BASE
+    assert resumed.policy == PolicyChoice.BASE
+
+    assert not counter.observe(
+        red_stop_active=False,
+        detector_observed=True,
+        yolo_box_found=False,
+    )
+    assert counter.missing_frames == 0
 
 
 def test_fsm_base_transition_exact_eight_seconds_and_one_shot():

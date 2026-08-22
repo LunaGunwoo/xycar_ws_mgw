@@ -67,6 +67,50 @@ class MissionDecision:
     frame_sequence: int
 
 
+class YoloMissingReleaseCounter:
+    """Release a latched stop only after a configured run of YOLO misses."""
+
+    def __init__(
+        self,
+        *,
+        release_frames: int,
+        inference_every_n_frames: int,
+    ) -> None:
+        if (
+            release_frames < 1
+            or inference_every_n_frames < 1
+            or release_frames % inference_every_n_frames != 0
+        ):
+            raise ValueError('invalid YOLO missing-release frame contract')
+        self._release_frames = release_frames
+        self._inference_every_n_frames = inference_every_n_frames
+        self.missing_frames = 0
+
+    def reset(self) -> None:
+        self.missing_frames = 0
+
+    def observe(
+        self,
+        *,
+        red_stop_active: bool,
+        detector_observed: bool,
+        yolo_box_found: bool,
+    ) -> bool:
+        if not red_stop_active:
+            self.reset()
+            return False
+        if not detector_observed:
+            return False
+        if yolo_box_found:
+            self.reset()
+            return False
+        self.missing_frames += self._inference_every_n_frames
+        if self.missing_frames < self._release_frames:
+            return False
+        self.reset()
+        return True
+
+
 class TrafficShortcutPolicyNode(Node):
     """Detect signals, call one selected policy and own the motor topic."""
 
@@ -113,6 +157,17 @@ class TrafficShortcutPolicyNode(Node):
                     self.bundle.detector.straight_consecutive_reads
                 ),
             )
+        release_frames = self.bundle.red_stop_yolo_missing_release_frames
+        self._yolo_missing_release = (
+            None
+            if release_frames is None
+            else YoloMissingReleaseCounter(
+                release_frames=release_frames,
+                inference_every_n_frames=(
+                    self.bundle.detector.inference_every_n_frames
+                ),
+            )
+        )
         self._detector = (
             detector_factory(self.bundle)
             if detector_factory is not None
@@ -338,7 +393,7 @@ class TrafficShortcutPolicyNode(Node):
         detector = self.bundle.detector
         expected_votes = (
             (2, 2, 2)
-            if self.bundle.schema_version == 4
+            if self.bundle.schema_version >= 4
             else (5, 5, 5)
             if self.bundle.schema_version == 3
             else (3, 1, 1)
@@ -355,6 +410,14 @@ class TrafficShortcutPolicyNode(Node):
             != expected_votes
         ):
             raise ValueError('traffic detector 45/votes/every contract mismatch')
+        expected_yolo_missing_release_frames = (
+            30 if self.bundle.schema_version == 5 else None
+        )
+        if (
+            self.bundle.red_stop_yolo_missing_release_frames
+            != expected_yolo_missing_release_frames
+        ):
+            raise ValueError('traffic YOLO missing-release contract mismatch')
         if self.bundle.base_speed_cap != 25.0:
             raise ValueError('bundle Base speed cap must be 25')
         if (
@@ -474,6 +537,7 @@ class TrafficShortcutPolicyNode(Node):
                 return ToggleAction.REJECTED
             self._fsm.enable()
             self._lamp_latch.reset()
+            self._reset_yolo_missing_release_locked()
             self._last_signal = LampAction.UNKNOWN
             self._history = self._initial_external_history()
             self._discard_base_shadow_locked()
@@ -488,6 +552,7 @@ class TrafficShortcutPolicyNode(Node):
             self._publish_enabled(True)
         elif action == ToggleAction.DISABLED:
             self._fsm.disable()
+            self._reset_yolo_missing_release_locked()
             self._decision = None
             self._awaiting_post_reset_decision = False
             self._history_reset_monotonic = None
@@ -495,6 +560,10 @@ class TrafficShortcutPolicyNode(Node):
             self._discard_base_shadow_locked()
             self._mission_generation += 1
         return action
+
+    def _reset_yolo_missing_release_locked(self) -> None:
+        if self._yolo_missing_release is not None:
+            self._yolo_missing_release.reset()
 
     def _on_camera(self, message: Image) -> None:
         try:
@@ -562,11 +631,39 @@ class TrafficShortcutPolicyNode(Node):
                         continue
                     if reading_observed:
                         signal = self._lamp_latch.observe(reading)
+                    if self._yolo_missing_release is not None:
+                        release_after_yolo_loss = (
+                            self._yolo_missing_release.observe(
+                                red_stop_active=(
+                                    self._fsm.state
+                                    == MissionState.RED_STOP
+                                ),
+                                detector_observed=reading_observed,
+                                yolo_box_found=reading is not None,
+                            )
+                        )
+                        if release_after_yolo_loss:
+                            if not isinstance(
+                                self._lamp_latch,
+                                TrafficSignalLatch,
+                            ):
+                                raise RuntimeError(
+                                    'YOLO-loss release requires classifier '
+                                    'traffic latch'
+                                )
+                            self._lamp_latch.release_stop_latch()
+                            signal = LampAction.STRAIGHT
+                            self.get_logger().warning(
+                                'YOLO found no traffic-light box for 30 '
+                                'camera frames while stopped; resuming Base.'
+                            )
                     self._last_signal = signal
                     plan = self._fsm.on_frame(
                         signal,
                         now_monotonic=time.monotonic(),
                     )
+                    if plan.state != MissionState.RED_STOP:
+                        self._reset_yolo_missing_release_locked()
                     if plan.publish_stop:
                         if plan.state == MissionState.SWITCH_TO_SHORTCUT:
                             self._transition_stop_pending = True
@@ -1073,6 +1170,7 @@ class TrafficShortcutPolicyNode(Node):
             self._worker_stop = True
             self._drive_gate.fault()
             self._fsm.fault()
+            self._reset_yolo_missing_release_locked()
             self._mission_generation += 1
             self._frame_condition.notify_all()
         self.publish_stop_burst()

@@ -22,7 +22,7 @@ from xycar_ai_drive.artifact import (
 from xycar_ai_drive.steering_contract import NORMALIZED_STEERING_CONTRACT
 
 BUNDLE_KIND = 'traffic_shortcut_bundle'
-SUPPORTED_BUNDLE_SCHEMA_VERSIONS = {1, 2, 3, 4}
+SUPPORTED_BUNDLE_SCHEMA_VERSIONS = {1, 2, 3, 4, 5}
 BUNDLE_MANIFEST = 'manifest.yaml'
 BUNDLE_CHECKSUMS = 'SHA256SUMS'
 TRAFFIC_MODEL_SHA256 = (
@@ -53,12 +53,19 @@ EXPECTED_CLASSIFIER_BUNDLE_ID = (
     'traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-'
     'yolo-cls-tl45-votes2-every3-45sessions-20260822'
 )
+EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID = (
+    'traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-'
+    'yolo-cls-tl45-votes2-every3-yolo-miss30-release-45sessions-20260822'
+)
 EXPECTED_SIGNAL_BUNDLE_SHORTCUT_IDS = {
     EXPECTED_SIGNAL_VOTE_BUNDLE_ID: EXPECTED_SHORTCUT_ARTIFACT_ID,
     EXPECTED_EXPANDED_SIGNAL_VOTE_BUNDLE_ID: (
         EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
     ),
     EXPECTED_CLASSIFIER_BUNDLE_ID: EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID,
+    EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID: (
+        EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    ),
 }
 EXPECTED_ONNXRUNTIME_VERSION = '1.24.0'
 EXPECTED_NUMPY_VERSION = '1.26.4'
@@ -85,6 +92,7 @@ class TrafficDetectorContract:
     left_consecutive_reads: int
     straight_consecutive_reads: int
     classifier_crop_padding: float | None
+    red_stop_yolo_missing_release_frames: int | None
 
 
 @dataclass(frozen=True)
@@ -105,6 +113,7 @@ class TrafficShortcutBundle:
     base_shadow_max_age_sec: float | None
     successful_shortcut_once: bool
     action_priority: tuple[str, str, str]
+    red_stop_yolo_missing_release_frames: int | None
     onnxruntime_version: str
     numpy_version: str
     providers: tuple[str, ...]
@@ -121,7 +130,7 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
         or schema_version not in SUPPORTED_BUNDLE_SCHEMA_VERSIONS
     ):
         raise ArtifactContractError(
-            'traffic shortcut bundle schema must be 1, 2, 3 or 4'
+            'traffic shortcut bundle schema must be 1, 2, 3, 4 or 5'
         )
     if manifest.get('artifact_kind') != BUNDLE_KIND:
         raise ArtifactContractError('artifact is not a traffic shortcut bundle')
@@ -183,7 +192,7 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
     inference_every = _exact_int(detector, 'inference_every_n_frames', 3)
     classifier_path: Path | None = None
     classifier_crop_padding: float | None = None
-    if schema_version == 4:
+    if schema_version >= 4:
         classifier_path, classifier_crop_padding = _load_classifier_contract(
             root,
             components,
@@ -296,6 +305,22 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
     )
     if mission.get('successful_shortcut_once') is not True:
         raise ArtifactContractError('successful shortcut must be process-once')
+    if schema_version == 5:
+        red_stop_yolo_missing_release_frames = _exact_int(
+            mission,
+            'red_stop_yolo_missing_release_frames',
+            30,
+        )
+        if (
+            red_stop_yolo_missing_release_frames
+            % inference_every
+            != 0
+        ):
+            raise ArtifactContractError(
+                'YOLO missing release frames must align with detector cadence'
+            )
+    else:
+        red_stop_yolo_missing_release_frames = None
 
     runtime = _required_mapping(manifest, 'host_runtime', 'manifest')
     if runtime.get('onnxruntime_version') != EXPECTED_ONNXRUNTIME_VERSION:
@@ -331,6 +356,9 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
             left_consecutive_reads=left_consecutive_reads,
             straight_consecutive_reads=straight_consecutive_reads,
             classifier_crop_padding=classifier_crop_padding,
+            red_stop_yolo_missing_release_frames=(
+                red_stop_yolo_missing_release_frames
+            ),
         ),
         base_speed_cap=base_speed_cap,
         shortcut_speed=shortcut_speed,
@@ -346,6 +374,9 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
         base_shadow_max_age_sec=base_shadow_max_age_sec,
         successful_shortcut_once=True,
         action_priority=('STOP', 'LEFT', 'STRAIGHT'),
+        red_stop_yolo_missing_release_frames=(
+            red_stop_yolo_missing_release_frames
+        ),
         onnxruntime_version=EXPECTED_ONNXRUNTIME_VERSION,
         numpy_version=EXPECTED_NUMPY_VERSION,
         providers=EXPECTED_PROVIDERS,
@@ -376,8 +407,13 @@ def _load_signal_vote_contract(
         raise ArtifactContractError('signal bundle id is not approved')
     if schema_version == 4 and artifact_id != EXPECTED_CLASSIFIER_BUNDLE_ID:
         raise ArtifactContractError('signal bundle id is not approved')
+    if (
+        schema_version == 5
+        and artifact_id != EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID
+    ):
+        raise ArtifactContractError('signal bundle id is not approved')
     signal_vote = _required_mapping(manifest, 'signal_vote', 'manifest')
-    if schema_version == 4:
+    if schema_version >= 4:
         expected = {
             'raw_classes': [
                 'red',
@@ -394,7 +430,7 @@ def _load_signal_vote_contract(
         }
         if signal_vote != expected or 'red_latch' in manifest:
             raise ArtifactContractError(
-                'schema v4 classifier signal vote contract mismatch'
+                'schema v4/v5 classifier signal vote contract mismatch'
             )
         return 2, 2, 2
     expected = {
@@ -508,6 +544,11 @@ def _expected_shortcut_artifact_id(
     }:
         raise ArtifactContractError('signal bundle id is not approved')
     if schema_version == 4 and artifact_id != EXPECTED_CLASSIFIER_BUNDLE_ID:
+        raise ArtifactContractError('signal bundle id is not approved')
+    if (
+        schema_version == 5
+        and artifact_id != EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID
+    ):
         raise ArtifactContractError('signal bundle id is not approved')
     try:
         return EXPECTED_SIGNAL_BUNDLE_SHORTCUT_IDS[artifact_id]

@@ -483,6 +483,10 @@ class TrafficSignalLatch:
         self._candidate_reads = 0
         self._stop_latched = False
 
+    def release_stop_latch(self) -> None:
+        """Clear a confirmed stop after the mission's YOLO-loss fallback."""
+        self.reset()
+
     def observe(self, reading: SignalReading | None) -> LampAction:
         raw = self._raw_class(reading)
         if raw == SignalClass.UNKNOWN:
