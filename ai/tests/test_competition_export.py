@@ -20,6 +20,13 @@ from xycar_ai.export_competition_policy import (
     export_temporal_policy,
     verify_bundle,
 )
+from xycar_ai.export_traffic_shortcut_bundle import (
+    EXPANDED_SHORTCUT_ID,
+    HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    HUMAN_BBOX_CLASSIFIER_SHA256,
+    HUMAN_BBOX_TRAFFIC_SHA256,
+    _bundle_manifest,
+)
 from xycar_ai.steering_contract import steering_contract_mapping
 
 
@@ -169,3 +176,38 @@ def test_temporal_exports_build_one_verified_bundle(tmp_path: Path):
             artifact_id="legacy-base-rejected",
             output_root=model_root,
         )
+
+
+def test_human_bbox_traffic_bundle_manifest_is_action_classifier_v6(
+    tmp_path: Path,
+):
+    base = tmp_path / 'base'
+    shortcut = tmp_path / 'shortcut'
+    base.mkdir()
+    shortcut.mkdir()
+    (base / 'SHA256SUMS').write_text('base\n', encoding='utf-8')
+    (shortcut / 'SHA256SUMS').write_text('shortcut\n', encoding='utf-8')
+
+    manifest = _bundle_manifest(
+        artifact_id=HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+        schema_version=6,
+        consecutive_signal_reads=2,
+        base_artifact=base,
+        shortcut_artifact=shortcut,
+        shortcut_artifact_id=EXPANDED_SHORTCUT_ID,
+        traffic_classifier=tmp_path / 'classifier.onnx',
+    )
+
+    assert manifest['components']['traffic_light']['sha256'] == (
+        HUMAN_BBOX_TRAFFIC_SHA256
+    )
+    classifier = manifest['components']['traffic_classifier']
+    assert classifier['sha256'] == HUMAN_BBOX_CLASSIFIER_SHA256
+    assert classifier['input']['shape'] == [1, 3, 128, 416]
+    assert classifier['output']['shape'] == [1, 3]
+    assert classifier['classes'] == ['STOP', 'STRAIGHT', 'LEFT']
+    detector = manifest['detector']
+    assert detector['bbox_width_px'] == [40, 225]
+    assert detector['max_detections'] == 1
+    assert detector['classifier']['minimum_probability'] == 0.5
+    assert manifest['mission']['red_stop_yolo_missing_release_frames'] == 30

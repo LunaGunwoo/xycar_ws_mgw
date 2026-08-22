@@ -1019,26 +1019,32 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 신호등 통합 runtime에는 두 policy artifact 전체와 검증된 ONNX를 atomic bundle로
 묶는다. builder는 Base schema v6/compact external history, shortcut schema v7/fixed
 speed `23`, 224 square warp, steering 계약과 ONNX SHA-256을 확인하고 기존 bundle을
-덮어쓰지 않는다. 기본 schema v4 bundle은 YOLO bbox 폭 `45..200`을 gate한 뒤
-`tl_cls.onnx`를 3 frame마다 실행하고 raw class 2회 연속 vote를 사용한다. red/yellow
-STOP latch와 8초 Base self-AR shadow handoff를 유지한다. schema v1/v2/v3 bundle은
-rollback용으로 보존한다.
+덮어쓰지 않는다. 현재 bundle schema v6는 사람 보정 GT로 재학습한 YOLO11s의
+640 centered letterbox 결과 중 최고 confidence box 하나를 선택하고 bbox 폭
+`40..225`를 gate한다. box에 축별 `15%` padding을 적용한 crop을 Pillow bilinear
+416×128로 바꿔 3-class `STOP/STRAIGHT/LEFT` CNN을 실행한다. classifier softmax
+확률 `0.50` 미만은 `UNKNOWN`, 동일 raw class 2회 연속은 확정이며 STOP latch와
+8초 Base self-AR shadow handoff를 유지한다. schema v1-v5 bundle은 rollback용으로
+보존한다.
 
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 /home/xytron/.local/bin/uv run --locked xycar-build-traffic-shortcut-bundle \
   --base-artifact artifacts/models/front-cam-policy-vit-small-ar4-v2-nice-adaptive-joint-regression-sequence-init25-window5-20260821 \
   --shortcut-artifact artifacts/models/nice-shortcut-resnet18-squarewarp-speed23-45sessions-20260821 \
-  --traffic-model artifacts/sources/traffic_light.onnx \
-  --traffic-classifier artifacts/sources/tl_cls.onnx \
-  --artifact-id traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-yolo-cls-tl45-votes2-every3-45sessions-20260822 \
+  --traffic-model artifacts/sources/human_bbox_20260823/traffic_light.onnx \
+  --traffic-classifier artifacts/sources/human_bbox_20260823/tl_cls.onnx \
+  --artifact-id traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-votes2-every3-yolo-miss30-release-45sessions-20260823 \
   --output-root artifacts/models
 ```
 
 산출물의 `policies/`에는 각 원본 `model.ts`, `manifest.yaml`, `SHA256SUMS`가 그대로
 남고 `signal/traffic_light.onnx`, reference hash와 root manifest/checksum이 추가된다.
-ONNX 원본 SHA-256은
-`24c1a38eacfb065c95e5577be29a2a542b985d6ea1954bf2fc94c52eb674aa41`이다.
+detector ONNX SHA-256은
+`7d1bd24a025c6b7851c396e9e0cbc38dfad6f6e852c712e2cebdf8547a428e64`, classifier는
+`e126f4f3036bcd4e44ab0ca4b5cc70a2e46f87bc859ae434719eb5f08de122b5`다. provenance에는
+checkpoint와 dataset manifest hash, opset 17, `development_only: true`와
+`known_scene_leakage: true`를 기록한다.
 
 exporter는 checkpoint model state를 strict load하고 eager/trace/reload 결과와 schema별
 출력 shape를 확인한 뒤 `model.ts`, `manifest.yaml`, `SHA256SUMS`를 atomic하게

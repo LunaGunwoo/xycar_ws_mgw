@@ -13,6 +13,7 @@ from xycar_ai_drive.artifact import ArtifactContractError
 from xycar_ai_drive.traffic_light_detector import (
     DetectionBox,
     ImageBounds,
+    LetterboxTransform,
     LampAction,
     LampReading,
     SignalClass,
@@ -26,6 +27,7 @@ from xycar_ai_drive.traffic_light_detector import (
     TrafficSignalLatchSnapshot,
     decode_detection_box,
     lamp_scores,
+    letterbox_640_bgr_frame,
 )
 from xycar_ai_drive.traffic_light_viewer import (
     TrafficLightViewerResult,
@@ -40,6 +42,7 @@ from xycar_ai_drive.traffic_shortcut_artifact import (
     EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID,
     EXPECTED_EXPANDED_SIGNAL_VOTE_BUNDLE_ID,
     EXPECTED_CLASSIFIER_BUNDLE_ID,
+    EXPECTED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID,
     EXPECTED_SHORTCUT_ARTIFACT_ID,
     EXPECTED_SIGNAL_VOTE_BUNDLE_ID,
@@ -115,6 +118,31 @@ def test_yolo_decode_selects_max_confidence_and_scales_bbox():
         frame_height=480,
         frame_width=640,
     ) is None
+
+
+def test_yolo_letterbox_preserves_aspect_ratio_and_restores_bbox():
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    letterboxed, transform = letterbox_640_bgr_frame(frame)
+
+    assert letterboxed.shape == (640, 640, 3)
+    assert transform == LetterboxTransform(scale=1.0, pad_x=0, pad_y=80)
+    assert np.all(letterboxed[:80] == 114)
+    output = _output_with_candidates(
+        (140.0, 212.0, 80.0, 24.0, 0.9),
+        (300.0, 300.0, 30.0, 10.0, 0.4),
+    )
+    assert decode_detection_box(
+        output,
+        frame_height=480,
+        frame_width=640,
+        letterbox_transform=transform,
+    ) == DetectionBox(
+        x=100,
+        y=120,
+        width=80,
+        height=24,
+        confidence=pytest.approx(0.9),
+    )
 
 
 def test_detector_preprocess_and_lamp_percentile_contract():
@@ -222,6 +250,68 @@ def test_classifier_detector_decodes_all_signal_classes(logits, expected):
     )
     reading = detector.read_signal(np.zeros((480, 640, 3), dtype=np.uint8))
     assert reading is not None and reading.signal_class == expected
+
+
+def test_human_bbox_classifier_uses_letterbox_416_input_and_threshold():
+    yolo = _FakeOnnxSession(
+        _output_with_candidates((320.0, 260.0, 100.0, 30.0, 0.9))
+    )
+    classifier = _FakeClassifierSession(
+        np.array([[0.0, 0.0, 4.0]], dtype=np.float32)
+    )
+    detector = TrafficClassifierDetector(
+        yolo_session=yolo,
+        classifier_session=classifier,
+        detector_preprocessing=(
+            'letterbox_640_center_pad114_bgr_to_rgb_float32_nchw_div255'
+        ),
+        classifier_input_height=128,
+        classifier_input_width=416,
+        classifier_classes=('STOP', 'STRAIGHT', 'LEFT'),
+        classifier_probability_threshold=0.5,
+        classifier_interpolation='pillow_bilinear_antialias',
+    )
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    inspection = detector.inspect_signal(frame)
+
+    assert inspection is not None
+    assert inspection.reading.signal_class == SignalClass.LEFT
+    assert inspection.bbox == DetectionBox(
+        x=270,
+        y=165,
+        width=100,
+        height=30,
+        confidence=pytest.approx(0.9),
+    )
+    assert inspection.crop_bounds == ImageBounds(255, 160, 385, 200)
+    assert len(inspection.probabilities) == 3
+    tensor = classifier.inputs[0]['image']
+    assert tensor.shape == (1, 3, 128, 416)
+    assert tensor.dtype == np.float32
+    assert np.isfinite(tensor).all()
+
+    classifier.output = np.zeros((1, 3), dtype=np.float32)
+    unknown = detector.read_signal(frame)
+    assert unknown is not None
+    assert unknown.signal_class == SignalClass.UNKNOWN
+    latch = TrafficSignalLatch(bbox_width_min=40, bbox_width_max=225)
+    assert latch.observe(unknown) == LampAction.UNKNOWN
+
+
+def test_action_classifier_stop_maps_to_latched_red():
+    latch = TrafficSignalLatch(
+        bbox_width_min=40,
+        bbox_width_max=225,
+        consecutive_reads=2,
+    )
+    stop = _signal(SignalClass.STOP, width=100)
+    straight = _signal(SignalClass.STRAIGHT, width=100)
+
+    assert latch.observe(stop) == LampAction.UNKNOWN
+    assert latch.observe(stop) == LampAction.RED
+    assert latch.observe(_signal(SignalClass.UNKNOWN, width=100)) == LampAction.RED
+    assert latch.observe(straight) == LampAction.RED
+    assert latch.observe(straight) == LampAction.STRAIGHT
 
 
 def test_classifier_detector_rejects_bad_logits_and_empty_crop():
@@ -411,6 +501,15 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
         'stop_latch_behavior': 'retain_until_confirmed_green_class',
         'stop_clear_classes': ['left_green', 'straight_green'],
     }
+    human_bbox_classifier_vote = {
+        'raw_classes': ['STOP', 'STRAIGHT', 'LEFT'],
+        'consecutive_reads': 2,
+        'unknown_behavior': 'reset_candidate',
+        'different_raw_class_behavior': 'restart_candidate_at_one',
+        'stop_classes': ['STOP'],
+        'stop_latch_behavior': 'retain_until_confirmed_go_action',
+        'stop_clear_classes': ['LEFT', 'STRAIGHT'],
+    }
 
     assert _load_signal_vote_contract(
         legacy,
@@ -448,6 +547,15 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
     assert _expected_shortcut_artifact_id(
         schema_version=5,
         artifact_id=EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID,
+    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert _load_signal_vote_contract(
+        {'signal_vote': human_bbox_classifier_vote},
+        schema_version=6,
+        artifact_id=EXPECTED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    ) == (2, 2, 2)
+    assert _expected_shortcut_artifact_id(
+        schema_version=6,
+        artifact_id=EXPECTED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
     with pytest.raises(ArtifactContractError, match='signal vote'):
         _load_signal_vote_contract(

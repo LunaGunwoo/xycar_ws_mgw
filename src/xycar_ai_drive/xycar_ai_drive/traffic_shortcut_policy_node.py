@@ -391,6 +391,9 @@ class TrafficShortcutPolicyNode(Node):
 
     def _validate_bundle_runtime_contract(self) -> None:
         detector = self.bundle.detector
+        expected_width = (
+            (40, 225) if self.bundle.schema_version == 6 else (45, 200)
+        )
         expected_votes = (
             (2, 2, 2)
             if self.bundle.schema_version >= 4
@@ -399,8 +402,8 @@ class TrafficShortcutPolicyNode(Node):
             else (3, 1, 1)
         )
         if (
-            detector.bbox_width_min != 45
-            or detector.bbox_width_max != 200
+            detector.bbox_width_min != expected_width[0]
+            or detector.bbox_width_max != expected_width[1]
             or detector.inference_every_n_frames != 3
             or (
                 detector.red_consecutive_reads,
@@ -409,9 +412,9 @@ class TrafficShortcutPolicyNode(Node):
             )
             != expected_votes
         ):
-            raise ValueError('traffic detector 45/votes/every contract mismatch')
+            raise ValueError('traffic detector width/votes/every contract mismatch')
         expected_yolo_missing_release_frames = (
-            30 if self.bundle.schema_version == 5 else None
+            30 if self.bundle.schema_version >= 5 else None
         )
         if (
             self.bundle.red_stop_yolo_missing_release_frames

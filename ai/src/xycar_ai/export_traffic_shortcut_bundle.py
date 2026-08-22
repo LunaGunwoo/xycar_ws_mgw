@@ -44,6 +44,11 @@ YOLO_MISSING_RELEASE_BUNDLE_ID = (
     "traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-"
     "yolo-cls-tl45-votes2-every3-yolo-miss30-release-45sessions-20260822"
 )
+HUMAN_BBOX_CLASSIFIER_BUNDLE_ID = (
+    "traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-"
+    "yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-votes2-every3-"
+    "yolo-miss30-release-45sessions-20260823"
+)
 BUNDLE_CONTRACTS = {
     LEGACY_BUNDLE_ID: (1, 3, SHORTCUT_ID),
     SHADOW_BUNDLE_ID: (2, 3, SHORTCUT_ID),
@@ -51,12 +56,28 @@ BUNDLE_CONTRACTS = {
     BUNDLE_ID: (3, 5, EXPANDED_SHORTCUT_ID),
     CLASSIFIER_BUNDLE_ID: (4, 2, EXPANDED_SHORTCUT_ID),
     YOLO_MISSING_RELEASE_BUNDLE_ID: (5, 2, EXPANDED_SHORTCUT_ID),
+    HUMAN_BBOX_CLASSIFIER_BUNDLE_ID: (6, 2, EXPANDED_SHORTCUT_ID),
 }
 TRAFFIC_SHA256 = (
     "24c1a38eacfb065c95e5577be29a2a542b985d6ea1954bf2fc94c52eb674aa41"
 )
 CLASSIFIER_SHA256 = (
     "3ddb126483e03211f59cd15eb1f96632b9c3d5ac0d42544ccd999601643b806b"
+)
+HUMAN_BBOX_TRAFFIC_SHA256 = (
+    "7d1bd24a025c6b7851c396e9e0cbc38dfad6f6e852c712e2cebdf8547a428e64"
+)
+HUMAN_BBOX_CLASSIFIER_SHA256 = (
+    "e126f4f3036bcd4e44ab0ca4b5cc70a2e46f87bc859ae434719eb5f08de122b5"
+)
+HUMAN_BBOX_TRAFFIC_CHECKPOINT_SHA256 = (
+    "4a7f326e574fe6332d062345bf44d6f04e85b77989b6eac00016f2a8341e1dc8"
+)
+HUMAN_BBOX_CLASSIFIER_CHECKPOINT_SHA256 = (
+    "b0f60032913456ba1551260c12e349194a00bc0c8279d770c996195ef8827000"
+)
+HUMAN_BBOX_DATASET_MANIFEST_SHA256 = (
+    "cdff1b246aecd0fa0fa8b0cd51f13a4cd0a538f06aa312a54925a002a3486746"
 )
 YOLO_REFERENCE_SHA256 = (
     "50b2071a765d74add0c51bd91c3392d3ce8d08e24302dbe4f9389809b3ee7262"
@@ -134,19 +155,27 @@ def build_traffic_shortcut_bundle(
     traffic_model = traffic_model.resolve()
     if not traffic_model.is_file():
         raise TrafficBundleBuildError(f"traffic ONNX is missing: {traffic_model}")
-    if _sha256_file(traffic_model) != TRAFFIC_SHA256:
+    expected_traffic_sha256 = (
+        HUMAN_BBOX_TRAFFIC_SHA256 if schema_version == 6 else TRAFFIC_SHA256
+    )
+    expected_classifier_sha256 = (
+        HUMAN_BBOX_CLASSIFIER_SHA256
+        if schema_version == 6
+        else CLASSIFIER_SHA256
+    )
+    if _sha256_file(traffic_model) != expected_traffic_sha256:
         raise TrafficBundleBuildError("traffic ONNX SHA-256 mismatch")
     if schema_version >= 4:
         if traffic_classifier is None:
             raise TrafficBundleBuildError("traffic classifier is required")
         traffic_classifier = _verify_onnx_file(
             traffic_classifier,
-            expected_sha256=CLASSIFIER_SHA256,
+            expected_sha256=expected_classifier_sha256,
             label="traffic classifier ONNX",
         )
     elif traffic_classifier is not None:
         raise TrafficBundleBuildError(
-            "traffic classifier is only valid for schema v4/v5"
+            "traffic classifier is only valid for schema v4/v5/v6"
         )
 
     base_manifest = _load_mapping(base_artifact / "manifest.yaml")
@@ -195,15 +224,49 @@ def build_traffic_shortcut_bundle(
                     "runtime_dependency": False,
                 },
                 "traffic_light_onnx": {
-                    "read_only_path": "/home/xytron/traffic_light.onnx",
-                    "sha256": TRAFFIC_SHA256,
+                    "read_only_path": (
+                        str(traffic_model)
+                        if schema_version == 6
+                        else "/home/xytron/traffic_light.onnx"
+                    ),
+                    "sha256": expected_traffic_sha256,
                 },
                 "tl_cls_onnx": {
-                    "read_only_path": "/home/xytron/tl_cls.onnx",
-                    "sha256": CLASSIFIER_SHA256,
+                    "read_only_path": (
+                        str(traffic_classifier)
+                        if schema_version == 6
+                        and traffic_classifier is not None
+                        else "/home/xytron/tl_cls.onnx"
+                    ),
+                    "sha256": expected_classifier_sha256,
                 },
             },
         }
+        if schema_version == 6:
+            provenance["human_corrected_two_stage"] = {
+                "detector_checkpoint_sha256": (
+                    HUMAN_BBOX_TRAFFIC_CHECKPOINT_SHA256
+                ),
+                "classifier_checkpoint_sha256": (
+                    HUMAN_BBOX_CLASSIFIER_CHECKPOINT_SHA256
+                ),
+                "dataset_manifest_sha256": (
+                    HUMAN_BBOX_DATASET_MANIFEST_SHA256
+                ),
+                "detector_export": {
+                    "format": "onnx",
+                    "opset": 17,
+                    "static_shape": True,
+                    "simplified": False,
+                },
+                "classifier_export": {
+                    "format": "onnx",
+                    "opset": 17,
+                    "static_shape": True,
+                },
+                "development_only": True,
+                "known_scene_leakage": True,
+            }
         (provenance_dir / "references.yaml").write_text(
             yaml.safe_dump(provenance, sort_keys=False),
             encoding="utf-8",
@@ -267,7 +330,7 @@ def _bundle_manifest(
         "base_speed_cap": 25.0,
         "shortcut_speed": 23.0,
     }
-    if schema_version == 5:
+    if schema_version >= 5:
         mission["red_stop_yolo_missing_release_frames"] = 30
     if schema_version == 1:
         mission["transition_stop_control_cycles"] = 1
@@ -313,7 +376,11 @@ def _bundle_manifest(
             "traffic_light": {
                 "format": "onnx",
                 "file": "signal/traffic_light.onnx",
-                "sha256": TRAFFIC_SHA256,
+                "sha256": (
+                    HUMAN_BBOX_TRAFFIC_SHA256
+                    if schema_version == 6
+                    else TRAFFIC_SHA256
+                ),
                 "input": {
                     "name": "images",
                     "dtype": "float32",
@@ -354,46 +421,69 @@ def _bundle_manifest(
     }
     if schema_version >= 4:
         assert traffic_classifier is not None
-        manifest["components"]["traffic_classifier"] = {
-            "format": "onnx",
-            "file": "signal/tl_cls.onnx",
-            "sha256": CLASSIFIER_SHA256,
-            "input": {
-                "name": "image",
-                "dtype": "float32",
-                "shape": [1, 3, 48, 96],
-            },
-            "output": {
-                "name": "logits",
-                "dtype": "float32",
-                "shape": [1, 4],
-            },
-            "classes": [
+        if schema_version == 6:
+            classifier_sha256 = HUMAN_BBOX_CLASSIFIER_SHA256
+            classifier_height = 128
+            classifier_width = 416
+            classifier_classes = ["STOP", "STRAIGHT", "LEFT"]
+            classifier_interpolation = "pillow_bilinear_antialias"
+            classifier_decision = "softmax_argmax_min_probability"
+        else:
+            classifier_sha256 = CLASSIFIER_SHA256
+            classifier_height = 48
+            classifier_width = 96
+            classifier_classes = [
                 "red",
                 "yellow",
                 "left_green",
                 "straight_green",
-            ],
+            ]
+            classifier_interpolation = "area"
+            classifier_decision = "softmax_argmax_without_threshold"
+        manifest["components"]["traffic_classifier"] = {
+            "format": "onnx",
+            "file": "signal/tl_cls.onnx",
+            "sha256": classifier_sha256,
+            "input": {
+                "name": "image",
+                "dtype": "float32",
+                "shape": [1, 3, classifier_height, classifier_width],
+            },
+            "output": {
+                "name": "logits",
+                "dtype": "float32",
+                "shape": [1, len(classifier_classes)],
+            },
+            "classes": classifier_classes,
         }
         manifest["detector"] = {
             "confidence_threshold": 0.25,
-            "bbox_width_px": [45, 200],
+            "bbox_width_px": (
+                [40, 225] if schema_version == 6 else [45, 200]
+            ),
             "inference_every_n_frames": 3,
-            "preprocessing": "resize_640_bgr_to_rgb_float32_nchw_div255",
+            "preprocessing": (
+                "letterbox_640_center_pad114_bgr_to_rgb_float32_nchw_div255"
+                if schema_version == 6
+                else "resize_640_bgr_to_rgb_float32_nchw_div255"
+            ),
             "selection": "maximum_confidence_box",
             "classifier": {
                 "crop_padding_fraction": 0.15,
-                "resize_width": 96,
-                "resize_height": 48,
-                "interpolation": "area",
+                "resize_width": classifier_width,
+                "resize_height": classifier_height,
+                "interpolation": classifier_interpolation,
                 "color_space": "RGB",
                 "normalization": {
                     "mean": [0.485, 0.456, 0.406],
                     "std": [0.229, 0.224, 0.225],
                 },
-                "decision": "softmax_argmax_without_threshold",
+                "decision": classifier_decision,
             },
         }
+        if schema_version == 6:
+            manifest["detector"]["max_detections"] = 1
+            manifest["detector"]["classifier"]["minimum_probability"] = 0.5
     if schema_version < 3:
         manifest["red_latch"] = _legacy_red_latch_contract()
     elif schema_version == 3:
@@ -402,7 +492,8 @@ def _bundle_manifest(
         )
     else:
         manifest["signal_vote"] = _classifier_signal_vote_contract(
-            consecutive_signal_reads
+            consecutive_signal_reads,
+            schema_version=schema_version,
         )
     return manifest
 
@@ -426,7 +517,21 @@ def _signal_vote_contract(consecutive_reads: int) -> dict[str, object]:
     }
 
 
-def _classifier_signal_vote_contract(consecutive_reads: int) -> dict[str, object]:
+def _classifier_signal_vote_contract(
+    consecutive_reads: int,
+    *,
+    schema_version: int,
+) -> dict[str, object]:
+    if schema_version == 6:
+        return {
+            "raw_classes": ["STOP", "STRAIGHT", "LEFT"],
+            "consecutive_reads": consecutive_reads,
+            "unknown_behavior": "reset_candidate",
+            "different_raw_class_behavior": "restart_candidate_at_one",
+            "stop_classes": ["STOP"],
+            "stop_latch_behavior": "retain_until_confirmed_go_action",
+            "stop_clear_classes": ["LEFT", "STRAIGHT"],
+        }
     return {
         "raw_classes": [
             "red",
@@ -556,11 +661,24 @@ def _verify_built_bundle(
         or manifest.get("artifact_id") != expected_id
     ):
         raise TrafficBundleBuildError("built bundle identity mismatch")
-    if _sha256_file(root / "signal" / "traffic_light.onnx") != TRAFFIC_SHA256:
+    expected_traffic_sha256 = (
+        HUMAN_BBOX_TRAFFIC_SHA256
+        if expected_schema == 6
+        else TRAFFIC_SHA256
+    )
+    expected_classifier_sha256 = (
+        HUMAN_BBOX_CLASSIFIER_SHA256
+        if expected_schema == 6
+        else CLASSIFIER_SHA256
+    )
+    if (
+        _sha256_file(root / "signal" / "traffic_light.onnx")
+        != expected_traffic_sha256
+    ):
         raise TrafficBundleBuildError("built bundle traffic ONNX mismatch")
     classifier_path = root / "signal" / "tl_cls.onnx"
     if expected_classifier:
-        if _sha256_file(classifier_path) != CLASSIFIER_SHA256:
+        if _sha256_file(classifier_path) != expected_classifier_sha256:
             raise TrafficBundleBuildError(
                 "built bundle traffic classifier ONNX mismatch"
             )
@@ -582,14 +700,17 @@ def _verify_built_bundle(
         raise TrafficBundleBuildError("built bundle signal vote mismatch")
     elif expected_schema >= 4 and (
         manifest.get("signal_vote")
-        != _classifier_signal_vote_contract(expected_signal_reads)
+        != _classifier_signal_vote_contract(
+            expected_signal_reads,
+            schema_version=expected_schema,
+        )
         or "red_latch" in manifest
     ):
         raise TrafficBundleBuildError(
             "built bundle classifier signal vote mismatch"
         )
     if (
-        expected_schema == 5
+        expected_schema >= 5
         and _required_mapping(manifest, "mission", "bundle").get(
             "red_stop_yolo_missing_release_frames"
         )

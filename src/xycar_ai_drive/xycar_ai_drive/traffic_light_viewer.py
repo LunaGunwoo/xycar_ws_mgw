@@ -37,12 +37,6 @@ from xycar_ai_drive.traffic_shortcut_artifact import (
 
 BundleLoader = Callable[[str], TrafficShortcutBundle]
 DetectorFactory = Callable[[TrafficShortcutBundle], object]
-CLASS_LABELS = (
-    SignalClass.RED,
-    SignalClass.YELLOW,
-    SignalClass.LEFT_GREEN,
-    SignalClass.STRAIGHT_GREEN,
-)
 
 
 @dataclass(frozen=True)
@@ -97,6 +91,10 @@ class TrafficLightViewerNode(Node):
 
         self.bundle = bundle_loader(self.bundle_dir)
         self._validate_bundle_contract()
+        self.class_labels = tuple(
+            SignalClass(value)
+            for value in self.bundle.detector.classifier_classes
+        )
         detector = detector_factory(self.bundle)
         if not isinstance(detector, TrafficClassifierDetector):
             raise ValueError(
@@ -137,7 +135,7 @@ class TrafficLightViewerNode(Node):
         )
         self.get_logger().info(
             f'bundle={self.bundle.artifact_id}, camera={self.camera_topic}, '
-            'classes=red/yellow/left_green/straight_green, '
+            f'classes={"/".join(value.value for value in self.class_labels)}, '
             f'every={self.bundle.detector.inference_every_n_frames}, '
             f'width={self.bundle.detector.bbox_width_min}..'
             f'{self.bundle.detector.bbox_width_max}, '
@@ -146,17 +144,20 @@ class TrafficLightViewerNode(Node):
 
     def _validate_bundle_contract(self) -> None:
         detector = self.bundle.detector
-        if self.bundle.schema_version != 4:
+        if self.bundle.schema_version not in {4, 5, 6}:
             raise ValueError(
-                'traffic viewer supports only classifier bundle schema 4'
+                'traffic viewer supports classifier bundle schema 4, 5 or 6'
             )
         if detector.mode != 'yolo_cnn_classifier':
             raise ValueError(
                 'traffic viewer requires yolo_cnn_classifier mode'
             )
+        expected_width = (
+            (40, 225) if self.bundle.schema_version == 6 else (45, 200)
+        )
         if (
-            detector.bbox_width_min != 45
-            or detector.bbox_width_max != 200
+            detector.bbox_width_min != expected_width[0]
+            or detector.bbox_width_max != expected_width[1]
             or detector.inference_every_n_frames != 3
             or (
                 detector.red_consecutive_reads,
@@ -166,8 +167,7 @@ class TrafficLightViewerNode(Node):
             != (2, 2, 2)
         ):
             raise ValueError(
-                'traffic viewer bundle must use width '
-                '45..200/every3/votes2'
+                'traffic viewer bundle width/every3/votes2 contract mismatch'
             )
 
     def _on_camera(self, message: Image) -> None:
@@ -328,13 +328,14 @@ class TrafficLightViewerApplication:
         self._frame_photo: ImageTk.PhotoImage | None = None
         self._crop_photo: ImageTk.PhotoImage | None = None
         self._render_signature: tuple[object, ...] | None = None
+        self.class_labels = node.class_labels
         self._probability_vars = {
             signal_class: tk.DoubleVar(value=0.0)
-            for signal_class in CLASS_LABELS
+            for signal_class in self.class_labels
         }
         self._probability_text = {
             signal_class: tk.StringVar(value='0.0%')
-            for signal_class in CLASS_LABELS
+            for signal_class in self.class_labels
         }
         self._status_text = tk.StringVar(value='Waiting for camera frames')
         self._detail_text = tk.StringVar(value='')
@@ -383,7 +384,7 @@ class TrafficLightViewerApplication:
         )
         self.action_label.pack(fill=tk.X, pady=(0, 10))
 
-        for signal_class in CLASS_LABELS:
+        for signal_class in self.class_labels:
             row = ttk.Frame(controls)
             row.pack(fill=tk.X, pady=3)
             ttk.Label(row, text=signal_class.value, width=16).pack(
@@ -482,11 +483,15 @@ class TrafficLightViewerApplication:
 
         inspection = result.inspection
         probabilities = (
-            (0.0, 0.0, 0.0, 0.0)
+            (0.0,) * len(self.class_labels)
             if inspection is None
             else inspection.probabilities
         )
-        for signal_class, probability in zip(CLASS_LABELS, probabilities):
+        for signal_class, probability in zip(
+            self.class_labels,
+            probabilities,
+            strict=True,
+        ):
             self._probability_vars[signal_class].set(probability)
             self._probability_text[signal_class].set(
                 f'{probability * 100.0:.1f}%'

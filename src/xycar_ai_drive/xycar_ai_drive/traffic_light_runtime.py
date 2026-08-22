@@ -58,7 +58,18 @@ def create_onnx_detector(
 
     classifier_path = bundle.detector.classifier_model_path
     crop_padding = bundle.detector.classifier_crop_padding
-    if classifier_path is None or crop_padding is None:
+    classifier_height = bundle.detector.classifier_input_height
+    classifier_width = bundle.detector.classifier_input_width
+    classifier_classes = bundle.detector.classifier_classes
+    classifier_interpolation = bundle.detector.classifier_interpolation
+    if (
+        classifier_path is None
+        or crop_padding is None
+        or classifier_height is None
+        or classifier_width is None
+        or not classifier_classes
+        or classifier_interpolation is None
+    ):
         raise ValueError('classifier bundle is missing classifier contract')
     classifier = ort.InferenceSession(
         str(classifier_path),
@@ -72,9 +83,9 @@ def create_onnx_detector(
     _validate_model_metadata(
         classifier,
         input_name='image',
-        input_shape=[1, 3, 48, 96],
+        input_shape=[1, 3, classifier_height, classifier_width],
         output_name='logits',
-        output_shape=[1, 4],
+        output_shape=[1, len(classifier_classes)],
         label='traffic classifier ONNX',
     )
     return TrafficClassifierDetector(
@@ -82,6 +93,14 @@ def create_onnx_detector(
         classifier_session=classifier,
         confidence_threshold=bundle.detector.confidence_threshold,
         crop_padding=crop_padding,
+        detector_preprocessing=bundle.detector.detector_preprocessing,
+        classifier_input_height=classifier_height,
+        classifier_input_width=classifier_width,
+        classifier_classes=classifier_classes,
+        classifier_probability_threshold=(
+            bundle.detector.classifier_probability_threshold
+        ),
+        classifier_interpolation=classifier_interpolation,
     )
 
 

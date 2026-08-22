@@ -9,6 +9,9 @@ from typing import Protocol
 
 import cv2
 import numpy as np
+from PIL import Image as PilImage
+
+_PIL_BILINEAR = getattr(PilImage, 'Resampling', PilImage).BILINEAR
 
 
 class TrafficLightError(RuntimeError):
@@ -30,14 +33,17 @@ class SignalClass(str, Enum):
     YELLOW = 'yellow'
     LEFT_GREEN = 'left_green'
     STRAIGHT_GREEN = 'straight_green'
+    STOP = 'STOP'
+    STRAIGHT = 'STRAIGHT'
+    LEFT = 'LEFT'
 
 
 @dataclass(frozen=True)
 class DetectionBox:
-    x: int
-    y: int
-    width: int
-    height: int
+    x: float
+    y: float
+    width: float
+    height: float
     confidence: float
 
 
@@ -52,7 +58,7 @@ class LampReading:
 class SignalReading:
     signal_class: SignalClass
     probability: float
-    bbox_width: int
+    bbox_width: float
     confidence: float
 
 
@@ -73,7 +79,16 @@ class SignalInspection:
     reading: SignalReading
     bbox: DetectionBox
     crop_bounds: ImageBounds
-    probabilities: tuple[float, float, float, float]
+    probabilities: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class LetterboxTransform:
+    """Geometry needed to map a centered 640 letterbox back to a frame."""
+
+    scale: float
+    pad_x: int
+    pad_y: int
 
 
 @dataclass(frozen=True)
@@ -96,6 +111,7 @@ def decode_detection_box(
     frame_height: int,
     frame_width: int,
     confidence_threshold: float = 0.25,
+    letterbox_transform: LetterboxTransform | None = None,
 ) -> DetectionBox | None:
     """Decode the highest-confidence `[1,5,8400]` YOLO prediction."""
     if (
@@ -121,15 +137,77 @@ def decode_detection_box(
     center_x, center_y, width, height = (
         float(value) for value in candidates[index, :4]
     )
-    scale_x = frame_width / 640.0
-    scale_y = frame_height / 640.0
+    if letterbox_transform is None:
+        scale_x = frame_width / 640.0
+        scale_y = frame_height / 640.0
+        x1 = (center_x - width / 2.0) * scale_x
+        y1 = (center_y - height / 2.0) * scale_y
+        decoded_width = width * scale_x
+        decoded_height = height * scale_y
+    else:
+        scale = letterbox_transform.scale
+        if not math.isfinite(scale) or scale <= 0.0:
+            raise TrafficLightError('letterbox scale must be finite and positive')
+        x1_float = (center_x - width / 2.0 - letterbox_transform.pad_x) / scale
+        y1_float = (center_y - height / 2.0 - letterbox_transform.pad_y) / scale
+        x2_float = (center_x + width / 2.0 - letterbox_transform.pad_x) / scale
+        y2_float = (center_y + height / 2.0 - letterbox_transform.pad_y) / scale
+        x1_float = min(max(x1_float, 0.0), float(frame_width))
+        y1_float = min(max(y1_float, 0.0), float(frame_height))
+        x2_float = min(max(x2_float, 0.0), float(frame_width))
+        y2_float = min(max(y2_float, 0.0), float(frame_height))
+        x1 = x1_float
+        y1 = y1_float
+        decoded_width = x2_float - x1_float
+        decoded_height = y2_float - y1_float
+        return DetectionBox(
+            x=x1,
+            y=y1,
+            width=decoded_width,
+            height=decoded_height,
+            confidence=float(candidate_confidence[index]),
+        )
     return DetectionBox(
-        x=int((center_x - width / 2.0) * scale_x),
-        y=int((center_y - height / 2.0) * scale_y),
-        width=int(width * scale_x),
-        height=int(height * scale_y),
+        x=int(x1),
+        y=int(y1),
+        width=int(decoded_width),
+        height=int(decoded_height),
         confidence=float(candidate_confidence[index]),
     )
+
+
+def letterbox_640_bgr_frame(
+    bgr_frame: np.ndarray,
+) -> tuple[np.ndarray, LetterboxTransform]:
+    """Apply Ultralytics-compatible centered 640 letterbox preprocessing."""
+    _validate_bgr_frame(bgr_frame)
+    frame_height, frame_width = bgr_frame.shape[:2]
+    scale = min(640.0 / frame_height, 640.0 / frame_width)
+    resized_width = int(round(frame_width * scale))
+    resized_height = int(round(frame_height * scale))
+    resized = cv2.resize(
+        bgr_frame,
+        (resized_width, resized_height),
+        interpolation=cv2.INTER_LINEAR,
+    )
+    padding_width = 640 - resized_width
+    padding_height = 640 - resized_height
+    left = int(round(padding_width / 2.0 - 0.1))
+    right = int(round(padding_width / 2.0 + 0.1))
+    top = int(round(padding_height / 2.0 - 0.1))
+    bottom = int(round(padding_height / 2.0 + 0.1))
+    letterboxed = cv2.copyMakeBorder(
+        resized,
+        top,
+        bottom,
+        left,
+        right,
+        cv2.BORDER_CONSTANT,
+        value=(114, 114, 114),
+    )
+    if letterboxed.shape != (640, 640, 3):
+        raise TrafficLightError('traffic letterbox must produce 640 square')
+    return letterboxed, LetterboxTransform(scale=scale, pad_x=left, pad_y=top)
 
 
 def lamp_scores(
@@ -211,7 +289,7 @@ class TrafficLightDetector:
 class TrafficClassifierDetector:
     """Run team YOLO box detection followed by the CNN signal classifier."""
 
-    _CLASS_ORDER = (
+    _LEGACY_CLASS_ORDER = (
         SignalClass.RED,
         SignalClass.YELLOW,
         SignalClass.LEFT_GREEN,
@@ -227,6 +305,19 @@ class TrafficClassifierDetector:
         classifier_session: _OnnxSession,
         confidence_threshold: float = 0.25,
         crop_padding: float = 0.15,
+        detector_preprocessing: str = (
+            'resize_640_bgr_to_rgb_float32_nchw_div255'
+        ),
+        classifier_input_height: int = 48,
+        classifier_input_width: int = 96,
+        classifier_classes: tuple[str, ...] = (
+            'red',
+            'yellow',
+            'left_green',
+            'straight_green',
+        ),
+        classifier_probability_threshold: float | None = None,
+        classifier_interpolation: str = 'area',
     ) -> None:
         if not math.isfinite(crop_padding) or crop_padding < 0.0:
             raise ValueError('classifier crop padding must be finite and non-negative')
@@ -234,6 +325,41 @@ class TrafficClassifierDetector:
         self._classifier_session = classifier_session
         self._confidence_threshold = float(confidence_threshold)
         self._crop_padding = float(crop_padding)
+        if detector_preprocessing not in {
+            'resize_640_bgr_to_rgb_float32_nchw_div255',
+            'letterbox_640_center_pad114_bgr_to_rgb_float32_nchw_div255',
+        }:
+            raise ValueError('unsupported traffic detector preprocessing')
+        if classifier_input_height < 1 or classifier_input_width < 1:
+            raise ValueError('classifier input dimensions must be positive')
+        try:
+            class_order = tuple(SignalClass(value) for value in classifier_classes)
+        except ValueError as exc:
+            raise ValueError('unsupported traffic classifier class') from exc
+        if (
+            not class_order
+            or SignalClass.UNKNOWN in class_order
+            or len(set(class_order)) != len(class_order)
+        ):
+            raise ValueError('traffic classifier classes must be unique')
+        if classifier_probability_threshold is not None and (
+            not math.isfinite(classifier_probability_threshold)
+            or not 0.0 < classifier_probability_threshold < 1.0
+        ):
+            raise ValueError('classifier probability threshold must be in (0,1)')
+        if classifier_interpolation not in {
+            'area',
+            'pillow_bilinear_antialias',
+        }:
+            raise ValueError('unsupported traffic classifier interpolation')
+        self._detector_preprocessing = detector_preprocessing
+        self._classifier_input_height = classifier_input_height
+        self._classifier_input_width = classifier_input_width
+        self._classifier_class_order = class_order
+        self._classifier_probability_threshold = (
+            classifier_probability_threshold
+        )
+        self._classifier_interpolation = classifier_interpolation
 
     def read_signal(self, bgr_frame: np.ndarray) -> SignalReading | None:
         inspection = self.inspect_signal(bgr_frame)
@@ -243,7 +369,14 @@ class TrafficClassifierDetector:
         """Return the exact runtime reading plus GUI diagnostic details."""
         _validate_bgr_frame(bgr_frame)
         height, width = bgr_frame.shape[:2]
-        resized = cv2.resize(bgr_frame, (640, 640))
+        if (
+            self._detector_preprocessing
+            == 'letterbox_640_center_pad114_bgr_to_rgb_float32_nchw_div255'
+        ):
+            resized, letterbox_transform = letterbox_640_bgr_frame(bgr_frame)
+        else:
+            resized = cv2.resize(bgr_frame, (640, 640))
+            letterbox_transform = None
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         yolo_tensor = np.expand_dims(np.transpose(rgb, (2, 0, 1)), 0)
         try:
@@ -257,6 +390,7 @@ class TrafficClassifierDetector:
             frame_height=height,
             frame_width=width,
             confidence_threshold=self._confidence_threshold,
+            letterbox_transform=letterbox_transform,
         )
         if box is None:
             return None
@@ -275,7 +409,11 @@ class TrafficClassifierDetector:
             raise TrafficLightError(
                 f'traffic classifier ONNX inference failed: {exc}'
             ) from exc
-        signal_class, probabilities = _decode_classifier_logits(outputs)
+        signal_class, probabilities = _decode_classifier_logits(
+            outputs,
+            class_order=self._classifier_class_order,
+            minimum_probability=self._classifier_probability_threshold,
+        )
         reading = SignalReading(
             signal_class=signal_class,
             probability=max(probabilities),
@@ -294,40 +432,81 @@ class TrafficClassifierDetector:
         frame: np.ndarray,
         box: DetectionBox,
     ) -> ImageBounds:
-        pad_x = int(box.width * self._crop_padding)
-        pad_y = int(box.height * self._crop_padding)
-        x1 = max(0, box.x - pad_x)
-        y1 = max(0, box.y - pad_y)
-        x2 = min(frame.shape[1], box.x + box.width + pad_x)
-        y2 = min(frame.shape[0], box.y + box.height + pad_y)
+        if (
+            self._detector_preprocessing
+            == 'letterbox_640_center_pad114_bgr_to_rgb_float32_nchw_div255'
+        ):
+            pad_x = box.width * self._crop_padding
+            pad_y = box.height * self._crop_padding
+            x1 = max(0, math.floor(box.x - pad_x))
+            y1 = max(0, math.floor(box.y - pad_y))
+            x2 = min(
+                frame.shape[1],
+                math.ceil(box.x + box.width + pad_x),
+            )
+            y2 = min(
+                frame.shape[0],
+                math.ceil(box.y + box.height + pad_y),
+            )
+        else:
+            pad_x = int(box.width * self._crop_padding)
+            pad_y = int(box.height * self._crop_padding)
+            x1 = max(0, int(box.x) - pad_x)
+            y1 = max(0, int(box.y) - pad_y)
+            x2 = min(frame.shape[1], int(box.x + box.width) + pad_x)
+            y2 = min(frame.shape[0], int(box.y + box.height) + pad_y)
         if x2 <= x1 or y2 <= y1:
             raise TrafficLightError('traffic classifier crop is empty')
         return ImageBounds(x1=x1, y1=y1, x2=x2, y2=y2)
 
     def _classifier_tensor(self, crop: np.ndarray) -> np.ndarray:
-        resized = cv2.resize(crop, (96, 48), interpolation=cv2.INTER_AREA)
-        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        if self._classifier_interpolation == 'area':
+            resized = cv2.resize(
+                crop,
+                (self._classifier_input_width, self._classifier_input_height),
+                interpolation=cv2.INTER_AREA,
+            )
+            rgb_uint8 = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        else:
+            rgb_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+            resized_image = PilImage.fromarray(rgb_crop).resize(
+                (self._classifier_input_width, self._classifier_input_height),
+                resample=_PIL_BILINEAR,
+            )
+            rgb_uint8 = np.asarray(resized_image)
+        rgb = rgb_uint8.astype(np.float32) / 255.0
         rgb = (rgb - self._IMAGE_MEAN) / self._IMAGE_STD
         tensor = np.expand_dims(np.transpose(rgb, (2, 0, 1)), 0).astype(
             np.float32
         )
-        if tensor.shape != (1, 3, 48, 96) or not np.isfinite(tensor).all():
+        if tensor.shape != (
+            1,
+            3,
+            self._classifier_input_height,
+            self._classifier_input_width,
+        ) or not np.isfinite(tensor).all():
             raise TrafficLightError('traffic classifier input is invalid')
         return tensor
 
 
 def _decode_classifier_logits(
     outputs,
-) -> tuple[SignalClass, tuple[float, float, float, float]]:
+    *,
+    class_order: tuple[SignalClass, ...] = TrafficClassifierDetector._LEGACY_CLASS_ORDER,
+    minimum_probability: float | None = None,
+) -> tuple[SignalClass, tuple[float, ...]]:
     if not isinstance(outputs, (list, tuple)) or len(outputs) != 1:
         raise TrafficLightError('traffic classifier must return exactly one output')
     logits = outputs[0]
     if (
         not isinstance(logits, np.ndarray)
-        or logits.shape != (1, 4)
+        or logits.shape != (1, len(class_order))
         or logits.dtype.kind not in {'f'}
     ):
-        raise TrafficLightError('traffic classifier output must be [1,4] float')
+        raise TrafficLightError(
+            'traffic classifier output must be '
+            f'[1,{len(class_order)}] float'
+        )
     if not np.isfinite(logits).all():
         raise TrafficLightError('traffic classifier output contains NaN or Inf')
     values = logits[0]
@@ -338,7 +517,13 @@ def _decode_classifier_logits(
         raise TrafficLightError('traffic classifier probabilities are invalid')
     index = int(np.argmax(probabilities))
     decoded = tuple(float(value) for value in probabilities)
-    return TrafficClassifierDetector._CLASS_ORDER[index], decoded
+    signal_class = class_order[index]
+    if (
+        minimum_probability is not None
+        and decoded[index] < minimum_probability
+    ):
+        signal_class = SignalClass.UNKNOWN
+    return signal_class, decoded
 
 
 class TrafficLampLatch:
@@ -521,20 +706,25 @@ class TrafficSignalLatch:
         ):
             return SignalClass.UNKNOWN
         if (
-            reading.signal_class == SignalClass.UNKNOWN
-            or not math.isfinite(reading.probability)
+            not math.isfinite(reading.probability)
             or not math.isfinite(reading.confidence)
         ):
             raise TrafficLightError('traffic classifier reading is invalid')
+        if reading.signal_class == SignalClass.UNKNOWN:
+            return SignalClass.UNKNOWN
         return reading.signal_class
 
 
 def _signal_class_action(signal_class: SignalClass) -> LampAction:
-    if signal_class in {SignalClass.RED, SignalClass.YELLOW}:
+    if signal_class in {
+        SignalClass.RED,
+        SignalClass.YELLOW,
+        SignalClass.STOP,
+    }:
         return LampAction.RED
-    if signal_class == SignalClass.LEFT_GREEN:
+    if signal_class in {SignalClass.LEFT_GREEN, SignalClass.LEFT}:
         return LampAction.LEFT
-    if signal_class == SignalClass.STRAIGHT_GREEN:
+    if signal_class in {SignalClass.STRAIGHT_GREEN, SignalClass.STRAIGHT}:
         return LampAction.STRAIGHT
     return LampAction.UNKNOWN
 
