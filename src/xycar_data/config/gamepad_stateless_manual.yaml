@@ -19,6 +19,8 @@ gamepad_teleop:
     max_angle: 100.0
     max_reverse_speed: 5.0
     max_forward_speed: 7.0
+    fixed_reverse_button: 9
+    fixed_reverse_speed: 5.0
     publish_rate_hz: 20.0
     joy_timeout_sec: 0.25
     graph_check_period_sec: 0.5

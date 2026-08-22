@@ -54,7 +54,8 @@ Remote Gamepad 휴대폰 앱과 PC 앱을 먼저 연결한다. 차량 바퀴를 
 `/home/xytron/xycar_data/stateless_manual`이다. 각 session metadata에는 profile의
 절대 경로와 SHA-256, 실제 적용된 gamepad·recording·timeout 값이 기록된다.
 기존 외부 profile은 배포 전에 SHA-256 이름으로 백업한 뒤 25/10과
-`lidar_topic`, `lidar_timeout_sec`, `max_lidar_skew_sec`를 별도로 반영해야 한다.
+`fixed_reverse_button: 9`, `fixed_reverse_speed: 5`, `lidar_topic`,
+`lidar_timeout_sec`, `max_lidar_skew_sec`를 별도로 반영해야 한다.
 차량의 tracked seed 파일을 현장에서 수정해 대신하지 않는다.
 Gamepad camera frame은 Jetson에서 30 Hz를 지속 저장할 수 있도록 기본 JPEG 품질
 95로 저장한다. 이미지 형식과 품질은 외부 profile에서 조정할 수 있다.
@@ -89,6 +90,7 @@ Gamepad profile이 controller와 teleop에 그대로 적용된다. 입력과 출
 | 왼쪽 스틱 좌우 `axes[0]` | `angle = -100 * axes[0]` | `-100 ~ 100` |
 | LT `axes[4]` | `speed -= 10 * depth` | `0 ~ -10` |
 | RT `axes[5]` | `speed += 25 * depth` | `0 ~ 25` |
+| LB `buttons[9]` hold | `speed -= 5` | 고정 감산 `5` |
 | A `buttons[0]` | 양수 속도 녹화 대기·시작 | — |
 | B `buttons[1]` | 현재 세션 정상 저장 | — |
 
@@ -97,7 +99,11 @@ LT는 `axes[4]`, RT는 `axes[5]`다. 따라서 `trigger_axis_mode: negative`가
 기본값이고 각 depth는 `-raw_axis`다. raw `0`, `-0.5`, `-1`은 각각
 depth `0`, `0.5`, `1`로 변환된다. LT와 RT는 합산하므로 둘을 끝까지 누르면
 speed는 `15`다. 두 트리거가 모두 `0`이면 speed만 0이 되고 angle은 왼쪽
-스틱을 계속 따라간다.
+스틱을 계속 따라간다. LB는 SDL `game_controller_node`의 `buttons[9]`이며,
+누르는 동안 LT/RT 계산값에서 고정 `5`를 뺀다. 따라서 LB만 누르면 조향을
+유지한 약후진 `-5`, RT 최대와 함께 누르면 `25`에서 `20`이 된다. LT와 함께
+눌러도 최종 후진은 `max_reverse_speed`의 `-10`으로 제한된다. LB를 놓으면 즉시
+현재 LT/RT 계산값으로 돌아가며 누적 감속값은 남지 않는다.
 
 A를 누르고 있는 동안 녹화를 대기한다. 실제 `/xycar_motor`에 `speed > 0`이
 발행되는 순간 세션이 시작되며, 시작 전에 A를 놓으면 대기가 취소된다. 녹화
@@ -106,8 +112,9 @@ A를 누르고 있는 동안 녹화를 대기한다. 실제 `/xycar_motor`에 `s
 
 녹화 중 실제 발행 speed가 `0` 또는 음수가 되면 최신 camera frame 15개를
 폐기하고 그 이전 frame을 학습 가능한 정상 세션으로 저장한다. 이 동작은 녹화만
-종료하며 별도 정지나 disarm을 하지 않으므로 LT에 의한 후진은 계속 발행될 수
-있다. B 또는 speed 종료 후 A를 계속 누르고 있어도 자동 재시작하지 않으며,
+종료하며 별도 정지나 disarm을 하지 않으므로 LT 또는 LB에 의한 후진은 계속
+발행될 수 있다. B 또는 speed 종료 후 A를 계속 누르고 있어도 자동 재시작하지
+않으며,
 A를 한 번 놓았다가 다시 눌러야 새 세션을 시작한다.
 
 전용 `/gamepad_teleop/joy`가 0.25초 이상 끊기거나, 축 배열이 잘못됐거나, motor subscriber가 없거나,
@@ -116,8 +123,8 @@ motor bridge 이름을 `UNKNOWN`으로 표시할 때는 동일 DDS participant G
 없는 publisher/subscriber 쌍만 필수 relay로 인정한다. 이름 있는 다른 publisher,
 짝 없는 이름 없는 publisher와 participant가 다른 쌍은 계속 정지 조건이다.
 종료할 때도 정지 명령을 5회 발행한다. 시작할 때와 위 안전 정지에서 복구할 때는
-LT와 RT가 모두
-`neutral_trigger_threshold` 이하인 입력을 한 번 확인해야 다시 주행할 수 있다.
+LT와 RT가 모두 `neutral_trigger_threshold` 이하이고 LB가 놓인 입력을 한 번
+확인해야 다시 주행할 수 있다.
 연결이 유효하고 전용 Joy topic이 갱신되는 동안 마지막 유효 명령은 20 Hz로 반복된다.
 
 휴대폰 연결이 끊겨도 PC의 가상 controller가 마지막 Joy 값을 계속 갱신하면 이

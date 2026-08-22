@@ -25,6 +25,10 @@ gamepad_teleop:
     max_angle: 100.0
     max_reverse_speed: 5.0
     max_forward_speed: 7.0
+    # SDL game_controller_node maps LB to buttons[9]. While held, this
+    # constant decrement is subtracted from the trigger-derived speed.
+    fixed_reverse_button: 9
+    fixed_reverse_speed: 5.0
 
     publish_rate_hz: 20.0
     joy_timeout_sec: 0.25

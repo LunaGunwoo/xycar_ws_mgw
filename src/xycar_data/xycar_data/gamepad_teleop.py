@@ -86,6 +86,8 @@ class GamepadConfig:
     max_angle: float = 100.0
     max_reverse_speed: float = 5.0
     max_forward_speed: float = 7.0
+    fixed_reverse_button: int = 9
+    fixed_reverse_speed: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -101,25 +103,32 @@ STOP_COMMAND = DriveCommand()
 
 @dataclass(frozen=True)
 class MappedJoyInput:
-    """Normalized trigger depths and the resulting Xycar command."""
+    """Normalized controller input and the resulting Xycar command."""
 
     command: DriveCommand
     lt_depth: float
     rt_depth: float
+    fixed_reverse_pressed: bool = False
 
 
 @dataclass
 class NeutralArmingGate:
-    """Require neutral triggers before drive commands may become active."""
+    """Require neutral speed controls before drive commands may activate."""
 
     threshold: float
     armed: bool = False
 
-    def observe(self, lt_depth: float, rt_depth: float) -> bool:
+    def observe(
+        self,
+        lt_depth: float,
+        rt_depth: float,
+        fixed_reverse_pressed: bool = False,
+    ) -> bool:
         if (
             not self.armed
             and lt_depth <= self.threshold
             and rt_depth <= self.threshold
+            and not fixed_reverse_pressed
         ):
             self.armed = True
         return self.armed
@@ -279,8 +288,9 @@ class InvalidJoyInput(ValueError):
 def map_joy_input(
     axes: Sequence[float],
     config: GamepadConfig = GamepadConfig(),
+    buttons: Optional[Sequence[int]] = None,
 ) -> MappedJoyInput:
-    """Normalize joystick axes and map them to an Xycar command."""
+    """Normalize controller input and map it to an Xycar command."""
     _validate_config(config)
     required_axis = max(
         config.steering_axis,
@@ -303,28 +313,43 @@ def map_joy_input(
         'RT',
         config.trigger_axis_mode,
     )
+    fixed_reverse_pressed = bool(
+        buttons is not None
+        and len(buttons) > config.fixed_reverse_button
+        and buttons[config.fixed_reverse_button]
+    )
 
     steering = _clamp(steering, -1.0, 1.0)
+    speed = (rt_depth * config.max_forward_speed) - (
+        lt_depth * config.max_reverse_speed
+    )
+    if fixed_reverse_pressed:
+        speed -= config.fixed_reverse_speed
+    speed = _clamp(
+        speed,
+        -config.max_reverse_speed,
+        config.max_forward_speed,
+    )
 
     steering_sign = -1.0 if config.invert_steering else 1.0
     return MappedJoyInput(
         command=DriveCommand(
             angle=steering * config.max_angle * steering_sign,
-            speed=(rt_depth * config.max_forward_speed) - (
-                lt_depth * config.max_reverse_speed
-            ),
+            speed=speed,
         ),
         lt_depth=lt_depth,
         rt_depth=rt_depth,
+        fixed_reverse_pressed=fixed_reverse_pressed,
     )
 
 
 def map_joy_axes(
     axes: Sequence[float],
     config: GamepadConfig = GamepadConfig(),
+    buttons: Optional[Sequence[int]] = None,
 ) -> DriveCommand:
-    """Map joystick axes to an Xycar command, clamping all input ranges."""
-    return map_joy_input(axes, config).command
+    """Map controller input to a command, clamping all input ranges."""
+    return map_joy_input(axes, config, buttons).command
 
 
 def is_input_fresh(
@@ -395,6 +420,7 @@ def _validate_config(config: GamepadConfig) -> None:
         ('steering_axis', config.steering_axis),
         ('lt_axis', config.lt_axis),
         ('rt_axis', config.rt_axis),
+        ('fixed_reverse_button', config.fixed_reverse_button),
     ):
         if index < 0:
             raise ValueError(f'{label} must be non-negative')
@@ -413,6 +439,14 @@ def _validate_config(config: GamepadConfig) -> None:
         'max_forward_speed',
         config.max_forward_speed,
     )
+    _validate_finite_positive(
+        'fixed_reverse_speed',
+        config.fixed_reverse_speed,
+    )
+    if config.fixed_reverse_speed > config.max_reverse_speed:
+        raise ValueError(
+            'fixed_reverse_speed must not exceed max_reverse_speed'
+        )
 
 
 def _validate_runtime_parameters(
@@ -522,6 +556,8 @@ class GamepadTeleopNode(Node):
         self.declare_parameter('max_angle', 100.0)
         self.declare_parameter('max_reverse_speed', 5.0)
         self.declare_parameter('max_forward_speed', 7.0)
+        self.declare_parameter('fixed_reverse_button', 9)
+        self.declare_parameter('fixed_reverse_speed', 5.0)
         self.declare_parameter('publish_rate_hz', 20.0)
         self.declare_parameter('joy_timeout_sec', 0.25)
         self.declare_parameter('graph_check_period_sec', 0.5)
@@ -578,6 +614,12 @@ class GamepadTeleopNode(Node):
             ),
             max_forward_speed=float(
                 self.get_parameter('max_forward_speed').value
+            ),
+            fixed_reverse_button=int(
+                self.get_parameter('fixed_reverse_button').value
+            ),
+            fixed_reverse_speed=float(
+                self.get_parameter('fixed_reverse_speed').value
             ),
         )
         self.publish_rate_hz = float(
@@ -717,7 +759,8 @@ class GamepadTeleopNode(Node):
                 'hold A to wait for positive speed recording, and press B to save'
             )
         self.get_logger().warning(
-            'Gamepad teleop started disarmed. Release LT and RT once to arm; '
+            'Gamepad teleop started disarmed. Release LT, RT, and LB once '
+            'to arm; '
             f'{recording_help}.'
         )
         steering_sign = '-' if self.config.invert_steering else ''
@@ -730,6 +773,8 @@ class GamepadTeleopNode(Node):
             f'{self.config.max_forward_speed:g}-depth(axes['
             f'{self.config.lt_axis}])*'
             f'{self.config.max_reverse_speed:g}, '
+            f'LB=buttons[{self.config.fixed_reverse_button}]->speed-='
+            f'{self.config.fixed_reverse_speed:g}, '
             f'trigger_axis_mode={self.config.trigger_axis_mode}'
         )
         self.get_logger().info(
@@ -787,6 +832,13 @@ class GamepadTeleopNode(Node):
                 self.recording_min_free_space_mb
             ),
         )
+        if self.config.fixed_reverse_button in {
+            self.record_start_button,
+            self.record_stop_button,
+        }:
+            raise ValueError(
+                'fixed reverse and record button indices must be distinct'
+            )
         if self.recording_mode not in {
             'positive_speed_segment',
             'mission_sequence',
@@ -817,7 +869,11 @@ class GamepadTeleopNode(Node):
     def _on_joy(self, message: Joy) -> None:
         now = time.monotonic()
         try:
-            mapped_input = map_joy_input(message.axes, self.config)
+            mapped_input = map_joy_input(
+                message.axes,
+                self.config,
+                message.buttons,
+            )
         except InvalidJoyInput as exc:
             self._command = STOP_COMMAND
             self._input_valid = False
@@ -829,15 +885,23 @@ class GamepadTeleopNode(Node):
             )
             return
 
+        if len(message.buttons) <= self.config.fixed_reverse_button:
+            self.get_logger().warning(
+                'Joy button array is too short for the LB fixed reverse; '
+                'LT/RT driving remains enabled.',
+                throttle_duration_sec=2.0,
+            )
+
         if self._has_motor_subscriber and not self._competitors:
             was_armed = self._arming_gate.armed
             self._arming_gate.observe(
                 mapped_input.lt_depth,
                 mapped_input.rt_depth,
+                mapped_input.fixed_reverse_pressed,
             )
             if self._arming_gate.armed and not was_armed:
                 self.get_logger().info(
-                    'Gamepad teleop armed after neutral LT/RT input.'
+                    'Gamepad teleop armed after neutral LT/RT/LB input.'
                 )
         self._command = mapped_input.command
         self._last_joy_monotonic = now
@@ -870,7 +934,7 @@ class GamepadTeleopNode(Node):
             return
         if not self._arming_gate.armed:
             self._publish_stop_for_reason(
-                'waiting for neutral LT/RT input to arm'
+                'waiting for neutral LT/RT/LB input to arm'
             )
             return
 

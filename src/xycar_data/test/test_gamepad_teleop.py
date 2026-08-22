@@ -127,6 +127,44 @@ def test_rt_maps_to_forward_speed():
     assert command == DriveCommand(0.0, 7.0)
 
 
+def test_lb_applies_fixed_speed_decrement_with_reverse_limit():
+    buttons = [0] * 11
+    buttons[9] = 1
+    config = GamepadConfig(
+        max_reverse_speed=10.0,
+        max_forward_speed=25.0,
+        fixed_reverse_speed=5.0,
+    )
+
+    neutral_triggers = map_joy_axes(
+        [0.25, 0.0, 0.0, 0.0, 0.0, 0.0],
+        config,
+        buttons,
+    )
+    full_forward = map_joy_axes(
+        [0.25, 0.0, 0.0, 0.0, 0.0, -1.0],
+        config,
+        buttons,
+    )
+    full_reverse = map_joy_axes(
+        [0.25, 0.0, 0.0, 0.0, -1.0, 0.0],
+        config,
+        buttons,
+    )
+
+    assert neutral_triggers == DriveCommand(-25.0, -5.0)
+    assert full_forward == DriveCommand(-25.0, 20.0)
+    assert full_reverse == DriveCommand(-25.0, -10.0)
+
+
+def test_short_button_array_leaves_trigger_mapping_unchanged():
+    command = map_joy_axes(
+        [0.0, 0.0, 0.0, 0.0, 0.0, -0.5],
+        buttons=[0] * 4,
+    )
+    assert command == DriveCommand(0.0, 3.5)
+
+
 def test_triggers_are_combined_for_partial_and_simultaneous_input():
     partial = map_joy_axes([0.0, 0.0, 0.0, 0.0, -0.4, -0.5])
     both_full = map_joy_axes([0.0, 0.0, 0.0, 0.0, -1.0, -1.0])
@@ -207,6 +245,7 @@ def test_custom_mapping_and_limits_are_supported():
         max_angle=30.0,
         max_reverse_speed=3.0,
         max_forward_speed=4.0,
+        fixed_reverse_speed=3.0,
     )
     command = map_joy_axes([-0.25, -0.5, -0.5], config)
     assert command == DriveCommand(-15.0, 1.25)
@@ -271,6 +310,7 @@ def test_signal_class_selection_rejects_short_or_duplicate_mapping():
         ('max_angle', math.inf),
         ('max_reverse_speed', -math.inf),
         ('max_forward_speed', math.nan),
+        ('fixed_reverse_speed', math.inf),
     ],
 )
 def test_non_finite_output_config_is_rejected(field, value):
@@ -282,6 +322,15 @@ def test_non_finite_output_config_is_rejected(field, value):
 def test_angle_above_normalized_range_is_rejected():
     config = GamepadConfig(max_angle=100.1)
     with pytest.raises(ValueError, match='max_angle must be in'):
+        map_joy_axes([0.0] * 6, config)
+
+
+def test_fixed_reverse_must_fit_reverse_limit():
+    config = GamepadConfig(
+        max_reverse_speed=4.0,
+        fixed_reverse_speed=5.0,
+    )
+    with pytest.raises(ValueError, match='must not exceed'):
         map_joy_axes([0.0] * 6, config)
 
 
@@ -319,6 +368,7 @@ def test_neutral_arming_gate_requires_neutral_again_after_disarm():
     gate = NeutralArmingGate(threshold=0.05)
 
     assert not gate.observe(0.0, 0.5)
+    assert not gate.observe(0.0, 0.0, fixed_reverse_pressed=True)
     assert gate.observe(0.05, 0.04)
 
     gate.disarm()
@@ -561,6 +611,8 @@ def test_normalized_collection_templates_are_versioned_and_strict(tmp_path):
 
     assert config['max_forward_speed'] == 25.0
     assert config['max_reverse_speed'] == 10.0
+    assert config['fixed_reverse_button'] == 9
+    assert config['fixed_reverse_speed'] == 5.0
     assert config['lidar_topic'] == '/scan'
     assert config['lidar_timeout_sec'] == pytest.approx(0.30)
     assert config['max_lidar_skew_sec'] == pytest.approx(0.20)

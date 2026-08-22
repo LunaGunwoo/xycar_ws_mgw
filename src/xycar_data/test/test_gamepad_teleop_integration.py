@@ -44,13 +44,26 @@ def _joy_message(
     b: bool = False,
     x: bool = False,
     y: bool = False,
+    lb: bool = False,
 ) -> Joy:
     message = Joy()
     # Callers provide 0..1 depth; the vehicle controller reports 0..-1.
     lt_axis = -lt
     rt_axis = -rt
     message.axes = [steering, 0.0, 0.0, 0.0, lt_axis, rt_axis]
-    message.buttons = [int(a), int(b), int(x), int(y)]
+    message.buttons = [
+        int(a),
+        int(b),
+        int(x),
+        int(y),
+        0,
+        0,
+        0,
+        0,
+        0,
+        int(lb),
+        0,
+    ]
     return message
 
 
@@ -325,10 +338,27 @@ def test_neutral_rearming_repeat_and_graph_fail_safes(ros_harness):
     ]
     assert len(forward_commands) >= 2
 
+    # LB applies a fixed weak reverse decrement while preserving steering.
+    commands.clear()
+    fixed_reverse = _joy_message(
+        steering=0.25,
+        lb=True,
+    )
+    _spin_for(harness, 0.10, fixed_reverse)
+    assert any(
+        command == pytest.approx((-25.0, -5.0))
+        for command in commands
+    )
+
     # Stale Joy input stops and disarms. A still-held trigger cannot resume.
     commands.clear()
-    _spin_for(harness, 0.20)
+    _spin_for(harness, 0.30)
     assert commands[-1] == pytest.approx((0.0, 0.0))
+    assert not teleop._arming_gate.armed
+    commands.clear()
+    _spin_for(harness, 0.15, _joy_message(lb=True))
+    assert commands
+    assert all(command[1] == 0.0 for command in commands)
     assert not teleop._arming_gate.armed
     commands.clear()
     _spin_for(harness, 0.15, held_forward)
@@ -485,6 +515,8 @@ def test_a_waits_for_forward_and_b_saves_all_frames_without_stopping(
     )
     assert metadata['recording']['image_format'] == 'jpeg'
     assert metadata['recording']['jpeg_quality'] == 95
+    assert metadata['gamepad']['fixed_reverse_button'] == 9
+    assert metadata['gamepad']['fixed_reverse_speed'] == 5.0
     assert metadata['steering_contract'] == {
         'schema_version': 1,
         'name': 'normalized_percent_v2',
