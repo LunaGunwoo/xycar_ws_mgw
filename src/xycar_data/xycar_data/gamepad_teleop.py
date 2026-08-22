@@ -320,11 +320,11 @@ def map_joy_input(
     )
 
     steering = _clamp(steering, -1.0, 1.0)
-    speed = (rt_depth * config.max_forward_speed) - (
-        lt_depth * config.max_reverse_speed
-    )
+    speed = rt_depth * config.max_forward_speed
     if fixed_reverse_pressed:
         speed -= config.fixed_reverse_speed
+    else:
+        speed -= lt_depth * config.max_reverse_speed
     speed = _clamp(
         speed,
         -config.max_reverse_speed,

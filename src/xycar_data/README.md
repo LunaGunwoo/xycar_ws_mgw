@@ -88,7 +88,7 @@ Gamepad profile이 controller와 teleop에 그대로 적용된다. 입력과 출
 | Gamepad 입력 | 변환 | 범위 |
 | --- | --- | --- |
 | 왼쪽 스틱 좌우 `axes[0]` | `angle = -100 * axes[0]` | `-100 ~ 100` |
-| LT `axes[4]` | `speed -= 10 * depth` | `0 ~ -10` |
+| LT `axes[4]` | LB release일 때 `speed -= 10 * depth` | `0 ~ -10` |
 | RT `axes[5]` | `speed += 25 * depth` | `0 ~ 25` |
 | LB `buttons[9]` hold | `speed -= 5` | 고정 감산 `5` |
 | A `buttons[0]` | 양수 속도 녹화 대기·시작 | — |
@@ -100,10 +100,10 @@ LT는 `axes[4]`, RT는 `axes[5]`다. 따라서 `trigger_axis_mode: negative`가
 depth `0`, `0.5`, `1`로 변환된다. LT와 RT는 합산하므로 둘을 끝까지 누르면
 speed는 `15`다. 두 트리거가 모두 `0`이면 speed만 0이 되고 angle은 왼쪽
 스틱을 계속 따라간다. LB는 SDL `game_controller_node`의 `buttons[9]`이며,
-누르는 동안 LT/RT 계산값에서 고정 `5`를 뺀다. 따라서 LB만 누르면 조향을
-유지한 약후진 `-5`, RT 최대와 함께 누르면 `25`에서 `20`이 된다. LT와 함께
-눌러도 최종 후진은 `max_reverse_speed`의 `-10`으로 제한된다. LB를 놓으면 즉시
-현재 LT/RT 계산값으로 돌아가며 누적 감속값은 남지 않는다.
+누르는 동안 LT 입력을 무시하고 RT 계산값에서 고정 `5`를 뺀다. 따라서 LB만
+누르거나 LB와 LT를 함께 누르면 조향을 유지한 약후진 `-5`, RT 최대와 함께
+누르면 `25`에서 `20`이 된다. LB+LT+RT 동시 입력도 LT를 무시해 `20`이다.
+LB를 놓으면 즉시 현재 LT/RT 계산값으로 돌아가며 누적 감속값은 남지 않는다.
 
 A를 누르고 있는 동안 녹화를 대기한다. 실제 `/xycar_motor`에 `speed > 0`이
 발행되는 순간 세션이 시작되며, 시작 전에 A를 놓으면 대기가 취소된다. 녹화

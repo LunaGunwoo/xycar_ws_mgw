@@ -26,7 +26,7 @@ gamepad_teleop:
     max_reverse_speed: 5.0
     max_forward_speed: 7.0
     # SDL game_controller_node maps LB to buttons[9]. While held, this
-    # constant decrement is subtracted from the trigger-derived speed.
+    # constant decrement replaces LT so simultaneous LB+LT uses LB only.
     fixed_reverse_button: 9
     fixed_reverse_speed: 5.0
 

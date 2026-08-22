@@ -127,7 +127,7 @@ def test_rt_maps_to_forward_speed():
     assert command == DriveCommand(0.0, 7.0)
 
 
-def test_lb_applies_fixed_speed_decrement_with_reverse_limit():
+def test_lb_applies_fixed_decrement_and_ignores_lt():
     buttons = [0] * 11
     buttons[9] = 1
     config = GamepadConfig(
@@ -151,10 +151,16 @@ def test_lb_applies_fixed_speed_decrement_with_reverse_limit():
         config,
         buttons,
     )
+    both_triggers = map_joy_axes(
+        [0.25, 0.0, 0.0, 0.0, -1.0, -1.0],
+        config,
+        buttons,
+    )
 
     assert neutral_triggers == DriveCommand(-25.0, -5.0)
     assert full_forward == DriveCommand(-25.0, 20.0)
-    assert full_reverse == DriveCommand(-25.0, -10.0)
+    assert full_reverse == DriveCommand(-25.0, -5.0)
+    assert both_triggers == DriveCommand(-25.0, 20.0)
 
 
 def test_short_button_array_leaves_trigger_mapping_unchanged():
