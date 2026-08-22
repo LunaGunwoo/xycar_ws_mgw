@@ -18,10 +18,12 @@ tf_node = Node(
 def generate_launch_description():
 
     config_path = os.path.join(
-        get_package_share_directory("xycar_imu"), "config", "imu.yaml"
+        get_package_share_directory("xycar_imu"), "config", "xycar_imu.yaml"
     )
         
-    rviz_path = os.path.join(os.getenv("HOME"), "xycar_ws", "src", "xycar_device", "xycar_imu", "rviz", "view_imu.rviz")
+    rviz_path = os.path.join(
+        get_package_share_directory("xycar_imu"), "rviz", "view_imu.rviz"
+    )
 
     imu_node = Node(
         package="xycar_imu", executable="imu_node", output="screen",
@@ -34,4 +36,3 @@ def generate_launch_description():
     )
 
     return LaunchDescription([imu_node, tf_node, rviz_node])
-

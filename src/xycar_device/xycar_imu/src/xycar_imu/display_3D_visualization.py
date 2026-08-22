@@ -7,7 +7,7 @@ import math
 import wx
 
 from sensor_msgs.msg import Imu
-from transforms3d.euler import quat2euler as euler_from_quaternion
+from xycar_imu.orientation import euler_from_quaternion
 
 rad2degrees = 180.0 / math.pi
 precision = 2  # round to this number of digits

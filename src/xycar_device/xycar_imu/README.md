@@ -61,23 +61,44 @@ Copy that file to ``xycar_imu.yaml`` as follows:
 
 Then, edit ``xycar_imu.yaml`` as needed
 
+The provided configuration publishes all data exposed by the bundled firmware:
+
+* ``imu`` (``sensor_msgs/msg/Imu``): orientation, angular velocity, and linear acceleration
+* ``mag`` (``sensor_msgs/msg/MagneticField``): firmware-reported magnetic field,
+  converted from milligauss to tesla
+
+Set ``publish_magnetometer`` to ``false`` if the separate magnetic-field topic is not needed.
+The provided magnetometer limits are generic defaults, not calibration values for a specific
+board. Treat the default ``mag`` values as relative measurements and calibrate the installed IMU
+before using their absolute magnitude or heading for navigation.
+
 Launch
 ------
+Publisher:
+
+	$ ros2 launch xycar_imu xycar_imu.launch.py
+
 Publisher and 3D visualization:
 
-	$ ros2 launch xycar_imu razor-pub-and-display.launch.py
+	$ ros2 launch xycar_imu xycar_imu_and_display.launch.py
 
-Publisher only:
-
-	$ ros2 launch xycar_imu razor-pub.launch.py
-
-Publisher only with diagnostics:
+3D visualization with diagnostics tools (publisher must already be running):
 
 	$ ros2 launch xycar_imu razor-pub-diags.launch.py
 
 3D visualization only:
 
-	$ ros2 launch xycar_imu razor-display.launch.py
+	$ ros2 launch xycar_imu xycar_imu_display.launch.py
+
+Publisher with RViz:
+
+	$ ros2 launch xycar_imu xycar_imu_viewer.launch.py
+
+The publisher and visualization executables can also be run directly:
+
+	$ ros2 run xycar_imu imu_node
+
+	$ ros2 run xycar_imu display_3D_visualization_node
 
 
 Calibrate

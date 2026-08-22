@@ -11,8 +11,8 @@ import time
 # from time import time
 from sensor_msgs.msg import Imu
 from sensor_msgs.msg import MagneticField
-from transforms3d.euler import euler2quat as quaternion_from_euler
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
+from xycar_imu.orientation import quaternion_from_euler
 
 degrees2rad = math.pi / 180.0
 
@@ -54,7 +54,7 @@ class RazorImuDriver(Node):
         # self.declare_parameter('acceleration_covariance').value
         imu_msg.header.frame_id = self.declare_parameter('frame_header', 'base_imu_link').value
 
-        publish_magnetometer = self.declare_parameter('publish_magnetometer', False).value
+        publish_magnetometer = self.declare_parameter('publish_magnetometer', True).value
 
         if publish_magnetometer:
             pub_mag = self.create_publisher(MagneticField, 'mag', 1)

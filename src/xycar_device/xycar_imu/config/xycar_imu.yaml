@@ -18,7 +18,7 @@ imu_node:
     magn_z_min: -600.0
     magn_z_max: 600.0
 
-    publish_magnetometer: false
+    publish_magnetometer: true
 
     # extended mag calibration
     calibration_magn_use_extended: false

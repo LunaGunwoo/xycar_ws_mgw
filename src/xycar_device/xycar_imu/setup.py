@@ -26,6 +26,10 @@ setup(
             os.path.join(SHARE_DIR, 'config'),
             glob(os.path.join('config', '*.yaml')),
         ),
+        (
+            os.path.join(SHARE_DIR, 'rviz'),
+            glob(os.path.join('rviz', '*.rviz')),
+        ),
     ],
     py_modules=[],
     zip_safe=True,
@@ -33,7 +37,6 @@ setup(
         'setuptools',
         'pyserial',
         'pyyaml',
-        'transforms3d',
         'vpython',
         'wxPython'
     ],

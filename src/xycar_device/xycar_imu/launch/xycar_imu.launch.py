@@ -7,7 +7,7 @@ from launch_ros.actions import Node
 def generate_launch_description():
 
     config_path = os.path.join(
-        get_package_share_directory("xycar_imu"), "config", "imu.yaml"
+        get_package_share_directory("xycar_imu"), "config", "xycar_imu.yaml"
     )
         
     imu_node = Node(
@@ -16,4 +16,3 @@ def generate_launch_description():
     )
 
     return LaunchDescription([imu_node])
-

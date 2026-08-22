@@ -29,11 +29,8 @@
     <depend>python-serial</depend>
     <depend>vpython</depend>
     <depend>wxPython</depend>
-    <depend>transforms3d</depend>
-
     <export>
         <build_type>ament_python</build_type>
     </export>
 </package>
-
 
