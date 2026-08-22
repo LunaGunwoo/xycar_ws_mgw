@@ -56,6 +56,36 @@ class SignalReading:
     confidence: float
 
 
+@dataclass(frozen=True)
+class ImageBounds:
+    """Inclusive-exclusive pixel bounds for a frame crop."""
+
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+
+
+@dataclass(frozen=True)
+class SignalInspection:
+    """Detailed classifier result used by passive diagnostic viewers."""
+
+    reading: SignalReading
+    bbox: DetectionBox
+    crop_bounds: ImageBounds
+    probabilities: tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
+class TrafficSignalLatchSnapshot:
+    """Read-only state of the deployed two-read signal vote."""
+
+    candidate: SignalClass
+    candidate_reads: int
+    required_reads: int
+    stop_latched: bool
+
+
 class _OnnxSession(Protocol):
     def run(self, output_names, inputs): ...
 
@@ -206,6 +236,11 @@ class TrafficClassifierDetector:
         self._crop_padding = float(crop_padding)
 
     def read_signal(self, bgr_frame: np.ndarray) -> SignalReading | None:
+        inspection = self.inspect_signal(bgr_frame)
+        return None if inspection is None else inspection.reading
+
+    def inspect_signal(self, bgr_frame: np.ndarray) -> SignalInspection | None:
+        """Return the exact runtime reading plus GUI diagnostic details."""
         _validate_bgr_frame(bgr_frame)
         height, width = bgr_frame.shape[:2]
         resized = cv2.resize(bgr_frame, (640, 640))
@@ -225,7 +260,11 @@ class TrafficClassifierDetector:
         )
         if box is None:
             return None
-        crop = self._crop(bgr_frame, box)
+        crop_bounds = self._crop_bounds(bgr_frame, box)
+        crop = bgr_frame[
+            crop_bounds.y1:crop_bounds.y2,
+            crop_bounds.x1:crop_bounds.x2,
+        ]
         classifier_tensor = self._classifier_tensor(crop)
         try:
             outputs = self._classifier_session.run(
@@ -236,25 +275,34 @@ class TrafficClassifierDetector:
             raise TrafficLightError(
                 f'traffic classifier ONNX inference failed: {exc}'
             ) from exc
-        signal_class, probability = _decode_classifier_logits(outputs)
-        return SignalReading(
+        signal_class, probabilities = _decode_classifier_logits(outputs)
+        reading = SignalReading(
             signal_class=signal_class,
-            probability=probability,
+            probability=max(probabilities),
             bbox_width=box.width,
             confidence=box.confidence,
         )
+        return SignalInspection(
+            reading=reading,
+            bbox=box,
+            crop_bounds=crop_bounds,
+            probabilities=probabilities,
+        )
 
-    def _crop(self, frame: np.ndarray, box: DetectionBox) -> np.ndarray:
+    def _crop_bounds(
+        self,
+        frame: np.ndarray,
+        box: DetectionBox,
+    ) -> ImageBounds:
         pad_x = int(box.width * self._crop_padding)
         pad_y = int(box.height * self._crop_padding)
         x1 = max(0, box.x - pad_x)
         y1 = max(0, box.y - pad_y)
         x2 = min(frame.shape[1], box.x + box.width + pad_x)
         y2 = min(frame.shape[0], box.y + box.height + pad_y)
-        crop = frame[y1:y2, x1:x2]
-        if crop.size == 0:
+        if x2 <= x1 or y2 <= y1:
             raise TrafficLightError('traffic classifier crop is empty')
-        return crop
+        return ImageBounds(x1=x1, y1=y1, x2=x2, y2=y2)
 
     def _classifier_tensor(self, crop: np.ndarray) -> np.ndarray:
         resized = cv2.resize(crop, (96, 48), interpolation=cv2.INTER_AREA)
@@ -268,7 +316,9 @@ class TrafficClassifierDetector:
         return tensor
 
 
-def _decode_classifier_logits(outputs) -> tuple[SignalClass, float]:
+def _decode_classifier_logits(
+    outputs,
+) -> tuple[SignalClass, tuple[float, float, float, float]]:
     if not isinstance(outputs, (list, tuple)) or len(outputs) != 1:
         raise TrafficLightError('traffic classifier must return exactly one output')
     logits = outputs[0]
@@ -287,7 +337,8 @@ def _decode_classifier_logits(outputs) -> tuple[SignalClass, float]:
     if not np.isfinite(probabilities).all():
         raise TrafficLightError('traffic classifier probabilities are invalid')
     index = int(np.argmax(probabilities))
-    return TrafficClassifierDetector._CLASS_ORDER[index], float(probabilities[index])
+    decoded = tuple(float(value) for value in probabilities)
+    return TrafficClassifierDetector._CLASS_ORDER[index], decoded
 
 
 class TrafficLampLatch:
@@ -417,6 +468,15 @@ class TrafficSignalLatch:
     @property
     def stop_latched(self) -> bool:
         return self._stop_latched
+
+    @property
+    def snapshot(self) -> TrafficSignalLatchSnapshot:
+        return TrafficSignalLatchSnapshot(
+            candidate=self._candidate,
+            candidate_reads=self._candidate_reads,
+            required_reads=self._consecutive_reads,
+            stop_latched=self._stop_latched,
+        )
 
     def reset(self) -> None:
         self._candidate = SignalClass.UNKNOWN

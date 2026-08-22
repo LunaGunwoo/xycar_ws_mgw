@@ -518,6 +518,53 @@ cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source inst
 확인한다. 성공한 좌회전을 다시 실행하려면 node를 재시작한다. 오프라인 성공은
 실차 주행 적합성을 보장하지 않는다.
 
+### 수동 신호등 예측 GUI
+
+`traffic_light_viewer`는 schema v4 bundle에서 신호등 YOLO와 CNN classifier만
+load한다. Base·shortcut 정책 container와 socket을 시작하지 않고 Joy를 구독하거나
+ROS topic을 publish하지 않는다. 따라서 `/xycar_motor` endpoint와 motion gate가
+없다. GUI에는 추론에 실제 사용한 매 3번째 frame, YOLO bbox와 padding crop,
+4개 raw class 확률, bbox 폭 `45..200` gate, `2/2` vote, stop latch와 최종
+`UNKNOWN/RED/LEFT/STRAIGHT`를 함께 표시한다. `Reset vote / stop latch`는 현재
+진단 session을 초기화하며 frame이나 결과를 저장하지 않는다.
+
+Jetson local GNOME desktop 또는 RDP 공유 화면의 terminal에서 다음처럼 실행한다.
+기본 launch는 `/dev/videoCAM`을 여므로 매 실행 직전 camera 사용 승인을 받고 다른
+camera node가 없는지 확인한다. 이 진단에는 motor bridge를 시작하지 않는다.
+
+```bash
+cd /home/xytron/xycar_ws_mgw
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+export ROS_DOMAIN_ID=7
+export ROS_NAMESPACE=xycar
+export ROS_LOCALHOST_ONLY=1
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+ros2 launch xycar_ai_drive traffic_light_viewer.launch.py \
+  bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-yolo-cls-tl45-votes2-every3-45sessions-20260822 \
+  use_camera:=true
+```
+
+이미 승인받아 실행 중인 `/image_raw` publisher가 있을 때는 camera device를 다시
+열지 않도록 `use_camera:=false`를 쓴다. 이 mode도 같은 host NumPy `1.26.4`,
+ONNX Runtime `1.24.0`, CUDA→CPU provider 순서와 bundle checksum을 검사한다.
+
+```bash
+ros2 launch xycar_ai_drive traffic_light_viewer.launch.py \
+  bundle_id:=traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-yolo-cls-tl45-votes2-every3-45sessions-20260822 \
+  use_camera:=false
+```
+
+launch 없이 기존 `/image_raw`만 구독할 때는 bundle directory를 직접 지정한다. 이
+명령은 camera driver도 시작하지 않으며 topic publisher가 없으면 대기 화면을
+유지한다.
+
+```bash
+ros2 run xycar_ai_drive traffic_light_viewer --ros-args \
+  -p bundle_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-yolo-cls-tl45-votes2-every3-45sessions-20260822 \
+  -p camera_topic:=/image_raw
+```
+
 wrapper 내부 경계를 각각 진단할 때만 다음 명령을 사용한다. 첫 명령은 container
 안에서 두 CUDA policy server를 띄우는 entry point다. host launch와 node 직접
 실행은 같은 bundle로 두 socket이 이미 준비된 경우에만 유효하다. 뒤 두 명령은

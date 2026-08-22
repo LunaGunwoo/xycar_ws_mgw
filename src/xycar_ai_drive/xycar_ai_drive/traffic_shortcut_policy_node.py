@@ -37,14 +37,11 @@ from xycar_ai_drive.front_cam_policy_node import (
 from xycar_ai_drive.policy_ipc import UnixSocketPolicyClient
 from xycar_ai_drive.traffic_light_detector import (
     LampAction,
-    TrafficClassifierDetector,
     TrafficLampLatch,
-    TrafficLightDetector,
     TrafficSignalLatch,
 )
+from xycar_ai_drive.traffic_light_runtime import create_onnx_detector
 from xycar_ai_drive.traffic_shortcut_artifact import (
-    EXPECTED_NUMPY_VERSION,
-    EXPECTED_ONNXRUNTIME_VERSION,
     TrafficShortcutBundle,
     load_traffic_shortcut_bundle,
 )
@@ -119,7 +116,7 @@ class TrafficShortcutPolicyNode(Node):
         self._detector = (
             detector_factory(self.bundle)
             if detector_factory is not None
-            else _create_onnx_detector(self.bundle)
+            else create_onnx_detector(self.bundle)
         )
         self._base_policy = self._create_policy_client(
             policy_client_factory,
@@ -1087,87 +1084,6 @@ class TrafficShortcutPolicyNode(Node):
             if close is not None:
                 close()
         self.publish_stop_burst()
-
-
-def _create_onnx_detector(
-    bundle: TrafficShortcutBundle,
-) -> TrafficLightDetector | TrafficClassifierDetector:
-    if np.__version__ != EXPECTED_NUMPY_VERSION:
-        raise ValueError(
-            f'host NumPy must be {EXPECTED_NUMPY_VERSION}, got {np.__version__}'
-        )
-    try:
-        import onnxruntime as ort
-    except ImportError as exc:
-        raise ValueError('onnxruntime is required for traffic detection') from exc
-    if ort.__version__ != EXPECTED_ONNXRUNTIME_VERSION:
-        raise ValueError(
-            f'host ONNX Runtime must be {EXPECTED_ONNXRUNTIME_VERSION}, '
-            f'got {ort.__version__}'
-        )
-    session = ort.InferenceSession(
-        str(bundle.detector.model_path),
-        providers=list(bundle.providers),
-    )
-    if tuple(session.get_providers()) != bundle.providers:
-        raise ValueError(
-            'traffic ONNX active providers do not match CUDA then CPU contract'
-        )
-    inputs = session.get_inputs()
-    outputs = session.get_outputs()
-    if (
-        len(inputs) != 1
-        or inputs[0].name != 'images'
-        or inputs[0].type != 'tensor(float)'
-        or list(inputs[0].shape) != [1, 3, 640, 640]
-    ):
-        raise ValueError('traffic ONNX input metadata mismatch')
-    if (
-        len(outputs) != 1
-        or outputs[0].name != 'output0'
-        or outputs[0].type != 'tensor(float)'
-        or list(outputs[0].shape) != [1, 5, 8400]
-    ):
-        raise ValueError('traffic ONNX output metadata mismatch')
-    if bundle.detector.mode == 'hsv_lamp':
-        return TrafficLightDetector(
-            session=session,
-            confidence_threshold=bundle.detector.confidence_threshold,
-            percentile=bundle.detector.percentile,
-        )
-    classifier_path = bundle.detector.classifier_model_path
-    if classifier_path is None or bundle.detector.classifier_crop_padding is None:
-        raise ValueError('classifier bundle is missing classifier contract')
-    classifier = ort.InferenceSession(
-        str(classifier_path),
-        providers=list(bundle.providers),
-    )
-    if tuple(classifier.get_providers()) != bundle.providers:
-        raise ValueError(
-            'traffic classifier active providers do not match CUDA then CPU contract'
-        )
-    classifier_inputs = classifier.get_inputs()
-    classifier_outputs = classifier.get_outputs()
-    if (
-        len(classifier_inputs) != 1
-        or classifier_inputs[0].name != 'image'
-        or classifier_inputs[0].type != 'tensor(float)'
-        or list(classifier_inputs[0].shape) != [1, 3, 48, 96]
-    ):
-        raise ValueError('traffic classifier ONNX input metadata mismatch')
-    if (
-        len(classifier_outputs) != 1
-        or classifier_outputs[0].name != 'logits'
-        or classifier_outputs[0].type != 'tensor(float)'
-        or list(classifier_outputs[0].shape) != [1, 4]
-    ):
-        raise ValueError('traffic classifier ONNX output metadata mismatch')
-    return TrafficClassifierDetector(
-        yolo_session=session,
-        classifier_session=classifier,
-        confidence_threshold=bundle.detector.confidence_threshold,
-        crop_padding=bundle.detector.classifier_crop_padding,
-    )
 
 
 def main(args=None) -> None:

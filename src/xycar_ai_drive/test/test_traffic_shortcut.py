@@ -12,17 +12,24 @@ import pytest
 from xycar_ai_drive.artifact import ArtifactContractError
 from xycar_ai_drive.traffic_light_detector import (
     DetectionBox,
+    ImageBounds,
     LampAction,
     LampReading,
     SignalClass,
+    SignalInspection,
     SignalReading,
     TrafficClassifierDetector,
     TrafficLampLatch,
     TrafficLightDetector,
     TrafficLightError,
     TrafficSignalLatch,
+    TrafficSignalLatchSnapshot,
     decode_detection_box,
     lamp_scores,
+)
+from xycar_ai_drive.traffic_light_viewer import (
+    TrafficLightViewerResult,
+    draw_signal_overlay,
 )
 from xycar_ai_drive.traffic_shortcut_fsm import (
     MissionState,
@@ -158,12 +165,33 @@ def test_classifier_detector_uses_yolo_box_padding_and_cnn_argmax():
     )
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
     frame[215:265, 255:385] = (10, 20, 30)
+    inspection = detector.inspect_signal(frame)
     reading = detector.read_signal(frame)
 
+    assert inspection is not None
     assert reading is not None
+    assert reading == inspection.reading
     assert reading.signal_class == SignalClass.LEFT_GREEN
     assert reading.bbox_width == 100
     assert reading.probability > 0.8
+    assert inspection.bbox == DetectionBox(
+        x=270,
+        y=165,
+        width=100,
+        height=30,
+        confidence=pytest.approx(0.9),
+    )
+    assert inspection.crop_bounds == ImageBounds(
+        x1=255,
+        y1=161,
+        x2=385,
+        y2=199,
+    )
+    assert len(inspection.probabilities) == 4
+    assert sum(inspection.probabilities) == pytest.approx(1.0)
+    assert inspection.probabilities[2] == pytest.approx(
+        reading.probability
+    )
     tensor = classifier.inputs[0]['image']
     assert tensor.shape == (1, 3, 48, 96)
     assert tensor.dtype == np.float32
@@ -226,6 +254,45 @@ def test_classifier_detector_rejects_bad_logits_and_empty_crop():
         )
 
 
+def test_viewer_overlay_is_bound_to_the_inspected_frame():
+    frame = np.zeros((100, 160, 3), dtype=np.uint8)
+    reading = SignalReading(
+        signal_class=SignalClass.LEFT_GREEN,
+        probability=0.8,
+        bbox_width=50,
+        confidence=0.9,
+    )
+    inspection = SignalInspection(
+        reading=reading,
+        bbox=DetectionBox(10, 10, 50, 20, 0.9),
+        crop_bounds=ImageBounds(5, 5, 65, 35),
+        probabilities=(0.05, 0.05, 0.8, 0.1),
+    )
+    result = TrafficLightViewerResult(
+        frame=frame,
+        frame_sequence=3,
+        source_monotonic=1.0,
+        completed_monotonic=1.01,
+        inference_ms=10.0,
+        inspection=inspection,
+        width_gate_accepted=True,
+        final_action=LampAction.UNKNOWN,
+        latch_snapshot=TrafficSignalLatchSnapshot(
+            candidate=SignalClass.LEFT_GREEN,
+            candidate_reads=1,
+            required_reads=2,
+            stop_latched=False,
+        ),
+    )
+
+    overlay = draw_signal_overlay(result)
+
+    assert overlay.shape == frame.shape
+    assert not np.shares_memory(overlay, frame)
+    assert np.count_nonzero(overlay) > 0
+    assert np.count_nonzero(frame) == 0
+
+
 def test_lamp_width_gate_five_votes_priority_and_latch_clearing():
     latch = TrafficLampLatch()
     red = _reading((255, 10, 220, 230), width=45)
@@ -280,17 +347,36 @@ def test_legacy_lamp_votes_keep_red_three_and_other_actions_immediate():
 
 def test_classifier_latch_requires_same_raw_class_and_retains_stop():
     latch = TrafficSignalLatch()
-    assert latch.observe(_signal(SignalClass.RED, width=44)) == LampAction.UNKNOWN
+    assert (
+        latch.observe(_signal(SignalClass.RED, width=44))
+        == LampAction.UNKNOWN
+    )
+    assert latch.snapshot.candidate == SignalClass.UNKNOWN
+    assert latch.snapshot.candidate_reads == 0
     assert latch.observe(_signal(SignalClass.RED)) == LampAction.UNKNOWN
+    assert latch.snapshot.candidate == SignalClass.RED
+    assert latch.snapshot.candidate_reads == 1
+    assert latch.snapshot.required_reads == 2
     assert latch.observe(_signal(SignalClass.YELLOW)) == LampAction.UNKNOWN
     assert latch.observe(_signal(SignalClass.YELLOW)) == LampAction.RED
     assert latch.stop_latched
+    assert latch.snapshot.stop_latched
     assert latch.observe(None) == LampAction.RED
     assert latch.observe(_signal(SignalClass.LEFT_GREEN)) == LampAction.RED
     assert latch.observe(_signal(SignalClass.LEFT_GREEN)) == LampAction.LEFT
     assert not latch.stop_latched
-    assert latch.observe(_signal(SignalClass.STRAIGHT_GREEN)) == LampAction.UNKNOWN
-    assert latch.observe(_signal(SignalClass.STRAIGHT_GREEN)) == LampAction.STRAIGHT
+    assert (
+        latch.observe(_signal(SignalClass.STRAIGHT_GREEN))
+        == LampAction.UNKNOWN
+    )
+    assert (
+        latch.observe(_signal(SignalClass.STRAIGHT_GREEN))
+        == LampAction.STRAIGHT
+    )
+    latch.reset()
+    assert latch.snapshot.candidate == SignalClass.UNKNOWN
+    assert latch.snapshot.candidate_reads == 0
+    assert not latch.snapshot.stop_latched
 
 
 def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
@@ -557,6 +643,28 @@ def test_traffic_shortcut_launch_ties_gamepad_to_hold_gate():
 
     assert "'require_gamepad_hold': ParameterValue(" in launch_text
     assert 'use_gamepad,' in launch_text
+
+
+def test_traffic_light_viewer_launch_has_no_motion_endpoints():
+    package_root = Path(__file__).parents[1]
+    launch_text = (
+        package_root / 'launch' / 'traffic_light_viewer.launch.py'
+    ).read_text(encoding='utf-8')
+    viewer_text = (
+        package_root
+        / 'xycar_ai_drive'
+        / 'traffic_light_viewer.py'
+    ).read_text(encoding='utf-8')
+
+    assert "executable='traffic_light_viewer'" in launch_text
+    assert "'use_camera'" in launch_text
+    assert 'xycar_cam.launch.py' in launch_text
+    assert 'allow_motion' not in launch_text
+    assert 'game_controller_node' not in launch_text
+    assert 'traffic_shortcut_policy' not in launch_text
+    assert 'ExecuteProcess' not in launch_text
+    assert '.create_publisher(' not in viewer_text
+    assert 'UnixSocketPolicyClient' not in viewer_text
 
 
 def test_shadow_bundle_requires_verified_paired_server_identity():

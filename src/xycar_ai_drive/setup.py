@@ -70,6 +70,10 @@ setup(
                 'live_warp_tuner = '
                 'xycar_ai_drive.live_warp_tuner:main'
             ),
+            (
+                'traffic_light_viewer = '
+                'xycar_ai_drive.traffic_light_viewer:main'
+            ),
         ],
     },
 )
