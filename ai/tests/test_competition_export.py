@@ -34,6 +34,7 @@ from xycar_ai.export_traffic_shortcut_bundle import (
     SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    SPEED35_INITIAL_WAIT_FRESH5_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     _bundle_manifest,
 )
 from xycar_ai.steering_contract import steering_contract_mapping
@@ -384,4 +385,53 @@ def test_human_bbox_traffic_bundle_manifests_preserve_models_and_version_votes(
     assert initial_stop_once['mission']['red_cancels_shortcut'] is False
     assert 'red_stop_yolo_missing_release_frames' not in (
         initial_stop_once['mission']
+    )
+
+    initial_wait_fresh5 = _bundle_manifest(
+        artifact_id=(
+            SPEED35_INITIAL_WAIT_FRESH5_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+        schema_version=15,
+        consecutive_signal_reads_by_action=(5, 5, 5),
+        base_artifact=base,
+        shortcut_artifact=shortcut,
+        shortcut_artifact_id=EXPANDED_SHORTCUT_ID,
+        traffic_classifier=tmp_path / 'classifier.onnx',
+    )
+
+    assert initial_wait_fresh5['detector'] == adaptive_detector
+    assert initial_wait_fresh5['signal_vote'] == {
+        'raw_classes': ['STOP', 'STRAIGHT', 'LEFT'],
+        'consecutive_reads_by_raw_class': {
+            'STOP': 5,
+            'STRAIGHT': 5,
+            'LEFT': 5,
+        },
+        'unknown_behavior': 'reset_candidate',
+        'different_raw_class_behavior': 'restart_candidate_at_one',
+        'stop_classes': ['STOP'],
+        'stop_vote_behavior': 'only_while_initial_stop_armed',
+        'post_initial_stop_behavior': 'ignore_stop',
+        'navigation_actions': ['LEFT', 'STRAIGHT'],
+        'control_vote_source': 'fresh_yolo_classifier_only',
+        'cached_classifier_behavior': 'diagnostics_only',
+    }
+    assert initial_wait_fresh5['mission']['initial_stop'] == {
+        'gamepad_activation': 'lb_held_on_a_enable_wait_for_signal',
+        'headless_activation': 'wait_for_first_valid_signal',
+        'stop_consecutive_reads': 5,
+        'clear_classes': ['STRAIGHT', 'LEFT'],
+        'clear_consecutive_reads': 5,
+        'clear_different_class_behavior': 'restart_candidate_at_one',
+        'unknown_or_missing_behavior': 'reset_candidate_retain_stop',
+        'post_clear_action_by_class': {
+            'STRAIGHT': 'BASE',
+            'LEFT': 'SHORTCUT',
+        },
+        'post_clear_stop_behavior': 'ignore',
+        'ready_behavior': 'log_once_on_first_valid_fresh_class',
+    }
+    assert initial_wait_fresh5['mission']['red_cancels_shortcut'] is False
+    assert 'red_stop_yolo_missing_release_frames' not in (
+        initial_wait_fresh5['mission']
     )

@@ -15,6 +15,7 @@ from xycar_ai_drive.traffic_light_detector import (
     ImageBounds,
     InitialStopPhase,
     InitialStopSignalLatch,
+    InitialWaitSignalLatch,
     LetterboxTransform,
     LampAction,
     LampReading,
@@ -31,6 +32,7 @@ from xycar_ai_drive.traffic_light_detector import (
     decode_detection_box,
     lamp_scores,
     letterbox_640_bgr_frame,
+    should_update_signal_vote,
 )
 from xycar_ai_drive.traffic_light_viewer import (
     TrafficLightViewerNode,
@@ -55,6 +57,7 @@ from xycar_ai_drive.traffic_shortcut_artifact import (
     EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    EXPECTED_SPEED35_INITIAL_WAIT_FRESH5_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID,
     EXPECTED_SHORTCUT_ARTIFACT_ID,
@@ -583,6 +586,89 @@ def test_initial_stop_once_fsm_arms_waits_and_ignores_later_red():
     ).state == MissionState.SWITCH_TO_SHORTCUT
 
 
+def test_initial_wait_latch_votes_only_fresh_same_class_five_times():
+    latch = InitialWaitSignalLatch(
+        bbox_width_min=40,
+        bbox_width_max=225,
+        consecutive_reads=5,
+    )
+    latch.reset(initial_stop_armed=True, wait_for_signal=True)
+    left = _signal(SignalClass.LEFT)
+    straight = _signal(SignalClass.STRAIGHT)
+    stop = _signal(SignalClass.STOP)
+
+    for _ in range(30):
+        assert not should_update_signal_vote(
+            reading_observed=True,
+            detector_ran=False,
+            fresh_yolo_only=True,
+        )
+    assert latch.snapshot.candidate_reads == 0
+    assert latch.snapshot.phase == InitialStopPhase.WAIT_FOR_SIGNAL
+
+    for step in range(4):
+        assert should_update_signal_vote(
+            reading_observed=True,
+            detector_ran=True,
+            fresh_yolo_only=True,
+        )
+        assert latch.observe(stop) == LampAction.RED
+        assert latch.snapshot.candidate_reads == step + 1
+    assert latch.observe(straight) == LampAction.RED
+    assert latch.snapshot.candidate == SignalClass.STRAIGHT
+    assert latch.snapshot.candidate_reads == 1
+    assert latch.observe(None) == LampAction.RED
+    assert latch.snapshot.candidate_reads == 0
+
+    for _ in range(4):
+        assert latch.observe(stop) == LampAction.RED
+    assert latch.snapshot.phase == InitialStopPhase.WAIT_FOR_SIGNAL
+    assert latch.observe(stop) == LampAction.RED
+    assert latch.snapshot.phase == InitialStopPhase.STOPPED
+    for _ in range(4):
+        assert latch.observe(left) == LampAction.RED
+    assert latch.observe(left) == LampAction.LEFT
+    assert latch.snapshot.phase == InitialStopPhase.NAVIGATION
+
+    assert latch.observe(stop) == LampAction.UNKNOWN
+    assert latch.snapshot.stop_ignored
+    for _ in range(4):
+        assert latch.observe(straight) == LampAction.UNKNOWN
+    assert latch.observe(straight) == LampAction.STRAIGHT
+
+
+def test_initial_wait_fsm_stops_then_routes_confirmed_left_directly():
+    fsm = TrafficShortcutFsm(
+        one_shot_initial_stop=True,
+        initial_left_direct_shortcut=True,
+    )
+    fsm.enable(initial_stop_armed=True, wait_for_signal=True)
+    assert fsm.on_frame(
+        LampAction.UNKNOWN,
+        now_monotonic=0.0,
+    ).publish_stop
+    direct_left = fsm.on_frame(LampAction.LEFT, now_monotonic=0.1)
+    assert direct_left.state == MissionState.SWITCH_TO_SHORTCUT
+    assert direct_left.publish_stop
+    assert fsm.on_frame(
+        LampAction.LEFT,
+        now_monotonic=0.2,
+    ).policy == PolicyChoice.SHORTCUT
+
+    fsm.disable()
+    fsm.enable(initial_stop_armed=True, wait_for_signal=True)
+    straight = fsm.on_frame(LampAction.STRAIGHT, now_monotonic=0.3)
+    assert straight.state == MissionState.BASE
+    assert straight.policy == PolicyChoice.BASE
+
+    fsm.disable()
+    fsm.enable()
+    assert fsm.on_frame(
+        LampAction.RED,
+        now_monotonic=0.4,
+    ).policy == PolicyChoice.BASE
+
+
 def test_classifier_detector_rejects_bad_logits_and_empty_crop():
     yolo = _FakeOnnxSession(
         _output_with_candidates((320.0, 240.0, 100.0, 40.0, 0.9))
@@ -1001,6 +1087,41 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
             EXPECTED_SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
         ),
     ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    initial_wait_fresh5_vote = {
+        'raw_classes': ['STOP', 'STRAIGHT', 'LEFT'],
+        'consecutive_reads_by_raw_class': {
+            'STOP': 5,
+            'STRAIGHT': 5,
+            'LEFT': 5,
+        },
+        'unknown_behavior': 'reset_candidate',
+        'different_raw_class_behavior': 'restart_candidate_at_one',
+        'stop_classes': ['STOP'],
+        'stop_vote_behavior': 'only_while_initial_stop_armed',
+        'post_initial_stop_behavior': 'ignore_stop',
+        'navigation_actions': ['LEFT', 'STRAIGHT'],
+        'control_vote_source': 'fresh_yolo_classifier_only',
+        'cached_classifier_behavior': 'diagnostics_only',
+    }
+    assert _load_signal_vote_contract(
+        {'signal_vote': initial_wait_fresh5_vote},
+        schema_version=15,
+        artifact_id=(
+            EXPECTED_SPEED35_INITIAL_WAIT_FRESH5_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == (5, 5, 5)
+    assert _expected_shortcut_artifact_id(
+        schema_version=15,
+        artifact_id=(
+            EXPECTED_SPEED35_INITIAL_WAIT_FRESH5_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert _expected_base_artifact_id(
+        schema_version=15,
+        artifact_id=(
+            EXPECTED_SPEED35_INITIAL_WAIT_FRESH5_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
     with pytest.raises(ArtifactContractError, match='signal vote'):
         _load_signal_vote_contract(
             {
@@ -1105,11 +1226,95 @@ def test_signal_status_log_changes_immediately_and_heartbeats_at_two_hz():
         candidate_reads=7,
         required_reads=15,
         stop_status='IGNORED',
+        vote_updated=False,
     )
     assert line == (
         'SIGNAL raw=LEFT cnn=90.0% yolo=90.0% source=CACHED_CNN '
-        'phase=NAVIGATION vote=7/15 stop=IGNORED'
+        'phase=NAVIGATION vote=7/15 vote_update=NO stop=IGNORED'
     )
+
+
+def test_initial_wait_terminal_events_ignore_cached_vote_updates():
+    latch = InitialWaitSignalLatch(
+        bbox_width_min=40,
+        bbox_width_max=225,
+        consecutive_reads=5,
+    )
+    latch.reset(initial_stop_armed=True, wait_for_signal=True)
+    fsm = TrafficShortcutFsm(
+        one_shot_initial_stop=True,
+        initial_left_direct_shortcut=True,
+    )
+    fsm.enable(initial_stop_armed=True, wait_for_signal=True)
+    node = SimpleNamespace(
+        _lamp_latch=latch,
+        bundle=SimpleNamespace(
+            schema_version=15,
+            detector=SimpleNamespace(
+                red_consecutive_reads=5,
+                left_consecutive_reads=5,
+            ),
+        ),
+        _ready_logged=False,
+        _stop_ignored_logged=False,
+        _signal_log_gate=SignalStatusLogGate(rate_hz=2.0),
+    )
+    reading = _signal(SignalClass.LEFT)
+    log_method = TrafficShortcutPolicyNode._one_shot_signal_logs_locked
+
+    previous = latch.snapshot
+    signal = latch.observe(reading)
+    plan = fsm.on_frame(signal, now_monotonic=1.0)
+    first = log_method(
+        node,
+        previous=previous,
+        reading=reading,
+        raw_class=SignalClass.LEFT,
+        source='YOLO_CNN',
+        signal=signal,
+        plan=plan,
+        now_monotonic=1.0,
+        vote_updated=True,
+    )
+    assert any(message.startswith('READY raw=LEFT') for message in first)
+    assert 'NON_STOP_CLEAR 1/5' in first
+    assert any('vote=1/5 vote_update=YES' in message for message in first)
+
+    cached = log_method(
+        node,
+        previous=latch.snapshot,
+        reading=reading,
+        raw_class=SignalClass.LEFT,
+        source='CACHED_CNN',
+        signal=signal,
+        plan=plan,
+        now_monotonic=1.5,
+        vote_updated=False,
+    )
+    assert latch.snapshot.candidate_reads == 1
+    assert not any(message.startswith('READY') for message in cached)
+    assert not any(message.startswith('NON_STOP_CLEAR') for message in cached)
+    assert any('vote=1/5 vote_update=NO' in message for message in cached)
+
+    final = []
+    for step in range(2, 6):
+        previous = latch.snapshot
+        signal = latch.observe(reading)
+        plan = fsm.on_frame(signal, now_monotonic=1.5 + step)
+        final = log_method(
+            node,
+            previous=previous,
+            reading=reading,
+            raw_class=SignalClass.LEFT,
+            source='YOLO_CNN',
+            signal=signal,
+            plan=plan,
+            now_monotonic=1.5 + step,
+            vote_updated=True,
+        )
+    assert plan.state == MissionState.SWITCH_TO_SHORTCUT
+    assert 'LEFT_CONFIRMED vote=5/5' in final
+    assert not any(message.startswith('READY') for message in final)
 
 
 def test_fsm_base_transition_exact_eight_seconds_and_one_shot():
@@ -1384,7 +1589,13 @@ def test_traffic_light_viewer_launch_has_no_motion_endpoints():
 
 @pytest.mark.parametrize(
     ('schema_version', 'votes'),
-    [(11, (30, 30, 30)), (12, (10, 30, 30)), (13, (15, 15, 15))],
+    [
+        (11, (30, 30, 30)),
+        (12, (10, 30, 30)),
+        (13, (15, 15, 15)),
+        (14, (15, 15, 15)),
+        (15, (5, 5, 5)),
+    ],
 )
 def test_traffic_light_viewer_accepts_speed35_bundle_contracts(
     schema_version,

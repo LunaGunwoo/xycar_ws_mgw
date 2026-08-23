@@ -44,6 +44,7 @@ class TrafficShortcutFsm:
         shortcut_duration_sec: float = 8.0,
         seamless_base_handoff: bool = False,
         one_shot_initial_stop: bool = False,
+        initial_left_direct_shortcut: bool = False,
     ) -> None:
         if (
             not math.isfinite(shortcut_duration_sec)
@@ -53,6 +54,13 @@ class TrafficShortcutFsm:
         self.shortcut_duration_sec = float(shortcut_duration_sec)
         self.seamless_base_handoff = bool(seamless_base_handoff)
         self.one_shot_initial_stop = bool(one_shot_initial_stop)
+        self.initial_left_direct_shortcut = bool(
+            initial_left_direct_shortcut
+        )
+        if self.initial_left_direct_shortcut and not self.one_shot_initial_stop:
+            raise ValueError(
+                'initial LEFT shortcut requires one-shot mission mode'
+            )
         self.state = MissionState.OFF
         self.shortcut_completed = False
         self.shortcut_started_monotonic: float | None = None
@@ -143,6 +151,13 @@ class TrafficShortcutFsm:
                 return self._stop_plan()
             self.initial_stop_armed = False
             self.initial_stop_consumed = True
+            if (
+                signal == LampAction.LEFT
+                and self.initial_left_direct_shortcut
+                and not self.shortcut_completed
+            ):
+                self.state = MissionState.SWITCH_TO_SHORTCUT
+                return self._stop_plan()
             self.state = MissionState.BASE
             return self._policy_plan(PolicyChoice.BASE)
 

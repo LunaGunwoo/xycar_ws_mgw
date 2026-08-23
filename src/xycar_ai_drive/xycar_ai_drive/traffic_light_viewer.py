@@ -24,6 +24,7 @@ from sensor_msgs.msg import Image
 from xycar_ai_drive.traffic_light_detector import (
     InitialStopSignalLatch,
     InitialStopSignalLatchSnapshot,
+    InitialWaitSignalLatch,
     LampAction,
     SignalClass,
     SignalInspection,
@@ -31,6 +32,7 @@ from xycar_ai_drive.traffic_light_detector import (
     TrafficClassifierDetector,
     TrafficSignalLatch,
     TrafficSignalLatchSnapshot,
+    should_update_signal_vote,
 )
 from xycar_ai_drive.traffic_light_runtime import create_onnx_detector
 from xycar_ai_drive.traffic_shortcut_artifact import (
@@ -57,6 +59,7 @@ class TrafficLightViewerResult:
     latch_snapshot: (
         TrafficSignalLatchSnapshot | InitialStopSignalLatchSnapshot
     )
+    vote_updated: bool = True
     inference_kind: str = 'YOLO+CNN'
     error: str | None = None
 
@@ -120,7 +123,19 @@ class TrafficLightViewerNode(Node):
                 .reuse_detected_bbox_between_yolo_frames
             ),
         )
-        if self.bundle.schema_version == 14:
+        if self.bundle.schema_version == 15:
+            self._latch = InitialWaitSignalLatch(
+                bbox_width_min=self.bundle.detector.bbox_width_min,
+                bbox_width_max=self.bundle.detector.bbox_width_max,
+                consecutive_reads=(
+                    self.bundle.detector.red_consecutive_reads
+                ),
+            )
+            self._latch.reset(
+                initial_stop_armed=True,
+                wait_for_signal=True,
+            )
+        elif self.bundle.schema_version == 14:
             clear_reads = self.bundle.initial_stop_clear_consecutive_reads
             if clear_reads is None:
                 raise ValueError('schema v14 initial STOP clear reads missing')
@@ -165,6 +180,7 @@ class TrafficLightViewerNode(Node):
         self._camera_error: str | None = None
         self._frame_sequence = 0
         self._latch_generation = 0
+        self._last_action = LampAction.UNKNOWN
         self._worker_stop = False
         self._shutdown_started = False
         self._worker = threading.Thread(
@@ -185,7 +201,7 @@ class TrafficLightViewerNode(Node):
         )
         clear_contract = (
             f',clear:{self.bundle.initial_stop_clear_consecutive_reads}'
-            if self.bundle.schema_version == 14
+            if self.bundle.schema_version in {14, 15}
             else ''
         )
         self.get_logger().info(
@@ -205,10 +221,10 @@ class TrafficLightViewerNode(Node):
     def _validate_bundle_contract(self) -> None:
         detector = self.bundle.detector
         if self.bundle.schema_version not in {
-            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14
+            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
         }:
             raise ValueError(
-                'traffic viewer supports classifier bundle schema 4..14'
+                'traffic viewer supports classifier bundle schema 4..15'
             )
         if detector.mode != 'yolo_cnn_classifier':
             raise ValueError(
@@ -217,12 +233,14 @@ class TrafficLightViewerNode(Node):
         expected_width = (
             (40, 225)
             if self.bundle.schema_version in {
-                6, 7, 8, 9, 10, 11, 12, 13, 14
+                6, 7, 8, 9, 10, 11, 12, 13, 14, 15
             }
             else (45, 200)
         )
         expected_votes = (
-            (15, 15, 15)
+            (5, 5, 5)
+            if self.bundle.schema_version == 15
+            else (15, 15, 15)
             if self.bundle.schema_version in {13, 14}
             else (10, 30, 30)
             if self.bundle.schema_version == 12
@@ -250,7 +268,9 @@ class TrafficLightViewerNode(Node):
             )
         expected_classification_every = (
             1
-            if self.bundle.schema_version in {8, 9, 10, 11, 12, 13, 14}
+            if self.bundle.schema_version in {
+                8, 9, 10, 11, 12, 13, 14, 15
+            }
             else 3
         )
         expected_reuse_detected_bbox = self.bundle.schema_version in {
@@ -261,6 +281,7 @@ class TrafficLightViewerNode(Node):
             12,
             13,
             14,
+            15,
         }
         if (
             detector.classification_every_n_frames_after_detection
@@ -365,7 +386,18 @@ class TrafficLightViewerNode(Node):
                     reading = (
                         None if inspection is None else inspection.reading
                     )
-                    final_action = self._latch.observe(reading)
+                    vote_updated = should_update_signal_vote(
+                        reading_observed=True,
+                        detector_ran=inference_plan.run_detector,
+                        fresh_yolo_only=(
+                            self.bundle.control_vote_on_fresh_yolo_only
+                        ),
+                    )
+                    if vote_updated:
+                        final_action = self._latch.observe(reading)
+                        self._last_action = final_action
+                    else:
+                        final_action = self._last_action
                     width_gate_accepted = bool(
                         reading is not None
                         and self.bundle.detector.bbox_width_min
@@ -382,6 +414,7 @@ class TrafficLightViewerNode(Node):
                         width_gate_accepted=width_gate_accepted,
                         final_action=final_action,
                         latch_snapshot=self._latch.snapshot,
+                        vote_updated=vote_updated,
                         inference_kind=inference_kind,
                     )
             except Exception as exc:  # noqa: BLE001 - inference boundary
@@ -400,6 +433,7 @@ class TrafficLightViewerNode(Node):
                         width_gate_accepted=False,
                         final_action=LampAction.UNKNOWN,
                         latch_snapshot=self._latch.snapshot,
+                        vote_updated=False,
                         inference_kind=(
                             'YOLO+CNN'
                             if inference_plan.run_detector
@@ -429,13 +463,17 @@ class TrafficLightViewerNode(Node):
     def reset_vote(self) -> None:
         with self._frame_condition:
             self._latch_generation += 1
-            if isinstance(self._latch, InitialStopSignalLatch):
+            if isinstance(
+                self._latch,
+                (InitialStopSignalLatch, InitialWaitSignalLatch),
+            ):
                 self._latch.reset(
                     initial_stop_armed=True,
                     wait_for_signal=True,
                 )
             else:
                 self._latch.reset()
+            self._last_action = LampAction.UNKNOWN
             self._signal_cadence.reset(
                 frame_sequence=self._frame_sequence,
             )
@@ -444,6 +482,7 @@ class TrafficLightViewerNode(Node):
                     self._result,
                     final_action=LampAction.UNKNOWN,
                     latch_snapshot=self._latch.snapshot,
+                    vote_updated=False,
                 )
         self.get_logger().info('Traffic signal vote and initial-stop phase reset')
 
@@ -687,6 +726,10 @@ class TrafficLightViewerApplication:
             f'vote: {snapshot.candidate_reads}/{snapshot.required_reads}\n'
             f'stop latch: {"ON" if snapshot.stop_latched else "OFF"}\n'
             + (
+                'schema v15: fresh YOLO+CNN only vote | all classes 5 | '
+                'cached CNN diagnostics only | post-clear STOP ignored\n'
+                if self.node.bundle.schema_version == 15
+                else
                 'schema v14: armed STOP 15 | non-STOP clear 3 | '
                 'navigation LEFT 15 | post-clear STOP ignored\n'
                 if self.node.bundle.schema_version == 14
@@ -699,6 +742,7 @@ class TrafficLightViewerApplication:
             f'{self.node.bundle.detector.inference_every_n_frames} search, '
             f'{self.node.bundle.detector.classification_every_n_frames_after_detection} '
             f'classify) | mode: {result.inference_kind} | '
+            f'vote update: {"YES" if result.vote_updated else "NO"} | '
             f'inference: {result.inference_ms:.1f}ms\n'
             f'sampled frame age: {sample_age:.2f}s | '
             f'latest camera age: {camera_age_text}'

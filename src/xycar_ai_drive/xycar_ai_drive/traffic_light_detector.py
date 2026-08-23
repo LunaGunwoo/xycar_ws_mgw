@@ -188,7 +188,7 @@ class TrafficSignalLatchSnapshot:
 
 
 class InitialStopPhase(str, Enum):
-    """One-shot STOP handling phase for schema v14 missions."""
+    """Initial signal-wait phase for schema v14/v15 missions."""
 
     NAVIGATION = 'NAVIGATION'
     ARMED = 'ARMED'
@@ -198,7 +198,7 @@ class InitialStopPhase(str, Enum):
 
 @dataclass(frozen=True)
 class InitialStopSignalLatchSnapshot:
-    """Read-only vote state for the schema v14 one-shot STOP contract."""
+    """Read-only vote state for schema v14/v15 initial signal handling."""
 
     candidate: SignalClass
     candidate_reads: int
@@ -1045,6 +1045,147 @@ class InitialStopSignalLatch:
         ):
             raise TrafficLightError('traffic classifier reading is invalid')
         return reading.signal_class
+
+
+class InitialWaitSignalLatch:
+    """Wait stopped, vote one fresh raw class, then ignore later STOP."""
+
+    def __init__(
+        self,
+        *,
+        bbox_width_min: int,
+        bbox_width_max: int,
+        consecutive_reads: int,
+    ) -> None:
+        if bbox_width_min < 1 or bbox_width_max < bbox_width_min:
+            raise ValueError('invalid traffic bbox width gate')
+        if consecutive_reads < 1:
+            raise ValueError('signal consecutive reads must be positive')
+        self._bbox_width_min = int(bbox_width_min)
+        self._bbox_width_max = int(bbox_width_max)
+        self._consecutive_reads = int(consecutive_reads)
+        self.reset()
+
+    @property
+    def phase(self) -> InitialStopPhase:
+        return self._phase
+
+    @property
+    def stop_latched(self) -> bool:
+        return self._phase in {
+            InitialStopPhase.WAIT_FOR_SIGNAL,
+            InitialStopPhase.STOPPED,
+        }
+
+    @property
+    def snapshot(self) -> InitialStopSignalLatchSnapshot:
+        return InitialStopSignalLatchSnapshot(
+            candidate=self._candidate,
+            candidate_reads=self._candidate_reads,
+            required_reads=self._consecutive_reads,
+            stop_latched=self.stop_latched,
+            phase=self._phase,
+            raw_class=self._raw,
+            stop_ignored=(
+                self._phase == InitialStopPhase.NAVIGATION
+                and _signal_class_action(self._raw) == LampAction.RED
+            ),
+        )
+
+    def reset(
+        self,
+        *,
+        initial_stop_armed: bool = False,
+        wait_for_signal: bool = False,
+    ) -> None:
+        if wait_for_signal and not initial_stop_armed:
+            raise ValueError('signal wait requires initial STOP arm')
+        if initial_stop_armed and not wait_for_signal:
+            raise ValueError('schema v15 initial STOP must wait before motion')
+        self._phase = (
+            InitialStopPhase.WAIT_FOR_SIGNAL
+            if wait_for_signal
+            else InitialStopPhase.NAVIGATION
+        )
+        self._candidate = SignalClass.UNKNOWN
+        self._candidate_reads = 0
+        self._raw = SignalClass.UNKNOWN
+
+    def observe(self, reading: SignalReading | None) -> LampAction:
+        raw = self._validated_raw_class(reading)
+        self._raw = raw
+        if raw == SignalClass.UNKNOWN:
+            self._reset_candidate()
+            return LampAction.RED if self.stop_latched else LampAction.UNKNOWN
+        if self._phase == InitialStopPhase.NAVIGATION:
+            return self._observe_navigation(raw)
+        return self._observe_stopped(raw)
+
+    def _observe_stopped(self, raw: SignalClass) -> LampAction:
+        action = _signal_class_action(raw)
+        self._advance_same_class(raw)
+        if self._candidate_reads < self._consecutive_reads:
+            return LampAction.RED
+        if action == LampAction.RED:
+            self._phase = InitialStopPhase.STOPPED
+            return LampAction.RED
+        if action in {LampAction.LEFT, LampAction.STRAIGHT}:
+            self._phase = InitialStopPhase.NAVIGATION
+            return action
+        self._reset_candidate()
+        return LampAction.RED
+
+    def _observe_navigation(self, raw: SignalClass) -> LampAction:
+        action = _signal_class_action(raw)
+        if action not in {LampAction.LEFT, LampAction.STRAIGHT}:
+            self._reset_candidate()
+            return LampAction.UNKNOWN
+        self._advance_same_class(raw)
+        if self._candidate_reads < self._consecutive_reads:
+            return LampAction.UNKNOWN
+        return action
+
+    def _advance_same_class(self, raw: SignalClass) -> None:
+        if raw == self._candidate:
+            self._candidate_reads += 1
+        else:
+            self._candidate = raw
+            self._candidate_reads = 1
+        self._candidate_reads = min(
+            self._candidate_reads,
+            self._consecutive_reads,
+        )
+
+    def _reset_candidate(self) -> None:
+        self._candidate = SignalClass.UNKNOWN
+        self._candidate_reads = 0
+
+    def _validated_raw_class(
+        self,
+        reading: SignalReading | None,
+    ) -> SignalClass:
+        if reading is None or not (
+            self._bbox_width_min <= reading.bbox_width <= self._bbox_width_max
+        ):
+            return SignalClass.UNKNOWN
+        if (
+            not math.isfinite(reading.probability)
+            or not math.isfinite(reading.confidence)
+        ):
+            raise TrafficLightError('traffic classifier reading is invalid')
+        return reading.signal_class
+
+
+def should_update_signal_vote(
+    *,
+    reading_observed: bool,
+    detector_ran: bool,
+    fresh_yolo_only: bool,
+) -> bool:
+    """Keep cached-bbox classifications outside fresh-only control votes."""
+    return bool(
+        reading_observed and (not fresh_yolo_only or detector_ran)
+    )
 
 
 def _signal_class_action(signal_class: SignalClass) -> LampAction:
