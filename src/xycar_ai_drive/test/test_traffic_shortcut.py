@@ -87,11 +87,14 @@ from xycar_ai_drive.traffic_shortcut_diagnostics import (
 )
 from xycar_ai_drive.traffic_shortcut_monitor import (
     MonitorFrame,
+    SignalPanelMode,
     TrafficShortcutMonitorNode,
+    TrafficShortcutMonitorSnapshot,
     drive_vector_endpoint,
     frame_stamp_key,
     monitor_crop_panel,
     monitor_frame_panel,
+    select_signal_panel,
 )
 from xycar_ai_drive.control import DriveCommand, ToggleAction
 
@@ -828,6 +831,7 @@ def test_signal_debug_json_round_trip_and_source_contracts():
 def test_monitor_matches_exact_stamp_and_never_overlays_another_frame():
     signal = _debug_snapshot()
     exact_image = np.zeros((300, 400, 3), dtype=np.uint8)
+    exact_image[190:240, 190:270] = (10, 120, 240)
     latest_image = np.zeros((300, 400, 3), dtype=np.uint8)
     exact = MonitorFrame(
         stamp_key=signal.stamp_key,
@@ -841,10 +845,12 @@ def test_monitor_matches_exact_stamp_and_never_overlays_another_frame():
     )
     node = SimpleNamespace(
         _lock=threading.RLock(),
-        _signal=signal,
-        _signal_received_monotonic=1.2,
-        _frames=OrderedDict([(signal.stamp_key, exact)]),
-        _latest_frame=latest,
+        _signal=None,
+        _signal_received_monotonic=None,
+        _matched_frame=None,
+        _frames=OrderedDict(),
+        _latest_frame=None,
+        frame_buffer_size=30,
         _prediction=None,
         _actual=None,
         _enabled=True,
@@ -854,30 +860,143 @@ def test_monitor_matches_exact_stamp_and_never_overlays_another_frame():
         _control_error=None,
     )
 
-    matched = TrafficShortcutMonitorNode.snapshot(node)
-    exact_overlay = monitor_frame_panel(
-        matched.matched_frame.image,
+    TrafficShortcutMonitorNode._store_camera_frame_locked(node, exact)
+    TrafficShortcutMonitorNode._store_signal_debug_locked(
+        node,
         signal,
-        exact_match=True,
+        received_monotonic=1.2,
+    )
+    matched = TrafficShortcutMonitorNode.snapshot(node)
+    selection = select_signal_panel(
+        matched,
+        now_monotonic=1.5,
+        signal_stale_sec=1.0,
+    )
+    exact_overlay = monitor_frame_panel(
+        selection.display_frame.image,
+        selection.overlay_signal,
+        display_mode=selection.mode,
     )
     unmatched_overlay = monitor_frame_panel(
         latest_image,
         signal,
-        exact_match=False,
+        display_mode=SignalPanelMode.UNMATCHED,
+    )
+    crop_panel = monitor_crop_panel(
+        exact_image,
+        signal,
+        display_mode=SignalPanelMode.MATCHED,
     )
 
     assert matched.matched_frame is exact
+    assert selection.mode == SignalPanelMode.MATCHED
     assert np.count_nonzero(exact_overlay[200, 200]) > 0
     assert np.count_nonzero(unmatched_overlay[200, 200]) == 0
-    assert monitor_crop_panel(
-        exact_image,
-        signal,
-        exact_match=True,
-    ).shape == (50, 80, 3)
+    assert crop_panel.shape == (170, 880, 3)
+    crop_body = crop_panel[32:]
+    changed = np.argwhere(np.any(crop_body != 64, axis=2))
+    display_height = int(changed[:, 0].max() - changed[:, 0].min() + 1)
+    display_width = int(changed[:, 1].max() - changed[:, 1].min() + 1)
+    assert display_width / display_height == pytest.approx(80 / 50, abs=0.04)
     assert frame_stamp_key(42, 123) == (42, 123)
     assert frame_stamp_key(0, 0) is None
-    node._frames.clear()
-    assert TrafficShortcutMonitorNode.snapshot(node).matched_frame is None
+
+    for index in range(31):
+        latest = MonitorFrame(
+            stamp_key=(100 + index, index),
+            image=latest_image,
+            received_monotonic=1.3 + index * 0.01,
+        )
+        TrafficShortcutMonitorNode._store_camera_frame_locked(node, latest)
+    retained = TrafficShortcutMonitorNode.snapshot(node)
+    assert signal.stamp_key not in node._frames
+    assert retained.matched_frame is exact
+    assert select_signal_panel(
+        retained,
+        now_monotonic=1.9,
+        signal_stale_sec=1.0,
+    ).mode == SignalPanelMode.MATCHED
+
+    stale = select_signal_panel(
+        retained,
+        now_monotonic=2.3,
+        signal_stale_sec=1.0,
+    )
+    assert stale.mode == SignalPanelMode.STALE
+    assert stale.display_frame is latest
+    assert stale.overlay_signal is None
+    stale_crop = monitor_crop_panel(
+        stale.display_frame.image,
+        stale.overlay_signal,
+        display_mode=stale.mode,
+    )
+    assert stale_crop.shape == (170, 880, 3)
+    assert float(stale_crop.mean()) > 0.0
+
+
+def test_monitor_matches_when_debug_arrives_before_camera_and_clears_mismatch():
+    signal = _debug_snapshot()
+    frame = MonitorFrame(
+        stamp_key=signal.stamp_key,
+        image=np.full((300, 400, 3), 100, dtype=np.uint8),
+        received_monotonic=2.0,
+    )
+    node = SimpleNamespace(
+        _signal=None,
+        _signal_received_monotonic=None,
+        _matched_frame=None,
+        _frames=OrderedDict(),
+        _latest_frame=None,
+        frame_buffer_size=30,
+    )
+
+    TrafficShortcutMonitorNode._store_signal_debug_locked(
+        node,
+        signal,
+        received_monotonic=2.1,
+    )
+    assert node._matched_frame is None
+    TrafficShortcutMonitorNode._store_camera_frame_locked(node, frame)
+    assert node._matched_frame is frame
+
+    unmatched_signal = replace(
+        signal,
+        frame_sequence=13,
+        stamp_sec=43,
+    )
+    TrafficShortcutMonitorNode._store_signal_debug_locked(
+        node,
+        unmatched_signal,
+        received_monotonic=2.2,
+    )
+    assert node._matched_frame is None
+    snapshot = TrafficShortcutMonitorSnapshot(
+        signal=node._signal,
+        signal_received_monotonic=node._signal_received_monotonic,
+        matched_frame=node._matched_frame,
+        latest_frame=node._latest_frame,
+        prediction=None,
+        actual=None,
+        enabled=True,
+        enabled_received_monotonic=2.0,
+        camera_error=None,
+        signal_error=None,
+        control_error=None,
+    )
+    selection = select_signal_panel(
+        snapshot,
+        now_monotonic=2.3,
+        signal_stale_sec=1.0,
+    )
+    assert selection.mode == SignalPanelMode.UNMATCHED
+    assert selection.display_frame is frame
+    assert selection.overlay_signal is unmatched_signal
+    placeholder = monitor_crop_panel(
+        frame.image,
+        unmatched_signal,
+        display_mode=selection.mode,
+    )
+    assert float(placeholder.mean()) > 0.0
 
 
 def test_drive_vector_uses_normalized_angle_and_speed_magnitude():

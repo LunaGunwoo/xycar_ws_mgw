@@ -586,9 +586,13 @@ cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source inst
 `traffic_shortcut_monitor`를 필수 sibling으로 시작한다. GUI는 policy가 이미 계산한
 `/traffic_shortcut/signal_debug`를 구독하므로 YOLO/CNN, Base/shortcut ONNX나 policy
 IPC를 다시 실행하지 않으며 ROS publisher도 만들지 않는다. camera panel은 진단에
-실린 원본 ROS timestamp를 최근 30 frame buffer와 exact match한 경우에만 bbox와
-crop을 표시한다. 해당 frame이 없거나 timestamp가 0이면 최신 frame에는 bbox를
-겹치지 않고 `FRAME MATCH UNAVAILABLE`을 표시한다.
+실린 원본 ROS timestamp를 최근 30 frame buffer와 exact match하고, 성공한
+진단·frame 쌍은 buffer eviction과 별개로 보존한다. fresh exact frame에만 bbox를
+겹치고 padded source crop은 좌표·크기·source와 함께 고정 880×170 panel에 비율을
+유지해 확대한다. fresh frame이 실제로 없으면 최신 frame에는 bbox를 겹치지 않고
+회색 `FRAME MATCH UNAVAILABLE`을 표시한다. signal 진단이 1초 이상 stale이면 bbox와
+crop을 지우고 최신 live camera의 `WAITING FOR NEW SIGNAL`로 전환하며 마지막
+class·확률은 stale 참고값으로만 남긴다.
 
 오른쪽에는 STOP/STRAIGHT/LEFT 확률, width gate, fresh/cached source, vote·phase와
 mission state를 표시한다. 하단 vector는 파란 점선으로 model prediction, 녹색

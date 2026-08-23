@@ -221,6 +221,11 @@ camera, gamepad와 motor publisher를 시작하므로 실차 실행마다 별도
 같은 STRAIGHT 또는 LEFT의 fresh 판독 5회에서 자동 출발한다. 좌회전 성공
 one-shot을 다시 실행하려면 node를 재시작한다.
 
+`use_monitor_gui:=true`에서는 signal timestamp와 정확히 매칭된 camera frame을
+별도로 보존해 ring-buffer eviction 뒤에도 fresh bbox와 확대 crop을 유지한다.
+진단이 1초 이상 stale이면 bbox/crop을 제거하고 최신 live camera로 전환한다.
+fresh timestamp frame을 받지 못한 경우에는 다른 frame에 overlay하지 않는다.
+
 ## Competition bundle wrapper
 
 `xycar-ai-competition`은 Base, signal과 shortcut model을 하나의 CUDA container에
