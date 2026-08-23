@@ -423,11 +423,13 @@ class TrafficShortcutPolicyNode(Node):
         detector = self.bundle.detector
         expected_width = (
             (40, 225)
-            if self.bundle.schema_version in {6, 7, 8, 9, 10, 11, 12}
+            if self.bundle.schema_version in {6, 7, 8, 9, 10, 11, 12, 13}
             else (45, 200)
         )
         expected_votes = (
-            (10, 30, 30)
+            (15, 15, 15)
+            if self.bundle.schema_version == 13
+            else (10, 30, 30)
             if self.bundle.schema_version == 12
             else (30, 30, 30)
             if self.bundle.schema_version in {10, 11}
@@ -454,7 +456,9 @@ class TrafficShortcutPolicyNode(Node):
         ):
             raise ValueError('traffic detector width/votes/every contract mismatch')
         expected_classification_every = (
-            1 if self.bundle.schema_version in {8, 9, 10, 11, 12} else 3
+            1
+            if self.bundle.schema_version in {8, 9, 10, 11, 12, 13}
+            else 3
         )
         expected_reuse_detected_bbox = self.bundle.schema_version in {
             8,
@@ -462,6 +466,7 @@ class TrafficShortcutPolicyNode(Node):
             10,
             11,
             12,
+            13,
         }
         if (
             detector.classification_every_n_frames_after_detection
@@ -479,7 +484,7 @@ class TrafficShortcutPolicyNode(Node):
         ):
             raise ValueError('traffic YOLO missing-release contract mismatch')
         expected_base_speed_cap = (
-            35.0 if self.bundle.schema_version in {11, 12} else 25.0
+            35.0 if self.bundle.schema_version in {11, 12, 13} else 25.0
         )
         if self.bundle.base_speed_cap != expected_base_speed_cap:
             raise ValueError(

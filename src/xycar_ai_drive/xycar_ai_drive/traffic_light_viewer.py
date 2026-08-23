@@ -171,9 +171,11 @@ class TrafficLightViewerNode(Node):
 
     def _validate_bundle_contract(self) -> None:
         detector = self.bundle.detector
-        if self.bundle.schema_version not in {4, 5, 6, 7, 8, 9, 10, 11, 12}:
+        if self.bundle.schema_version not in {
+            4, 5, 6, 7, 8, 9, 10, 11, 12, 13
+        }:
             raise ValueError(
-                'traffic viewer supports classifier bundle schema 4..12'
+                'traffic viewer supports classifier bundle schema 4..13'
             )
         if detector.mode != 'yolo_cnn_classifier':
             raise ValueError(
@@ -181,11 +183,13 @@ class TrafficLightViewerNode(Node):
             )
         expected_width = (
             (40, 225)
-            if self.bundle.schema_version in {6, 7, 8, 9, 10, 11, 12}
+            if self.bundle.schema_version in {6, 7, 8, 9, 10, 11, 12, 13}
             else (45, 200)
         )
         expected_votes = (
-            (10, 30, 30)
+            (15, 15, 15)
+            if self.bundle.schema_version == 13
+            else (10, 30, 30)
             if self.bundle.schema_version == 12
             else (30, 30, 30)
             if self.bundle.schema_version in {10, 11}
@@ -210,7 +214,9 @@ class TrafficLightViewerNode(Node):
                 'traffic viewer bundle width/every3/vote contract mismatch'
             )
         expected_classification_every = (
-            1 if self.bundle.schema_version in {8, 9, 10, 11, 12} else 3
+            1
+            if self.bundle.schema_version in {8, 9, 10, 11, 12, 13}
+            else 3
         )
         expected_reuse_detected_bbox = self.bundle.schema_version in {
             8,
@@ -218,6 +224,7 @@ class TrafficLightViewerNode(Node):
             10,
             11,
             12,
+            13,
         }
         if (
             detector.classification_every_n_frames_after_detection

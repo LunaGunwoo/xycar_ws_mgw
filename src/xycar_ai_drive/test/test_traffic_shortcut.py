@@ -51,6 +51,7 @@ from xycar_ai_drive.traffic_shortcut_artifact import (
     EXPECTED_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_BASE_ARTIFACT_ID,
     EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    EXPECTED_SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID,
     EXPECTED_SHORTCUT_ARTIFACT_ID,
@@ -449,6 +450,44 @@ def test_action_specific_signal_vote_resets_on_unknown_and_class_change():
     assert latch.snapshot.required_reads == 0
 
 
+def test_action_classifier_stop15_go15_resumes_without_drive_gate_reset():
+    latch = TrafficSignalLatch(
+        bbox_width_min=40,
+        bbox_width_max=225,
+        red_consecutive_reads=15,
+        left_consecutive_reads=15,
+        straight_consecutive_reads=15,
+    )
+    stop = _signal(SignalClass.STOP)
+    straight = _signal(SignalClass.STRAIGHT)
+    fsm = TrafficShortcutFsm()
+    fsm.enable()
+
+    for step in range(14):
+        assert latch.observe(stop) == LampAction.UNKNOWN
+        assert fsm.on_frame(
+            LampAction.UNKNOWN,
+            now_monotonic=float(step),
+        ).policy == PolicyChoice.BASE
+    assert latch.observe(stop) == LampAction.RED
+    assert fsm.on_frame(
+        LampAction.RED,
+        now_monotonic=14.0,
+    ).state == MissionState.RED_STOP
+
+    for step in range(14):
+        assert latch.observe(straight) == LampAction.RED
+        assert fsm.on_frame(
+            LampAction.RED,
+            now_monotonic=15.0 + step,
+        ).publish_stop
+    confirmed = latch.observe(straight)
+    assert confirmed == LampAction.STRAIGHT
+    resumed = fsm.on_frame(confirmed, now_monotonic=29.0)
+    assert resumed.state == MissionState.BASE
+    assert resumed.policy == PolicyChoice.BASE
+
+
 def test_classifier_detector_rejects_bad_logits_and_empty_crop():
     yolo = _FakeOnnxSession(
         _output_with_candidates((320.0, 240.0, 100.0, 40.0, 0.9))
@@ -807,6 +846,33 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
             EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
         ),
     ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    stop15_go15_adaptive_human_bbox_classifier_vote = {
+        **stabilized_human_bbox_classifier_vote,
+        'consecutive_reads_by_raw_class': {
+            'STOP': 15,
+            'STRAIGHT': 15,
+            'LEFT': 15,
+        },
+    }
+    assert _load_signal_vote_contract(
+        {'signal_vote': stop15_go15_adaptive_human_bbox_classifier_vote},
+        schema_version=13,
+        artifact_id=(
+            EXPECTED_SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == (15, 15, 15)
+    assert _expected_shortcut_artifact_id(
+        schema_version=13,
+        artifact_id=(
+            EXPECTED_SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert _expected_base_artifact_id(
+        schema_version=13,
+        artifact_id=(
+            EXPECTED_SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
     with pytest.raises(ArtifactContractError, match='signal vote'):
         _load_signal_vote_contract(
             {
@@ -1128,7 +1194,7 @@ def test_traffic_light_viewer_launch_has_no_motion_endpoints():
 
 @pytest.mark.parametrize(
     ('schema_version', 'votes'),
-    [(11, (30, 30, 30)), (12, (10, 30, 30))],
+    [(11, (30, 30, 30)), (12, (10, 30, 30)), (13, (15, 15, 15))],
 )
 def test_traffic_light_viewer_accepts_speed35_bundle_contracts(
     schema_version,

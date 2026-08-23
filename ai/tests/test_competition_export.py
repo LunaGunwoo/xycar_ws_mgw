@@ -31,6 +31,7 @@ from xycar_ai.export_traffic_shortcut_bundle import (
     STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_BASE_ID,
     SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     _bundle_manifest,
 )
@@ -325,5 +326,26 @@ def test_human_bbox_traffic_bundle_manifests_preserve_models_and_version_votes(
     ] == {'STOP': 10, 'STRAIGHT': 30, 'LEFT': 30}
     assert speed35_stop10_go30_adaptive['mission']['base_speed_cap'] == 35.0
     assert speed35_stop10_go30_adaptive['components']['base'][
+        'artifact_id'
+    ] == SPEED35_BASE_ID
+
+    speed35_stop15_go15_adaptive = _bundle_manifest(
+        artifact_id=(
+            SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+        schema_version=13,
+        consecutive_signal_reads_by_action=(15, 15, 15),
+        base_artifact=base,
+        shortcut_artifact=shortcut,
+        shortcut_artifact_id=EXPANDED_SHORTCUT_ID,
+        traffic_classifier=tmp_path / 'classifier.onnx',
+    )
+
+    assert speed35_stop15_go15_adaptive['detector'] == adaptive_detector
+    assert speed35_stop15_go15_adaptive['signal_vote'][
+        'consecutive_reads_by_raw_class'
+    ] == {'STOP': 15, 'STRAIGHT': 15, 'LEFT': 15}
+    assert speed35_stop15_go15_adaptive['mission']['base_speed_cap'] == 35.0
+    assert speed35_stop15_go15_adaptive['components']['base'][
         'artifact_id'
     ] == SPEED35_BASE_ID
