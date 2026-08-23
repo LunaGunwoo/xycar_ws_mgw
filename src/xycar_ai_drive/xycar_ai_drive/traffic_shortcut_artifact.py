@@ -22,7 +22,7 @@ from xycar_ai_drive.artifact import (
 from xycar_ai_drive.steering_contract import NORMALIZED_STEERING_CONTRACT
 
 BUNDLE_KIND = 'traffic_shortcut_bundle'
-SUPPORTED_BUNDLE_SCHEMA_VERSIONS = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
+SUPPORTED_BUNDLE_SCHEMA_VERSIONS = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
 BUNDLE_MANIFEST = 'manifest.yaml'
 BUNDLE_CHECKSUMS = 'SHA256SUMS'
 TRAFFIC_MODEL_SHA256 = (
@@ -98,6 +98,12 @@ EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID = (
     'tl40to225-stop30-go30-search3-classify1-yolo-miss30-release-'
     '45sessions-20260823'
 )
+EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID = (
+    'traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-'
+    'shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-'
+    'tl40to225-stop10-go30-search3-classify1-yolo-miss30-release-'
+    '45sessions-20260823'
+)
 EXPECTED_SIGNAL_BUNDLE_SHORTCUT_IDS = {
     EXPECTED_SIGNAL_VOTE_BUNDLE_ID: EXPECTED_SHORTCUT_ARTIFACT_ID,
     EXPECTED_EXPANDED_SIGNAL_VOTE_BUNDLE_ID: (
@@ -123,6 +129,9 @@ EXPECTED_SIGNAL_BUNDLE_SHORTCUT_IDS = {
         EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
     ),
     EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID: (
+        EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    ),
+    EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID: (
         EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
     ),
 }
@@ -197,7 +206,7 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
         or schema_version not in SUPPORTED_BUNDLE_SCHEMA_VERSIONS
     ):
         raise ArtifactContractError(
-            'traffic shortcut bundle schema must be 1..11'
+            'traffic shortcut bundle schema must be 1..12'
         )
     if manifest.get('artifact_kind') != BUNDLE_KIND:
         raise ArtifactContractError('artifact is not a traffic shortcut bundle')
@@ -241,7 +250,7 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
         raise ArtifactContractError('traffic light model format must be onnx')
     expected_traffic_sha256 = (
         HUMAN_BBOX_TRAFFIC_MODEL_SHA256
-        if schema_version in {6, 7, 8, 9, 10, 11}
+        if schema_version in {6, 7, 8, 9, 10, 11, 12}
         else TRAFFIC_MODEL_SHA256
     )
     if signal.get('sha256') != expected_traffic_sha256:
@@ -264,7 +273,9 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
     detector = _required_mapping(manifest, 'detector', 'manifest')
     bbox_width = detector.get('bbox_width_px')
     expected_bbox_width = (
-        [40, 225] if schema_version in {6, 7, 8, 9, 10, 11} else [45, 200]
+        [40, 225]
+        if schema_version in {6, 7, 8, 9, 10, 11, 12}
+        else [45, 200]
     )
     if bbox_width != expected_bbox_width:
         raise ArtifactContractError(
@@ -273,7 +284,7 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
         )
     confidence = _exact_number(detector, 'confidence_threshold', 0.25)
     inference_every = _exact_int(detector, 'inference_every_n_frames', 3)
-    if schema_version in {8, 9, 10, 11}:
+    if schema_version in {8, 9, 10, 11, 12}:
         classification_every = _exact_int(
             detector,
             'classification_every_n_frames_after_detection',
@@ -281,7 +292,7 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
         )
         if detector.get('reuse_detected_bbox_between_yolo_frames') is not True:
             raise ArtifactContractError(
-                'schema v8..v11 must reuse the detected bbox between YOLO frames'
+                'schema v8..v12 must reuse the detected bbox between YOLO frames'
             )
         reuse_detected_bbox = True
     else:
@@ -290,13 +301,13 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
             or 'reuse_detected_bbox_between_yolo_frames' in detector
         ):
             raise ArtifactContractError(
-                'adaptive classifier cadence is only valid in schema v8..v11'
+                'adaptive classifier cadence is only valid in schema v8..v12'
             )
         classification_every = inference_every
         reuse_detected_bbox = False
     detector_preprocessing = (
         'letterbox_640_center_pad114_bgr_to_rgb_float32_nchw_div255'
-        if schema_version in {6, 7, 8, 9, 10, 11}
+        if schema_version in {6, 7, 8, 9, 10, 11, 12}
         else 'resize_640_bgr_to_rgb_float32_nchw_div255'
     )
     if detector.get('preprocessing') != detector_preprocessing:
@@ -304,7 +315,7 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
     if detector.get('selection') != 'maximum_confidence_box':
         raise ArtifactContractError('traffic detector selection mismatch')
     if (
-        schema_version in {6, 7, 8, 9, 10, 11}
+        schema_version in {6, 7, 8, 9, 10, 11, 12}
         and detector.get('max_detections') != 1
     ):
         raise ArtifactContractError('traffic detector must return one box')
@@ -427,7 +438,7 @@ def load_traffic_shortcut_bundle(root: str | Path) -> TrafficShortcutBundle:
         raise ArtifactContractError('red must cancel the shortcut attempt')
     if mission.get('red_cancel_consumes_success') is not False:
         raise ArtifactContractError('red cancellation must not consume success')
-    expected_base_speed_cap = 35.0 if schema_version == 11 else 25.0
+    expected_base_speed_cap = 35.0 if schema_version in {11, 12} else 25.0
     base_speed_cap = _exact_number(
         mission,
         'base_speed_cap',
@@ -601,9 +612,17 @@ def _load_signal_vote_contract(
         != EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
     ):
         raise ArtifactContractError('signal bundle id is not approved')
+    if (
+        schema_version == 12
+        and artifact_id
+        != EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+    ):
+        raise ArtifactContractError('signal bundle id is not approved')
     signal_vote = _required_mapping(manifest, 'signal_vote', 'manifest')
-    if schema_version in {7, 8, 9, 10, 11}:
-        if schema_version in {10, 11}:
+    if schema_version in {7, 8, 9, 10, 11, 12}:
+        if schema_version == 12:
+            stop_reads, straight_reads, left_reads = 10, 30, 30
+        elif schema_version in {10, 11}:
             stop_reads, straight_reads, left_reads = 30, 30, 30
         elif schema_version == 9:
             stop_reads, straight_reads, left_reads = 10, 15, 15
@@ -624,7 +643,7 @@ def _load_signal_vote_contract(
         }
         if signal_vote != expected or 'red_latch' in manifest:
             raise ArtifactContractError(
-                'schema v7..v11 classifier signal vote contract mismatch'
+                'schema v7..v12 classifier signal vote contract mismatch'
             )
         return stop_reads, left_reads, straight_reads
     if schema_version == 6:
@@ -702,7 +721,7 @@ def _load_classifier_contract(
         raise ArtifactContractError('traffic classifier ONNX is missing or unsafe')
     expected_sha256 = (
         HUMAN_BBOX_TRAFFIC_CLASSIFIER_SHA256
-        if schema_version in {6, 7, 8, 9, 10, 11}
+        if schema_version in {6, 7, 8, 9, 10, 11, 12}
         else TRAFFIC_CLASSIFIER_SHA256
     )
     if (
@@ -711,7 +730,7 @@ def _load_classifier_contract(
         or _sha256_file(path) != expected_sha256
     ):
         raise ArtifactContractError('traffic classifier ONNX checksum mismatch')
-    if schema_version in {6, 7, 8, 9, 10, 11}:
+    if schema_version in {6, 7, 8, 9, 10, 11, 12}:
         input_height = 128
         input_width = 416
         classes = ('STOP', 'STRAIGHT', 'LEFT')
@@ -854,6 +873,12 @@ def _expected_shortcut_artifact_id(
         != EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
     ):
         raise ArtifactContractError('signal bundle id is not approved')
+    if (
+        schema_version == 12
+        and artifact_id
+        != EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+    ):
+        raise ArtifactContractError('signal bundle id is not approved')
     try:
         return EXPECTED_SIGNAL_BUNDLE_SHORTCUT_IDS[artifact_id]
     except KeyError as exc:
@@ -867,11 +892,15 @@ def _expected_base_artifact_id(
     schema_version: int,
     artifact_id: str,
 ) -> str:
-    if schema_version == 11:
-        if (
-            artifact_id
-            != EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
-        ):
+    if schema_version in {11, 12}:
+        expected_artifact_id = (
+            EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            if schema_version == 11
+            else (
+                EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            )
+        )
+        if artifact_id != expected_artifact_id:
             raise ArtifactContractError('signal bundle id is not approved')
         return EXPECTED_SPEED35_BASE_ARTIFACT_ID
     return EXPECTED_BASE_ARTIFACT_ID

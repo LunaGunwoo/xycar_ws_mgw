@@ -31,6 +31,7 @@ from xycar_ai_drive.traffic_light_detector import (
     letterbox_640_bgr_frame,
 )
 from xycar_ai_drive.traffic_light_viewer import (
+    TrafficLightViewerNode,
     TrafficLightViewerResult,
     draw_signal_overlay,
 )
@@ -49,6 +50,7 @@ from xycar_ai_drive.traffic_shortcut_artifact import (
     EXPECTED_STOP10_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_BASE_ARTIFACT_ID,
+    EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID,
     EXPECTED_SHORTCUT_ARTIFACT_ID,
@@ -359,11 +361,11 @@ def test_action_classifier_stop_maps_to_latched_red():
     assert latch.observe(straight) == LampAction.STRAIGHT
 
 
-def test_action_classifier_stop30_go30_applies_before_and_after_stop():
+def test_action_classifier_stop10_go30_applies_before_and_after_stop():
     latch = TrafficSignalLatch(
         bbox_width_min=40,
         bbox_width_max=225,
-        red_consecutive_reads=30,
+        red_consecutive_reads=10,
         left_consecutive_reads=30,
         straight_consecutive_reads=30,
     )
@@ -373,9 +375,9 @@ def test_action_classifier_stop30_go30_applies_before_and_after_stop():
     fsm = TrafficShortcutFsm()
     fsm.enable()
 
-    for step in range(29):
+    for step in range(9):
         assert latch.observe(stop) == LampAction.UNKNOWN
-        assert latch.snapshot.required_reads == 30
+        assert latch.snapshot.required_reads == 10
         assert latch.snapshot.candidate_reads == step + 1
         assert fsm.on_frame(
             LampAction.UNKNOWN,
@@ -384,7 +386,7 @@ def test_action_classifier_stop30_go30_applies_before_and_after_stop():
     assert latch.observe(stop) == LampAction.RED
     assert fsm.on_frame(
         LampAction.RED,
-        now_monotonic=29.0,
+        now_monotonic=9.0,
     ).state == MissionState.RED_STOP
 
     for step in range(29):
@@ -392,11 +394,11 @@ def test_action_classifier_stop30_go30_applies_before_and_after_stop():
         assert latch.snapshot.required_reads == 30
         assert fsm.on_frame(
             LampAction.RED,
-            now_monotonic=30.0 + step,
+            now_monotonic=10.0 + step,
         ).publish_stop
     confirmed_left = latch.observe(left)
     assert confirmed_left == LampAction.LEFT
-    left_plan = fsm.on_frame(confirmed_left, now_monotonic=59.0)
+    left_plan = fsm.on_frame(confirmed_left, now_monotonic=39.0)
     assert left_plan.state == MissionState.SWITCH_TO_SHORTCUT
     assert left_plan.publish_stop
 
@@ -407,26 +409,26 @@ def test_action_classifier_stop30_go30_applies_before_and_after_stop():
     assert latch.observe(left) == LampAction.LEFT
     assert fsm.on_frame(
         LampAction.LEFT,
-        now_monotonic=70.0,
+        now_monotonic=50.0,
     ).state == MissionState.SWITCH_TO_SHORTCUT
 
     latch.reset()
     fsm.enable()
-    for _ in range(30):
+    for _ in range(10):
         stopped = latch.observe(stop)
     assert stopped == LampAction.RED
-    assert fsm.on_frame(stopped, now_monotonic=80.0).state == MissionState.RED_STOP
+    assert fsm.on_frame(stopped, now_monotonic=60.0).state == MissionState.RED_STOP
     for _ in range(29):
         assert latch.observe(straight) == LampAction.RED
     assert latch.observe(straight) == LampAction.STRAIGHT
-    resumed = fsm.on_frame(LampAction.STRAIGHT, now_monotonic=81.0)
+    resumed = fsm.on_frame(LampAction.STRAIGHT, now_monotonic=61.0)
     assert resumed.state == MissionState.BASE
     assert resumed.policy == PolicyChoice.BASE
 
 
 def test_action_specific_signal_vote_resets_on_unknown_and_class_change():
     latch = TrafficSignalLatch(
-        red_consecutive_reads=30,
+        red_consecutive_reads=10,
         left_consecutive_reads=30,
         straight_consecutive_reads=30,
     )
@@ -672,6 +674,14 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
             'LEFT': 30,
         },
     }
+    stop10_go30_adaptive_human_bbox_classifier_vote = {
+        **stabilized_human_bbox_classifier_vote,
+        'consecutive_reads_by_raw_class': {
+            'STOP': 10,
+            'STRAIGHT': 30,
+            'LEFT': 30,
+        },
+    }
 
     assert _load_signal_vote_contract(
         legacy,
@@ -776,6 +786,25 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
         schema_version=11,
         artifact_id=(
             EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    assert _load_signal_vote_contract(
+        {'signal_vote': stop10_go30_adaptive_human_bbox_classifier_vote},
+        schema_version=12,
+        artifact_id=(
+            EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == (10, 30, 30)
+    assert _expected_shortcut_artifact_id(
+        schema_version=12,
+        artifact_id=(
+            EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert _expected_base_artifact_id(
+        schema_version=12,
+        artifact_id=(
+            EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
         ),
     ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
     with pytest.raises(ArtifactContractError, match='signal vote'):
@@ -1095,6 +1124,34 @@ def test_traffic_light_viewer_launch_has_no_motion_endpoints():
     assert 'ExecuteProcess' not in launch_text
     assert '.create_publisher(' not in viewer_text
     assert 'UnixSocketPolicyClient' not in viewer_text
+
+
+@pytest.mark.parametrize(
+    ('schema_version', 'votes'),
+    [(11, (30, 30, 30)), (12, (10, 30, 30))],
+)
+def test_traffic_light_viewer_accepts_speed35_bundle_contracts(
+    schema_version,
+    votes,
+):
+    node = SimpleNamespace(
+        bundle=SimpleNamespace(
+            schema_version=schema_version,
+            detector=SimpleNamespace(
+                mode='yolo_cnn_classifier',
+                bbox_width_min=40,
+                bbox_width_max=225,
+                inference_every_n_frames=3,
+                classification_every_n_frames_after_detection=1,
+                reuse_detected_bbox_between_yolo_frames=True,
+                red_consecutive_reads=votes[0],
+                left_consecutive_reads=votes[1],
+                straight_consecutive_reads=votes[2],
+            ),
+        ),
+    )
+
+    TrafficLightViewerNode._validate_bundle_contract(node)
 
 
 def test_shadow_bundle_requires_verified_paired_server_identity():

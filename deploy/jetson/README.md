@@ -144,8 +144,8 @@ GPU server는 network와 hardware device 없이 실행되고, host Humble node�
 CPU fallback 없이 motion OFF와 `[0,0]`으로 처리한다.
 
 기본 GPU runtime은 Base schema v6, angle-only fixed-speed schema v7, traffic bundle
-schema v11과 두 policy 공유 CUDA IPC를 지원하는
-`xycar/ai-drive:jp6.2.1-pytorch25.06-schema11-traffic-actions3-v12` tag다. 기본 nice_adaptive artifact는
+schema v12와 두 policy 공유 CUDA IPC를 지원하는
+`xycar/ai-drive:jp6.2.1-pytorch25.06-schema12-traffic-actions3-v13` tag다. 기본 nice_adaptive artifact는
 `front-cam-policy-vit-small-ar4-v2-nice-adaptive-joint-regression-sequence-init25-window5-20260821`
 이며 실차 명령에서 `speed_cap:=25.0`을 명시한다. 일반 policy launch의 하위 호환
 기본 cap `30`은 바꾸지 않는다. 기존 `xycar/ai-drive:jp6.2.1-pytorch25.06` image와
@@ -154,16 +154,16 @@ schema v5 분류 artifact는 rollback용으로 삭제하지 않는다.
 GPU image 또는 `images.lock.env`를 변경한 배포는 image build만으로 끝내지 않는다.
 `install_runtime.sh`로 wrapper와 lock을 함께 설치하고, camera나 motor를 시작하기
 전에 source와 설치본이 같은지 확인한다. 설치본 lock이 이전 image를 가리키면
-schema v11 artifact가 container 시작 직후 종료될 수 있다.
+schema v12 artifact가 container 시작 직후 종료될 수 있다.
 
 ```bash
 cd /home/xytron/xycar_ws_mgw
 ./deploy/jetson/install_runtime.sh
 cmp deploy/jetson/images.lock.env \
   /home/xytron/.local/lib/xycar-ai-gpu/images.lock.env
-grep -Fx 'GPU_IMAGE=xycar/ai-drive:jp6.2.1-pytorch25.06-schema11-traffic-actions3-v12' \
+grep -Fx 'GPU_IMAGE=xycar/ai-drive:jp6.2.1-pytorch25.06-schema12-traffic-actions3-v13' \
   /home/xytron/.local/lib/xycar-ai-gpu/images.lock.env
-docker image inspect xycar/ai-drive:jp6.2.1-pytorch25.06-schema11-traffic-actions3-v12 >/dev/null
+docker image inspect xycar/ai-drive:jp6.2.1-pytorch25.06-schema12-traffic-actions3-v13 >/dev/null
 ```
 
 좌회전 전용 정사각형-warp artifact는 `speed_cap:=23.0`을 명시한다. 이 model-only
@@ -181,25 +181,28 @@ ONNX synthetic inference가 끝나면 network-none CUDA container 하나에 Base
 ResNet18을 모두 preload하고 두 socket을 연다. 두 server는 한 CUDA lock을 공유하고
 host 통합 node만 선택된 policy를 호출한다. `install_runtime.sh`가 설치하는
 `run_gpu_traffic_shortcut.sh`의 절대 경로를 사용하며 motor bridge는 시작하지 않는다.
-schema v11은 speed-35 Base와 사람 보정 YOLO11s의 640 letterbox 결과에서 confidence `0.25` 이상
+schema v12는 speed-35 Base와 사람 보정 YOLO11s의 640 letterbox 결과에서 confidence `0.25` 이상
 최고 box 하나만 선택하고 폭 `40..225`를 gate한다. 각 축 `15%` padded crop은
 Pillow bilinear 416×128/ImageNet 전처리 후 `STOP/STRAIGHT/LEFT` CNN으로 분류한다.
 softmax `0.50` 미만은 `UNKNOWN`이다. YOLO는 매 3 camera frame에 box를 탐색·갱신하고,
 검출 뒤 중간 frame에서는 직전 bbox와 현재 frame으로 CNN만 매 frame 실행한다.
 Base 구간과 shadow는 cap `35`, initial history `(0,35)×4`와 token `[50,85]×4`를
 사용하고, shortcut 구간의 고정 speed `23`은 변경하지 않는다.
-`STOP/LEFT/STRAIGHT`는 모두 30회(30 FPS 기준 약 1초) 연속이어야 확정되며,
-STOP latch는 동일 `LEFT/STRAIGHT`가 30회 확정될 때까지 유지한다. YOLO box가 10회의
+`STOP`은 처리 완료된 분류 10회, `LEFT/STRAIGHT`는 30회 연속이어야 확정되며,
+STOP latch는 동일 `LEFT/STRAIGHT`가 30회 확정될 때까지 유지한다. Jetson synthetic
+주행 경로에서 STOP10은 약 `0.8..1.0초`였고 camera 30 Hz와 vote rate는 같지 않다.
+YOLO box가 10회의
 scheduled 판독, 즉 30 camera frame 동안 없으면 기존처럼 STOP latch를
 해제한다. scheduled YOLO miss는 cached bbox를 즉시 지우므로 재검출 전까지 CNN
 판정을 멈춘다. shortcut이 실제 motor를 제어하는 동안 Base self-AR shadow를
 계속 갱신하되 발행하지 않는다. 8초 종료 때 최신 0.25초 이내 shadow command를
 즉시 발행하며, 누락·stale·IPC 오류는 fallback 없이 정지한다. red 취소는 shadow를
-폐기한다. 기존 schema v9 `stop10-go15`, schema v8 `stop3-go15`과 schema v6 `votes2`
+폐기한다. 기존 schema v11 `stop30-go30`, schema v9 `stop10-go15`, schema v8
+`stop3-go15`과 schema v6 `votes2`
 bundle은 rollback용으로 보존한다.
 
 ```bash
-cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-stop30-go30-search3-classify1-yolo-miss30-release-45sessions-20260823 use_camera:=true use_gamepad:=true allow_motion:=true
+cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-stop10-go30-search3-classify1-yolo-miss30-release-45sessions-20260823 use_camera:=true use_gamepad:=true allow_motion:=true
 ```
 
 camera, gamepad와 motor publisher를 시작하므로 실차 실행마다 별도 직전 승인을
