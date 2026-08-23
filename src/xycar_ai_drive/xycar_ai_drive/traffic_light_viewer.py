@@ -104,7 +104,15 @@ class TrafficLightViewerNode(Node):
         self._latch = TrafficSignalLatch(
             bbox_width_min=self.bundle.detector.bbox_width_min,
             bbox_width_max=self.bundle.detector.bbox_width_max,
-            consecutive_reads=self.bundle.detector.red_consecutive_reads,
+            red_consecutive_reads=(
+                self.bundle.detector.red_consecutive_reads
+            ),
+            left_consecutive_reads=(
+                self.bundle.detector.left_consecutive_reads
+            ),
+            straight_consecutive_reads=(
+                self.bundle.detector.straight_consecutive_reads
+            ),
         )
         self._bridge = CvBridge()
         self._lock = threading.RLock()
@@ -139,21 +147,30 @@ class TrafficLightViewerNode(Node):
             f'every={self.bundle.detector.inference_every_n_frames}, '
             f'width={self.bundle.detector.bbox_width_min}..'
             f'{self.bundle.detector.bbox_width_max}, '
-            f'votes={self.bundle.detector.red_consecutive_reads}'
+            f'votes=stop:{self.bundle.detector.red_consecutive_reads},'
+            f'left:{self.bundle.detector.left_consecutive_reads},'
+            f'straight:{self.bundle.detector.straight_consecutive_reads}'
         )
 
     def _validate_bundle_contract(self) -> None:
         detector = self.bundle.detector
-        if self.bundle.schema_version not in {4, 5, 6}:
+        if self.bundle.schema_version not in {4, 5, 6, 7}:
             raise ValueError(
-                'traffic viewer supports classifier bundle schema 4, 5 or 6'
+                'traffic viewer supports classifier bundle schema 4, 5, 6 or 7'
             )
         if detector.mode != 'yolo_cnn_classifier':
             raise ValueError(
                 'traffic viewer requires yolo_cnn_classifier mode'
             )
         expected_width = (
-            (40, 225) if self.bundle.schema_version == 6 else (45, 200)
+            (40, 225)
+            if self.bundle.schema_version in {6, 7}
+            else (45, 200)
+        )
+        expected_votes = (
+            (3, 15, 15)
+            if self.bundle.schema_version == 7
+            else (2, 2, 2)
         )
         if (
             detector.bbox_width_min != expected_width[0]
@@ -164,10 +181,10 @@ class TrafficLightViewerNode(Node):
                 detector.left_consecutive_reads,
                 detector.straight_consecutive_reads,
             )
-            != (2, 2, 2)
+            != expected_votes
         ):
             raise ValueError(
-                'traffic viewer bundle width/every3/votes2 contract mismatch'
+                'traffic viewer bundle width/every3/vote contract mismatch'
             )
 
     def _on_camera(self, message: Image) -> None:
@@ -577,10 +594,10 @@ def draw_signal_overlay(result: TrafficLightViewerResult) -> np.ndarray:
     box = inspection.bbox
     color = (0, 190, 0) if result.width_gate_accepted else (0, 120, 255)
     height, width = frame.shape[:2]
-    x1 = min(max(box.x, 0), width - 1)
-    y1 = min(max(box.y, 0), height - 1)
-    x2 = min(max(box.x + box.width, 0), width - 1)
-    y2 = min(max(box.y + box.height, 0), height - 1)
+    x1 = min(max(math.floor(box.x), 0), width - 1)
+    y1 = min(max(math.floor(box.y), 0), height - 1)
+    x2 = min(max(math.ceil(box.x + box.width), 0), width - 1)
+    y2 = min(max(math.ceil(box.y + box.height), 0), height - 1)
     if x2 > x1 and y2 > y1:
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
     label = (

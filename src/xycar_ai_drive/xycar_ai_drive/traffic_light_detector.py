@@ -93,7 +93,7 @@ class LetterboxTransform:
 
 @dataclass(frozen=True)
 class TrafficSignalLatchSnapshot:
-    """Read-only state of the deployed two-read signal vote."""
+    """Read-only state of the deployed action-specific signal vote."""
 
     candidate: SignalClass
     candidate_reads: int
@@ -638,14 +638,37 @@ class TrafficSignalLatch:
         bbox_width_min: int = 45,
         bbox_width_max: int = 200,
         consecutive_reads: int = 2,
+        red_consecutive_reads: int | None = None,
+        left_consecutive_reads: int | None = None,
+        straight_consecutive_reads: int | None = None,
     ) -> None:
         if bbox_width_min < 1 or bbox_width_max < bbox_width_min:
             raise ValueError('invalid traffic bbox width gate')
-        if consecutive_reads < 1:
+        common_reads = int(consecutive_reads)
+        red_reads = (
+            common_reads
+            if red_consecutive_reads is None
+            else int(red_consecutive_reads)
+        )
+        left_reads = (
+            common_reads
+            if left_consecutive_reads is None
+            else int(left_consecutive_reads)
+        )
+        straight_reads = (
+            common_reads
+            if straight_consecutive_reads is None
+            else int(straight_consecutive_reads)
+        )
+        if any(value < 1 for value in (red_reads, left_reads, straight_reads)):
             raise ValueError('signal consecutive reads must be positive')
         self._bbox_width_min = bbox_width_min
         self._bbox_width_max = bbox_width_max
-        self._consecutive_reads = consecutive_reads
+        self._consecutive_reads = {
+            LampAction.RED: red_reads,
+            LampAction.LEFT: left_reads,
+            LampAction.STRAIGHT: straight_reads,
+        }
         self._candidate = SignalClass.UNKNOWN
         self._candidate_reads = 0
         self._stop_latched = False
@@ -656,10 +679,11 @@ class TrafficSignalLatch:
 
     @property
     def snapshot(self) -> TrafficSignalLatchSnapshot:
+        required_reads = self._required_reads(self._candidate)
         return TrafficSignalLatchSnapshot(
             candidate=self._candidate,
             candidate_reads=self._candidate_reads,
-            required_reads=self._consecutive_reads,
+            required_reads=required_reads,
             stop_latched=self._stop_latched,
         )
 
@@ -683,11 +707,12 @@ class TrafficSignalLatch:
         else:
             self._candidate = raw
             self._candidate_reads = 1
+        required_reads = self._required_reads(raw)
         self._candidate_reads = min(
             self._candidate_reads,
-            self._consecutive_reads,
+            required_reads,
         )
-        confirmed = self._candidate_reads >= self._consecutive_reads
+        confirmed = self._candidate_reads >= required_reads
         action = _signal_class_action(raw)
         if self._stop_latched:
             if action == LampAction.RED or not confirmed:
@@ -713,6 +738,10 @@ class TrafficSignalLatch:
         if reading.signal_class == SignalClass.UNKNOWN:
             return SignalClass.UNKNOWN
         return reading.signal_class
+
+    def _required_reads(self, signal_class: SignalClass) -> int:
+        action = _signal_class_action(signal_class)
+        return self._consecutive_reads.get(action, 0)
 
 
 def _signal_class_action(signal_class: SignalClass) -> LampAction:

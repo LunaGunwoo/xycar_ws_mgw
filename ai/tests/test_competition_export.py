@@ -25,6 +25,7 @@ from xycar_ai.export_traffic_shortcut_bundle import (
     HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     HUMAN_BBOX_CLASSIFIER_SHA256,
     HUMAN_BBOX_TRAFFIC_SHA256,
+    STABILIZED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     _bundle_manifest,
 )
 from xycar_ai.steering_contract import steering_contract_mapping
@@ -178,7 +179,7 @@ def test_temporal_exports_build_one_verified_bundle(tmp_path: Path):
         )
 
 
-def test_human_bbox_traffic_bundle_manifest_is_action_classifier_v6(
+def test_human_bbox_traffic_bundle_manifests_preserve_models_and_version_votes(
     tmp_path: Path,
 ):
     base = tmp_path / 'base'
@@ -191,7 +192,7 @@ def test_human_bbox_traffic_bundle_manifest_is_action_classifier_v6(
     manifest = _bundle_manifest(
         artifact_id=HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
         schema_version=6,
-        consecutive_signal_reads=2,
+        consecutive_signal_reads_by_action=(2, 2, 2),
         base_artifact=base,
         shortcut_artifact=shortcut,
         shortcut_artifact_id=EXPANDED_SHORTCUT_ID,
@@ -211,3 +212,21 @@ def test_human_bbox_traffic_bundle_manifest_is_action_classifier_v6(
     assert detector['max_detections'] == 1
     assert detector['classifier']['minimum_probability'] == 0.5
     assert manifest['mission']['red_stop_yolo_missing_release_frames'] == 30
+    assert manifest['signal_vote']['consecutive_reads'] == 2
+
+    stabilized = _bundle_manifest(
+        artifact_id=STABILIZED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+        schema_version=7,
+        consecutive_signal_reads_by_action=(3, 15, 15),
+        base_artifact=base,
+        shortcut_artifact=shortcut,
+        shortcut_artifact_id=EXPANDED_SHORTCUT_ID,
+        traffic_classifier=tmp_path / 'classifier.onnx',
+    )
+
+    assert stabilized['components'] == manifest['components']
+    assert stabilized['detector'] == manifest['detector']
+    assert stabilized['mission'] == manifest['mission']
+    assert stabilized['signal_vote'][
+        'consecutive_reads_by_raw_class'
+    ] == {'STOP': 3, 'STRAIGHT': 15, 'LEFT': 15}

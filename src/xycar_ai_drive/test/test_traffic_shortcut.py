@@ -43,6 +43,7 @@ from xycar_ai_drive.traffic_shortcut_artifact import (
     EXPECTED_EXPANDED_SIGNAL_VOTE_BUNDLE_ID,
     EXPECTED_CLASSIFIER_BUNDLE_ID,
     EXPECTED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    EXPECTED_STABILIZED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID,
     EXPECTED_SHORTCUT_ARTIFACT_ID,
     EXPECTED_SIGNAL_VOTE_BUNDLE_ID,
@@ -314,6 +315,94 @@ def test_action_classifier_stop_maps_to_latched_red():
     assert latch.observe(straight) == LampAction.STRAIGHT
 
 
+def test_action_classifier_stop3_go15_applies_before_and_after_stop():
+    latch = TrafficSignalLatch(
+        bbox_width_min=40,
+        bbox_width_max=225,
+        red_consecutive_reads=3,
+        left_consecutive_reads=15,
+        straight_consecutive_reads=15,
+    )
+    stop = _signal(SignalClass.STOP)
+    left = _signal(SignalClass.LEFT)
+    straight = _signal(SignalClass.STRAIGHT)
+    fsm = TrafficShortcutFsm()
+    fsm.enable()
+
+    for step in range(2):
+        assert latch.observe(stop) == LampAction.UNKNOWN
+        assert latch.snapshot.required_reads == 3
+        assert latch.snapshot.candidate_reads == step + 1
+        assert fsm.on_frame(
+            LampAction.UNKNOWN,
+            now_monotonic=float(step),
+        ).policy == PolicyChoice.BASE
+    assert latch.observe(stop) == LampAction.RED
+    assert fsm.on_frame(
+        LampAction.RED,
+        now_monotonic=2.0,
+    ).state == MissionState.RED_STOP
+
+    for step in range(14):
+        assert latch.observe(left) == LampAction.RED
+        assert latch.snapshot.required_reads == 15
+        assert fsm.on_frame(
+            LampAction.RED,
+            now_monotonic=3.0 + step,
+        ).publish_stop
+    confirmed_left = latch.observe(left)
+    assert confirmed_left == LampAction.LEFT
+    left_plan = fsm.on_frame(confirmed_left, now_monotonic=17.0)
+    assert left_plan.state == MissionState.SWITCH_TO_SHORTCUT
+    assert left_plan.publish_stop
+
+    latch.reset()
+    fsm.enable()
+    for _ in range(14):
+        assert latch.observe(left) == LampAction.UNKNOWN
+    assert latch.observe(left) == LampAction.LEFT
+    assert fsm.on_frame(
+        LampAction.LEFT,
+        now_monotonic=20.0,
+    ).state == MissionState.SWITCH_TO_SHORTCUT
+
+    latch.reset()
+    fsm.enable()
+    for _ in range(3):
+        stopped = latch.observe(stop)
+    assert stopped == LampAction.RED
+    assert fsm.on_frame(stopped, now_monotonic=30.0).state == MissionState.RED_STOP
+    for _ in range(14):
+        assert latch.observe(straight) == LampAction.RED
+    assert latch.observe(straight) == LampAction.STRAIGHT
+    resumed = fsm.on_frame(LampAction.STRAIGHT, now_monotonic=31.0)
+    assert resumed.state == MissionState.BASE
+    assert resumed.policy == PolicyChoice.BASE
+
+
+def test_action_specific_signal_vote_resets_on_unknown_and_class_change():
+    latch = TrafficSignalLatch(
+        red_consecutive_reads=3,
+        left_consecutive_reads=15,
+        straight_consecutive_reads=15,
+    )
+    left = _signal(SignalClass.LEFT)
+    straight = _signal(SignalClass.STRAIGHT)
+
+    for _ in range(14):
+        assert latch.observe(left) == LampAction.UNKNOWN
+    assert latch.snapshot.candidate_reads == 14
+    assert latch.snapshot.required_reads == 15
+    assert latch.observe(straight) == LampAction.UNKNOWN
+    assert latch.snapshot.candidate == SignalClass.STRAIGHT
+    assert latch.snapshot.candidate_reads == 1
+    assert latch.snapshot.required_reads == 15
+    assert latch.observe(None) == LampAction.UNKNOWN
+    assert latch.snapshot.candidate == SignalClass.UNKNOWN
+    assert latch.snapshot.candidate_reads == 0
+    assert latch.snapshot.required_reads == 0
+
+
 def test_classifier_detector_rejects_bad_logits_and_empty_crop():
     yolo = _FakeOnnxSession(
         _output_with_candidates((320.0, 240.0, 100.0, 40.0, 0.9))
@@ -346,7 +435,7 @@ def test_classifier_detector_rejects_bad_logits_and_empty_crop():
         )
 
 
-def test_viewer_overlay_is_bound_to_the_inspected_frame():
+def test_viewer_overlay_accepts_fractional_letterbox_coordinates():
     frame = np.zeros((100, 160, 3), dtype=np.uint8)
     reading = SignalReading(
         signal_class=SignalClass.LEFT_GREEN,
@@ -356,7 +445,7 @@ def test_viewer_overlay_is_bound_to_the_inspected_frame():
     )
     inspection = SignalInspection(
         reading=reading,
-        bbox=DetectionBox(10, 10, 50, 20, 0.9),
+        bbox=DetectionBox(10.25, 10.5, 50.5, 20.25, 0.9),
         crop_bounds=ImageBounds(5, 5, 65, 35),
         probabilities=(0.05, 0.05, 0.8, 0.1),
     )
@@ -510,6 +599,19 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
         'stop_latch_behavior': 'retain_until_confirmed_go_action',
         'stop_clear_classes': ['LEFT', 'STRAIGHT'],
     }
+    stabilized_human_bbox_classifier_vote = {
+        'raw_classes': ['STOP', 'STRAIGHT', 'LEFT'],
+        'consecutive_reads_by_raw_class': {
+            'STOP': 3,
+            'STRAIGHT': 15,
+            'LEFT': 15,
+        },
+        'unknown_behavior': 'reset_candidate',
+        'different_raw_class_behavior': 'restart_candidate_at_one',
+        'stop_classes': ['STOP'],
+        'stop_latch_behavior': 'retain_until_confirmed_go_action',
+        'stop_clear_classes': ['LEFT', 'STRAIGHT'],
+    }
 
     assert _load_signal_vote_contract(
         legacy,
@@ -556,6 +658,15 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
     assert _expected_shortcut_artifact_id(
         schema_version=6,
         artifact_id=EXPECTED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert _load_signal_vote_contract(
+        {'signal_vote': stabilized_human_bbox_classifier_vote},
+        schema_version=7,
+        artifact_id=EXPECTED_STABILIZED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    ) == (3, 15, 15)
+    assert _expected_shortcut_artifact_id(
+        schema_version=7,
+        artifact_id=EXPECTED_STABILIZED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
     with pytest.raises(ArtifactContractError, match='signal vote'):
         _load_signal_vote_contract(

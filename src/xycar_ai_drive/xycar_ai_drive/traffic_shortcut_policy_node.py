@@ -143,7 +143,15 @@ class TrafficShortcutPolicyNode(Node):
             self._lamp_latch = TrafficSignalLatch(
                 bbox_width_min=self.bundle.detector.bbox_width_min,
                 bbox_width_max=self.bundle.detector.bbox_width_max,
-                consecutive_reads=self.bundle.detector.red_consecutive_reads,
+                red_consecutive_reads=(
+                    self.bundle.detector.red_consecutive_reads
+                ),
+                left_consecutive_reads=(
+                    self.bundle.detector.left_consecutive_reads
+                ),
+                straight_consecutive_reads=(
+                    self.bundle.detector.straight_consecutive_reads
+                ),
             )
         else:
             self._lamp_latch = TrafficLampLatch(
@@ -392,10 +400,14 @@ class TrafficShortcutPolicyNode(Node):
     def _validate_bundle_runtime_contract(self) -> None:
         detector = self.bundle.detector
         expected_width = (
-            (40, 225) if self.bundle.schema_version == 6 else (45, 200)
+            (40, 225)
+            if self.bundle.schema_version in {6, 7}
+            else (45, 200)
         )
         expected_votes = (
-            (2, 2, 2)
+            (3, 15, 15)
+            if self.bundle.schema_version == 7
+            else (2, 2, 2)
             if self.bundle.schema_version >= 4
             else (5, 5, 5)
             if self.bundle.schema_version == 3

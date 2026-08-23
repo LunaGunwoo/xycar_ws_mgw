@@ -49,14 +49,32 @@ HUMAN_BBOX_CLASSIFIER_BUNDLE_ID = (
     "yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-votes2-every3-"
     "yolo-miss30-release-45sessions-20260823"
 )
+STABILIZED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID = (
+    "traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-"
+    "yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-stop3-go15-"
+    "every3-yolo-miss30-release-45sessions-20260823"
+)
 BUNDLE_CONTRACTS = {
-    LEGACY_BUNDLE_ID: (1, 3, SHORTCUT_ID),
-    SHADOW_BUNDLE_ID: (2, 3, SHORTCUT_ID),
-    SIGNAL_VOTE_BUNDLE_ID: (3, 5, SHORTCUT_ID),
-    BUNDLE_ID: (3, 5, EXPANDED_SHORTCUT_ID),
-    CLASSIFIER_BUNDLE_ID: (4, 2, EXPANDED_SHORTCUT_ID),
-    YOLO_MISSING_RELEASE_BUNDLE_ID: (5, 2, EXPANDED_SHORTCUT_ID),
-    HUMAN_BBOX_CLASSIFIER_BUNDLE_ID: (6, 2, EXPANDED_SHORTCUT_ID),
+    LEGACY_BUNDLE_ID: (1, (3, 1, 1), SHORTCUT_ID),
+    SHADOW_BUNDLE_ID: (2, (3, 1, 1), SHORTCUT_ID),
+    SIGNAL_VOTE_BUNDLE_ID: (3, (5, 5, 5), SHORTCUT_ID),
+    BUNDLE_ID: (3, (5, 5, 5), EXPANDED_SHORTCUT_ID),
+    CLASSIFIER_BUNDLE_ID: (4, (2, 2, 2), EXPANDED_SHORTCUT_ID),
+    YOLO_MISSING_RELEASE_BUNDLE_ID: (
+        5,
+        (2, 2, 2),
+        EXPANDED_SHORTCUT_ID,
+    ),
+    HUMAN_BBOX_CLASSIFIER_BUNDLE_ID: (
+        6,
+        (2, 2, 2),
+        EXPANDED_SHORTCUT_ID,
+    ),
+    STABILIZED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID: (
+        7,
+        (3, 15, 15),
+        EXPANDED_SHORTCUT_ID,
+    ),
 }
 TRAFFIC_SHA256 = (
     "24c1a38eacfb065c95e5577be29a2a542b985d6ea1954bf2fc94c52eb674aa41"
@@ -136,7 +154,7 @@ def build_traffic_shortcut_bundle(
         )
     (
         schema_version,
-        consecutive_signal_reads,
+        consecutive_signal_reads_by_action,
         shortcut_artifact_id,
     ) = bundle_contract
     base_artifact = _verify_policy_artifact(
@@ -156,11 +174,13 @@ def build_traffic_shortcut_bundle(
     if not traffic_model.is_file():
         raise TrafficBundleBuildError(f"traffic ONNX is missing: {traffic_model}")
     expected_traffic_sha256 = (
-        HUMAN_BBOX_TRAFFIC_SHA256 if schema_version == 6 else TRAFFIC_SHA256
+        HUMAN_BBOX_TRAFFIC_SHA256
+        if schema_version in {6, 7}
+        else TRAFFIC_SHA256
     )
     expected_classifier_sha256 = (
         HUMAN_BBOX_CLASSIFIER_SHA256
-        if schema_version == 6
+        if schema_version in {6, 7}
         else CLASSIFIER_SHA256
     )
     if _sha256_file(traffic_model) != expected_traffic_sha256:
@@ -175,7 +195,7 @@ def build_traffic_shortcut_bundle(
         )
     elif traffic_classifier is not None:
         raise TrafficBundleBuildError(
-            "traffic classifier is only valid for schema v4/v5/v6"
+            "traffic classifier is only valid for schema v4/v5/v6/v7"
         )
 
     base_manifest = _load_mapping(base_artifact / "manifest.yaml")
@@ -226,7 +246,7 @@ def build_traffic_shortcut_bundle(
                 "traffic_light_onnx": {
                     "read_only_path": (
                         str(traffic_model)
-                        if schema_version == 6
+                        if schema_version in {6, 7}
                         else "/home/xytron/traffic_light.onnx"
                     ),
                     "sha256": expected_traffic_sha256,
@@ -234,7 +254,7 @@ def build_traffic_shortcut_bundle(
                 "tl_cls_onnx": {
                     "read_only_path": (
                         str(traffic_classifier)
-                        if schema_version == 6
+                        if schema_version in {6, 7}
                         and traffic_classifier is not None
                         else "/home/xytron/tl_cls.onnx"
                     ),
@@ -242,7 +262,7 @@ def build_traffic_shortcut_bundle(
                 },
             },
         }
-        if schema_version == 6:
+        if schema_version in {6, 7}:
             provenance["human_corrected_two_stage"] = {
                 "detector_checkpoint_sha256": (
                     HUMAN_BBOX_TRAFFIC_CHECKPOINT_SHA256
@@ -274,7 +294,9 @@ def build_traffic_shortcut_bundle(
         manifest = _bundle_manifest(
             artifact_id=artifact_id,
             schema_version=schema_version,
-            consecutive_signal_reads=consecutive_signal_reads,
+            consecutive_signal_reads_by_action=(
+                consecutive_signal_reads_by_action
+            ),
             base_artifact=base_artifact,
             shortcut_artifact=shortcut_artifact,
             shortcut_artifact_id=shortcut_artifact_id,
@@ -289,7 +311,9 @@ def build_traffic_shortcut_bundle(
             temporary,
             expected_id=artifact_id,
             expected_schema=schema_version,
-            expected_signal_reads=consecutive_signal_reads,
+            expected_signal_reads_by_action=(
+                consecutive_signal_reads_by_action
+            ),
             expected_shortcut_id=shortcut_artifact_id,
             expected_classifier=traffic_classifier is not None,
         )
@@ -305,7 +329,7 @@ def _bundle_manifest(
     *,
     artifact_id: str,
     schema_version: int,
-    consecutive_signal_reads: int,
+    consecutive_signal_reads_by_action: tuple[int, int, int],
     base_artifact: Path,
     shortcut_artifact: Path,
     shortcut_artifact_id: str,
@@ -378,7 +402,7 @@ def _bundle_manifest(
                 "file": "signal/traffic_light.onnx",
                 "sha256": (
                     HUMAN_BBOX_TRAFFIC_SHA256
-                    if schema_version == 6
+                    if schema_version in {6, 7}
                     else TRAFFIC_SHA256
                 ),
                 "input": {
@@ -421,7 +445,7 @@ def _bundle_manifest(
     }
     if schema_version >= 4:
         assert traffic_classifier is not None
-        if schema_version == 6:
+        if schema_version in {6, 7}:
             classifier_sha256 = HUMAN_BBOX_CLASSIFIER_SHA256
             classifier_height = 128
             classifier_width = 416
@@ -459,12 +483,12 @@ def _bundle_manifest(
         manifest["detector"] = {
             "confidence_threshold": 0.25,
             "bbox_width_px": (
-                [40, 225] if schema_version == 6 else [45, 200]
+                [40, 225] if schema_version in {6, 7} else [45, 200]
             ),
             "inference_every_n_frames": 3,
             "preprocessing": (
                 "letterbox_640_center_pad114_bgr_to_rgb_float32_nchw_div255"
-                if schema_version == 6
+                if schema_version in {6, 7}
                 else "resize_640_bgr_to_rgb_float32_nchw_div255"
             ),
             "selection": "maximum_confidence_box",
@@ -481,18 +505,18 @@ def _bundle_manifest(
                 "decision": classifier_decision,
             },
         }
-        if schema_version == 6:
+        if schema_version in {6, 7}:
             manifest["detector"]["max_detections"] = 1
             manifest["detector"]["classifier"]["minimum_probability"] = 0.5
     if schema_version < 3:
         manifest["red_latch"] = _legacy_red_latch_contract()
     elif schema_version == 3:
         manifest["signal_vote"] = _signal_vote_contract(
-            consecutive_signal_reads
+            consecutive_signal_reads_by_action[0]
         )
     else:
         manifest["signal_vote"] = _classifier_signal_vote_contract(
-            consecutive_signal_reads,
+            consecutive_signal_reads_by_action,
             schema_version=schema_version,
         )
     return manifest
@@ -518,14 +542,29 @@ def _signal_vote_contract(consecutive_reads: int) -> dict[str, object]:
 
 
 def _classifier_signal_vote_contract(
-    consecutive_reads: int,
+    consecutive_reads_by_action: tuple[int, int, int],
     *,
     schema_version: int,
 ) -> dict[str, object]:
+    stop_reads, left_reads, straight_reads = consecutive_reads_by_action
+    if schema_version == 7:
+        return {
+            "raw_classes": ["STOP", "STRAIGHT", "LEFT"],
+            "consecutive_reads_by_raw_class": {
+                "STOP": stop_reads,
+                "STRAIGHT": straight_reads,
+                "LEFT": left_reads,
+            },
+            "unknown_behavior": "reset_candidate",
+            "different_raw_class_behavior": "restart_candidate_at_one",
+            "stop_classes": ["STOP"],
+            "stop_latch_behavior": "retain_until_confirmed_go_action",
+            "stop_clear_classes": ["LEFT", "STRAIGHT"],
+        }
     if schema_version == 6:
         return {
             "raw_classes": ["STOP", "STRAIGHT", "LEFT"],
-            "consecutive_reads": consecutive_reads,
+            "consecutive_reads": stop_reads,
             "unknown_behavior": "reset_candidate",
             "different_raw_class_behavior": "restart_candidate_at_one",
             "stop_classes": ["STOP"],
@@ -539,7 +578,7 @@ def _classifier_signal_vote_contract(
             "left_green",
             "straight_green",
         ],
-        "consecutive_reads": consecutive_reads,
+        "consecutive_reads": stop_reads,
         "unknown_behavior": "reset_candidate",
         "different_raw_class_behavior": "restart_candidate_at_one",
         "stop_classes": ["red", "yellow"],
@@ -649,7 +688,7 @@ def _verify_built_bundle(
     *,
     expected_id: str,
     expected_schema: int,
-    expected_signal_reads: int,
+    expected_signal_reads_by_action: tuple[int, int, int],
     expected_shortcut_id: str,
     expected_classifier: bool,
 ) -> None:
@@ -663,12 +702,12 @@ def _verify_built_bundle(
         raise TrafficBundleBuildError("built bundle identity mismatch")
     expected_traffic_sha256 = (
         HUMAN_BBOX_TRAFFIC_SHA256
-        if expected_schema == 6
+        if expected_schema in {6, 7}
         else TRAFFIC_SHA256
     )
     expected_classifier_sha256 = (
         HUMAN_BBOX_CLASSIFIER_SHA256
-        if expected_schema == 6
+        if expected_schema in {6, 7}
         else CLASSIFIER_SHA256
     )
     if (
@@ -694,14 +733,14 @@ def _verify_built_bundle(
             )
     elif expected_schema == 3 and (
         manifest.get("signal_vote")
-        != _signal_vote_contract(expected_signal_reads)
+        != _signal_vote_contract(expected_signal_reads_by_action[0])
         or "red_latch" in manifest
     ):
         raise TrafficBundleBuildError("built bundle signal vote mismatch")
     elif expected_schema >= 4 and (
         manifest.get("signal_vote")
         != _classifier_signal_vote_contract(
-            expected_signal_reads,
+            expected_signal_reads_by_action,
             schema_version=expected_schema,
         )
         or "red_latch" in manifest
