@@ -23,6 +23,7 @@ def generate_launch_description():
     )
     signal_status_log_hz = LaunchConfiguration('signal_status_log_hz')
     use_monitor_gui = LaunchConfiguration('use_monitor_gui')
+    monitor_refresh_hz = LaunchConfiguration('monitor_refresh_hz')
     wrapper = (
         '/home/xytron/.local/lib/xycar-ai-gpu/'
         'run_gpu_traffic_shortcut.sh'
@@ -55,6 +56,10 @@ def generate_launch_description():
                 'use_monitor_gui',
                 default_value='false',
             ),
+            DeclareLaunchArgument(
+                'monitor_refresh_hz',
+                default_value='15.0',
+            ),
             SetEnvironmentVariable('TRAFFIC_SHORTCUT_BUNDLE_ID', bundle_id),
             SetEnvironmentVariable('ARTIFACT_ROOT', bundle_root),
             ExecuteProcess(
@@ -71,6 +76,7 @@ def generate_launch_description():
                     ],
                     ['signal_status_log_hz:=', signal_status_log_hz],
                     ['use_monitor_gui:=', use_monitor_gui],
+                    ['monitor_refresh_hz:=', monitor_refresh_hz],
                 ],
                 output='screen',
                 emulate_tty=True,

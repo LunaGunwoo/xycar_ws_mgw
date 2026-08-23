@@ -48,3 +48,4 @@ traffic_shortcut_monitor:
     prediction_stale_sec: 0.5
     motor_stale_sec: 0.5
     frame_buffer_size: 30
+    monitor_refresh_hz: 15.0

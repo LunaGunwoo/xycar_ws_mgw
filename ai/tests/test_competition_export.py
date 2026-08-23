@@ -36,6 +36,7 @@ from xycar_ai.export_traffic_shortcut_bundle import (
     SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_INITIAL_WAIT_FRESH3_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_INITIAL_WAIT_FRESH5_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    SPEED35_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     _bundle_manifest,
 )
 from xycar_ai.steering_contract import steering_contract_mapping
@@ -469,4 +470,33 @@ def test_human_bbox_traffic_bundle_manifests_preserve_models_and_version_votes(
     assert initial_wait_fresh3['mission']['base_speed_cap'] == 35.0
     assert 'red_stop_yolo_missing_release_frames' not in (
         initial_wait_fresh3['mission']
+    )
+
+    initial_wait_go1 = _bundle_manifest(
+        artifact_id=(
+            SPEED35_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+        schema_version=17,
+        consecutive_signal_reads_by_action=(5, 1, 1),
+        base_artifact=base,
+        shortcut_artifact=shortcut,
+        shortcut_artifact_id=EXPANDED_SHORTCUT_ID,
+        traffic_classifier=tmp_path / 'classifier.onnx',
+    )
+    assert initial_wait_go1['detector'] == initial_wait_fresh3['detector']
+    assert initial_wait_go1['signal_vote'] == {
+        **initial_wait_fresh3['signal_vote'],
+        'consecutive_reads_by_raw_class': {
+            'STOP': 5,
+            'STRAIGHT': 1,
+            'LEFT': 1,
+        },
+    }
+    assert initial_wait_go1['mission']['initial_stop'] == {
+        **initial_wait_fresh3['mission']['initial_stop'],
+        'clear_consecutive_reads': 1,
+    }
+    assert initial_wait_go1['mission']['base_speed_cap'] == 35.0
+    assert 'red_stop_yolo_missing_release_frames' not in (
+        initial_wait_go1['mission']
     )

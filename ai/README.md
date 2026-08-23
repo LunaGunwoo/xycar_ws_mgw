@@ -1032,7 +1032,7 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 신호등 통합 runtime에는 두 policy artifact 전체와 검증된 ONNX를 atomic bundle로
 묶는다. builder는 Base schema v6/compact external history, shortcut schema v7/fixed
 speed `23`, 224 square warp, steering 계약과 ONNX SHA-256을 확인하고 기존 bundle을
-덮어쓰지 않는다. 현재 bundle schema v16은 speed-35 Base의 output/cap `35`, initial
+덮어쓰지 않는다. 현재 bundle schema v17은 speed-35 Base의 output/cap `35`, initial
 history `(0,35)×4`, token `[50,85]×4`를 exact 검사한다. 신호등 경로는 사람 보정
 GT로 재학습한 YOLO11s의
 640 centered letterbox 결과 중 최고 confidence box 하나를 선택하고 bbox 폭
@@ -1041,22 +1041,22 @@ GT로 재학습한 YOLO11s의
 확률 `0.50` 미만은 `UNKNOWN`이다. YOLO와 CNN은 같은 fresh frame에서 camera
 sequence 간격 3 이상마다 함께 실행하고 중간 frame에서는 cached bbox CNN을
 실행하지 않는다. `LB+A` 또는 headless 시작은 즉시 정지 대기에 들어간다. STOP은
-scheduled fresh YOLO+CNN의 같은 raw class 5회, STRAIGHT/LEFT는 같은 raw class
-3회에서 확정한다. STRAIGHT는 Base, LEFT는 한 제어 주기 정지 뒤 바로 shortcut으로
-진입한다. 첫 출발 뒤 STOP은 motion action에서 영구 무시하고 navigation LEFT도 fresh 3회로
+scheduled fresh YOLO+CNN의 같은 raw class 5회, STRAIGHT/LEFT는 첫 fresh 판독
+1회에서 확정한다. STRAIGHT는 Base, LEFT는 한 제어 주기 정지 뒤 바로 shortcut으로
+진입한다. 첫 출발 뒤 STOP은 motion action에서 영구 무시하고 navigation LEFT도 fresh 1회로
 확정한다. scheduled YOLO no-box와 fresh UNKNOWN은 후보를 초기화하며 no-box만으로
-정지를 해제하지 않는다. 8초 Base self-AR shadow handoff와 schema v1-v15 rollback
+정지를 해제하지 않는다. 8초 Base self-AR shadow handoff와 schema v1-v16 rollback
 bundle은 그대로 보존한다.
 
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
-SOURCE_BUNDLE=artifacts/models/traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-initial-wait-all5-stop-once-left-direct-search3-classify1-vote-yolo3-45sessions-20260823
+SOURCE_BUNDLE=artifacts/models/traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-initial-wait-stop5-go3-stop-once-left-direct-search3-classify3-vote-yolo3-45sessions-20260823
 /home/xytron/.local/bin/uv run --locked xycar-build-traffic-shortcut-bundle \
   --base-artifact "${SOURCE_BUNDLE}/policies/front-cam-policy-vit-small-ar4-v2-nice-ada-very-fast-joint-regression-sequence-init35-window5-speed35-20260823" \
   --shortcut-artifact "${SOURCE_BUNDLE}/policies/nice-shortcut-resnet18-squarewarp-speed23-45sessions-20260821" \
   --traffic-model "${SOURCE_BUNDLE}/signal/traffic_light.onnx" \
   --traffic-classifier "${SOURCE_BUNDLE}/signal/tl_cls.onnx" \
-  --artifact-id traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-initial-wait-stop5-go3-stop-once-left-direct-search3-classify3-vote-yolo3-45sessions-20260823 \
+  --artifact-id traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-initial-wait-stop5-go1-stop-once-left-direct-search3-classify3-vote-yolo3-45sessions-20260823 \
   --output-root artifacts/models
 ```
 

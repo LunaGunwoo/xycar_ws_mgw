@@ -144,8 +144,8 @@ GPU server는 network와 hardware device 없이 실행되고, host Humble node�
 CPU fallback 없이 motion OFF와 `[0,0]`으로 처리한다.
 
 기본 GPU runtime은 Base schema v6, angle-only fixed-speed schema v7, traffic bundle
-schema v16과 두 policy 공유 CUDA IPC를 지원하는
-`xycar/ai-drive:jp6.2.1-pytorch25.06-schema16-traffic-fresh3-v17` tag다. 기본 nice_adaptive artifact는
+schema v17과 두 policy 공유 CUDA IPC를 지원하는
+`xycar/ai-drive:jp6.2.1-pytorch25.06-schema17-traffic-fresh3-go1-v18` tag다. 기본 nice_adaptive artifact는
 `front-cam-policy-vit-small-ar4-v2-nice-adaptive-joint-regression-sequence-init25-window5-20260821`
 이며 실차 명령에서 `speed_cap:=25.0`을 명시한다. 일반 policy launch의 하위 호환
 기본 cap `30`은 바꾸지 않는다. 기존 `xycar/ai-drive:jp6.2.1-pytorch25.06` image와
@@ -154,16 +154,16 @@ schema v5 분류 artifact는 rollback용으로 삭제하지 않는다.
 GPU image 또는 `images.lock.env`를 변경한 배포는 image build만으로 끝내지 않는다.
 `install_runtime.sh`로 wrapper와 lock을 함께 설치하고, camera나 motor를 시작하기
 전에 source와 설치본이 같은지 확인한다. 설치본 lock이 이전 image를 가리키면
-schema v16 artifact가 container 시작 직후 종료될 수 있다.
+schema v17 artifact가 container 시작 직후 종료될 수 있다.
 
 ```bash
 cd /home/xytron/xycar_ws_mgw
 ./deploy/jetson/install_runtime.sh
 cmp deploy/jetson/images.lock.env \
   /home/xytron/.local/lib/xycar-ai-gpu/images.lock.env
-grep -Fx 'GPU_IMAGE=xycar/ai-drive:jp6.2.1-pytorch25.06-schema16-traffic-fresh3-v17' \
+grep -Fx 'GPU_IMAGE=xycar/ai-drive:jp6.2.1-pytorch25.06-schema17-traffic-fresh3-go1-v18' \
   /home/xytron/.local/lib/xycar-ai-gpu/images.lock.env
-docker image inspect xycar/ai-drive:jp6.2.1-pytorch25.06-schema16-traffic-fresh3-v17 >/dev/null
+docker image inspect xycar/ai-drive:jp6.2.1-pytorch25.06-schema17-traffic-fresh3-go1-v18 >/dev/null
 ```
 
 좌회전 전용 정사각형-warp artifact는 `speed_cap:=23.0`을 명시한다. 이 model-only
@@ -185,7 +185,7 @@ managed camera 또는 gamepad가 종료되면 mission launch 전체를 종료한
 inner launch leader가 먼저 사라진 경우에도 남은 process group과 CUDA container를
 정리하며, SIGINT/SIGTERM 제한 시간을 넘긴 고아 group은 마지막에 SIGKILL로 제거한다.
 이전 `traffic_shortcut_policy` process가 남아 있으면 새 실행을 거부한다.
-schema v16은 speed-35 Base와 사람 보정 YOLO11s의 640 letterbox 결과에서 confidence `0.25` 이상
+schema v17은 speed-35 Base와 사람 보정 YOLO11s의 640 letterbox 결과에서 confidence `0.25` 이상
 최고 box 하나만 선택하고 폭 `40..225`를 gate한다. 각 축 `15%` padded crop은
 Pillow bilinear 416×128/ImageNet 전처리 후 `STOP/STRAIGHT/LEFT` CNN으로 분류한다.
 softmax `0.50` 미만은 `UNKNOWN`이다. YOLO와 CNN은 같은 fresh frame에서 camera
@@ -195,36 +195,40 @@ Base 구간과 shadow는 cap `35`, initial history `(0,35)×4`와 token `[50,85]
 SDL `game_controller_node`의 LB `buttons[9]`와 A를 함께 누르는 Gamepad mode 및
 headless mode는 활성화 순간부터 motor 정지를 유지한다.
 STOP은 3 camera frame마다 실행하는 fresh YOLO+CNN의 같은 raw class 5회,
-STRAIGHT/LEFT는 같은 raw class 3회에서 확정한다. initial STRAIGHT는 Base로 출발하고 initial LEFT는 한 제어
+STRAIGHT/LEFT는 첫 fresh 판독 1회에서 확정한다. initial STRAIGHT는 Base로 출발하고 initial LEFT는 한 제어
 주기 정지 뒤 shortcut으로 직행한다. initial STOP은 정지를 확정하며, 이후 같은
-STRAIGHT 또는 LEFT 3회에서 출발한다. 첫 출발 뒤 STOP은 motion action에서
-무시하고 LEFT fresh 3회는 shortcut을 시작한다. headless 첫 유효 fresh class는
+STRAIGHT 또는 LEFT 첫 fresh 판독에서 출발한다. 첫 출발 뒤 STOP은 motion action에서
+무시하고 LEFT fresh 1회는 shortcut을 시작한다. headless 첫 유효 fresh class는
 `READY`를 출력한다. 터미널 `SIGNAL`은 raw class 변경 즉시 및 2 Hz로 class,
 CNN/YOLO 확률, phase, vote와 `vote_update=YES/NO`를 출력한다. scheduled YOLO miss는
 fresh vote를 초기화하며 정지를 자동 해제하지 않는다.
 shortcut이 실제 motor를 제어하는 동안 Base self-AR shadow를
 계속 갱신하되 발행하지 않는다. 8초 종료 때 최신 0.25초 이내 shadow command를
 즉시 발행하며, 누락·stale·IPC 오류는 fallback 없이 정지한다. 이후 STOP은 shadow를
-폐기하지 않는다. 기존 schema v15 initial-wait-all5/search3-classify1, schema v14
+폐기하지 않는다. 기존 schema v16 stop5-go3/search3-classify3, schema v15
+initial-wait-all5/search3-classify1, schema v14
 initial-stop15/nonstop3, schema v13 `stop15-go15`, schema v12 `stop10-go30`, schema v11 `stop30-go30`, schema v9 `stop10-go15`, schema v8
 `stop3-go15`과 schema v6 `votes2`
 bundle은 rollback용으로 보존한다.
 
 ```bash
-cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-initial-wait-stop5-go3-stop-once-left-direct-search3-classify3-vote-yolo3-45sessions-20260823 use_camera:=true use_gamepad:=true allow_motion:=true
+cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-initial-wait-stop5-go1-stop-once-left-direct-search3-classify3-vote-yolo3-45sessions-20260823 use_camera:=true use_gamepad:=true allow_motion:=true
 ```
 
 camera, gamepad와 motor publisher를 시작하므로 실차 실행마다 별도 직전 승인을
 받고 바퀴 지지/안전 공간, 전원 차단, A release·`Ctrl+C`, 경쟁 publisher 부재를
 확인한다. 정지 상태에서 첫 신호를 판정하려면 `buttons[9]`인 LB를 누른 채 A를
 누르고, STOP을 처음부터 무시하며 Base로 즉시 출발하려면 A만 누른다. 정지 중에도 A를 유지하며
-같은 STRAIGHT 또는 LEFT의 fresh 판독 3회에서 자동 출발한다. 좌회전 성공
+STRAIGHT 또는 LEFT의 첫 fresh 판독에서 자동 출발한다. 좌회전 성공
 one-shot을 다시 실행하려면 node를 재시작한다.
 
-`use_monitor_gui:=true`에서는 signal timestamp와 정확히 매칭된 camera frame을
-별도로 보존해 ring-buffer eviction 뒤에도 fresh bbox와 확대 crop을 유지한다.
-진단이 1초 이상 stale이면 bbox/crop을 제거하고 최신 live camera로 전환한다.
-fresh timestamp frame을 받지 못한 경우에는 다른 frame에 overlay하지 않는다.
+`use_monitor_gui:=true`에서는 ROS callback을 background executor가 계속 비우고
+Tk는 기본 15 Hz로 최신 snapshot만 렌더한다. `LIVE CAMERA`에는 가장 최신 camera
+frame만 bbox 없이 표시하고, `MODEL INPUT (EXACT)`에는 signal timestamp와 정확히
+매칭된 inference frame에만 bbox와 확대 crop을 표시한다. 늦게 도착한 이전
+timestamp/sequence는 최신 표시를 되돌리지 않는다. exact frame이 1초 이상
+오래되면 `HISTORICAL/STALE`로 표시하며, 매칭 실패 시 다른 frame에 overlay하지
+않고 placeholder를 표시한다.
 
 ## Competition bundle wrapper
 

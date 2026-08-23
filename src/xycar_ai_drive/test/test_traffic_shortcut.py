@@ -62,6 +62,7 @@ from xycar_ai_drive.traffic_shortcut_artifact import (
     EXPECTED_SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_INITIAL_WAIT_FRESH3_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_INITIAL_WAIT_FRESH5_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    EXPECTED_SPEED35_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID,
     EXPECTED_SHORTCUT_ARTIFACT_ID,
@@ -95,6 +96,7 @@ from xycar_ai_drive.traffic_shortcut_monitor import (
     frame_stamp_key,
     monitor_crop_panel,
     monitor_frame_panel,
+    monitor_live_panel,
     select_signal_panel,
 )
 from xycar_ai_drive.control import DriveCommand, ToggleAction
@@ -697,6 +699,38 @@ def test_initial_wait_latch_uses_fresh_stop5_and_go3_votes():
     assert latch.observe(left) == LampAction.LEFT
 
 
+def test_initial_wait_latch_uses_fresh_stop5_and_go1_votes():
+    latch = InitialWaitSignalLatch(
+        bbox_width_min=40,
+        bbox_width_max=225,
+        stop_consecutive_reads=5,
+        left_consecutive_reads=1,
+        straight_consecutive_reads=1,
+    )
+    latch.reset(initial_stop_armed=True, wait_for_signal=True)
+    stop = _signal(SignalClass.STOP)
+    straight = _signal(SignalClass.STRAIGHT)
+    left = _signal(SignalClass.LEFT)
+
+    for step in range(4):
+        assert latch.observe(stop) == LampAction.RED
+        assert latch.snapshot.candidate_reads == step + 1
+        assert latch.snapshot.required_reads == 5
+    assert latch.observe(stop) == LampAction.RED
+    assert latch.snapshot.phase == InitialStopPhase.STOPPED
+    assert latch.observe(straight) == LampAction.STRAIGHT
+    assert latch.snapshot.phase == InitialStopPhase.NAVIGATION
+
+    assert latch.observe(stop) == LampAction.UNKNOWN
+    assert latch.snapshot.stop_ignored
+    assert latch.observe(left) == LampAction.LEFT
+
+    latch.reset(initial_stop_armed=True, wait_for_signal=True)
+    assert latch.observe(straight) == LampAction.STRAIGHT
+    latch.reset(initial_stop_armed=True, wait_for_signal=True)
+    assert latch.observe(left) == LampAction.LEFT
+
+
 def test_initial_wait_fsm_stops_then_routes_confirmed_left_directly():
     fsm = TrafficShortcutFsm(
         one_shot_initial_stop=True,
@@ -960,8 +994,8 @@ def test_monitor_matches_exact_stamp_and_never_overlays_another_frame():
         signal_stale_sec=1.0,
     )
     assert stale.mode == SignalPanelMode.STALE
-    assert stale.display_frame is latest
-    assert stale.overlay_signal is None
+    assert stale.display_frame is exact
+    assert stale.overlay_signal is signal
     stale_crop = monitor_crop_panel(
         stale.display_frame.image,
         stale.overlay_signal,
@@ -969,6 +1003,22 @@ def test_monitor_matches_exact_stamp_and_never_overlays_another_frame():
     )
     assert stale_crop.shape == (170, 880, 3)
     assert float(stale_crop.mean()) > 0.0
+
+    live_panel = monitor_live_panel(
+        retained.latest_frame.image,
+        camera_age=0.1,
+        stamp_key=retained.latest_frame.stamp_key,
+    )
+    assert np.count_nonzero(live_panel[200, 200]) == 0
+
+    delayed = MonitorFrame(
+        stamp_key=(50, 1),
+        image=np.full((300, 400, 3), 255, dtype=np.uint8),
+        received_monotonic=2.0,
+    )
+    TrafficShortcutMonitorNode._store_camera_frame_locked(node, delayed)
+    assert node._latest_frame is latest
+    assert node._frames[delayed.stamp_key] is delayed
 
 
 def test_monitor_matches_when_debug_arrives_before_camera_and_clears_mismatch():
@@ -1026,14 +1076,22 @@ def test_monitor_matches_when_debug_arrives_before_camera_and_clears_mismatch():
         signal_stale_sec=1.0,
     )
     assert selection.mode == SignalPanelMode.UNMATCHED
-    assert selection.display_frame is frame
+    assert selection.display_frame is None
     assert selection.overlay_signal is unmatched_signal
     placeholder = monitor_crop_panel(
-        frame.image,
+        selection.display_frame,
         unmatched_signal,
         display_mode=selection.mode,
     )
     assert float(placeholder.mean()) > 0.0
+
+    TrafficShortcutMonitorNode._store_signal_debug_locked(
+        node,
+        signal,
+        received_monotonic=3.0,
+    )
+    assert node._signal is unmatched_signal
+    assert node._signal_received_monotonic == 2.2
 
 
 def test_drive_vector_uses_normalized_angle_and_speed_magnitude():
@@ -1489,6 +1547,33 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
         schema_version=16,
         artifact_id=(
             EXPECTED_SPEED35_INITIAL_WAIT_FRESH3_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    initial_wait_go1_vote = {
+        **initial_wait_fresh3_vote,
+        'consecutive_reads_by_raw_class': {
+            'STOP': 5,
+            'STRAIGHT': 1,
+            'LEFT': 1,
+        },
+    }
+    assert _load_signal_vote_contract(
+        {'signal_vote': initial_wait_go1_vote},
+        schema_version=17,
+        artifact_id=(
+            EXPECTED_SPEED35_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == (5, 1, 1)
+    assert _expected_shortcut_artifact_id(
+        schema_version=17,
+        artifact_id=(
+            EXPECTED_SPEED35_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert _expected_base_artifact_id(
+        schema_version=17,
+        artifact_id=(
+            EXPECTED_SPEED35_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
         ),
     ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
     with pytest.raises(ArtifactContractError, match='signal vote'):
@@ -2063,6 +2148,8 @@ def test_traffic_shortcut_launch_ties_gamepad_to_hold_gate():
     assert "'signal_status_log_hz'" in launch_text
     assert "'use_monitor_gui'" in launch_text
     assert "default_value='false'" in launch_text
+    assert "'monitor_refresh_hz'" in launch_text
+    assert "default_value='15.0'" in launch_text
     assert "executable='traffic_shortcut_monitor'" in launch_text
     assert 'IfCondition(use_monitor_gui)' in launch_text
     assert 'traffic shortcut monitor exited; stopping mission' in launch_text
@@ -2077,6 +2164,7 @@ def test_traffic_shortcut_launch_ties_gamepad_to_hold_gate():
     assert "default_value='9'" in jetson_launch_text
     assert "'signal_status_log_hz:='" in jetson_launch_text
     assert "'use_monitor_gui:='" in jetson_launch_text
+    assert "'monitor_refresh_hz:='" in jetson_launch_text
 
     camera_launch_text = (
         Path(__file__).parents[3]
@@ -2157,7 +2245,12 @@ def test_traffic_shortcut_monitor_is_passive_and_has_no_inference_runtime():
     assert '/traffic_shortcut/signal_debug' in monitor_text
     assert 'traffic_shortcut_monitor:main' in setup_text
     assert 'frame_buffer_size: 30' in config_text
+    assert 'monitor_refresh_hz: 15.0' in config_text
     assert 'signal_debug_topic: /traffic_shortcut/signal_debug' in config_text
+    assert 'SingleThreadedExecutor' in monitor_text
+    assert 'rclpy.spin_once' not in monitor_text
+    assert 'LIVE CAMERA' in monitor_text
+    assert 'MODEL INPUT (EXACT)' in monitor_text
     assert 'self.signal_debug_publisher = self.create_publisher(' in policy_text
     assert 'get_subscription_count() < 1' in policy_text
 
@@ -2171,6 +2264,7 @@ def test_traffic_shortcut_monitor_is_passive_and_has_no_inference_runtime():
         (14, (15, 15, 15), 1, True),
         (15, (5, 5, 5), 1, True),
         (16, (5, 3, 3), 3, False),
+        (17, (5, 1, 1), 3, False),
     ],
 )
 def test_traffic_light_viewer_accepts_speed35_bundle_contracts(

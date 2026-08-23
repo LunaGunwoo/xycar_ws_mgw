@@ -18,9 +18,16 @@ import rclpy
 from cv_bridge import CvBridge
 from PIL import Image as PilImage
 from PIL import ImageTk
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (
+    DurabilityPolicy,
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+    qos_profile_sensor_data,
+)
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float32MultiArray, String
 
@@ -37,6 +44,12 @@ from xycar_ai_drive.traffic_shortcut_diagnostics import (
 
 CROP_PANEL_WIDTH = 880
 CROP_PANEL_HEIGHT = 170
+LATEST_RELIABLE_QOS = QoSProfile(
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.VOLATILE,
+)
 
 
 class SignalPanelMode(str, Enum):
@@ -92,6 +105,41 @@ class SignalPanelSelection:
     overlay_signal: SignalDebugSnapshot | None
 
 
+class MonitorExecutorThread:
+    """Continuously drain ROS callbacks outside the Tk render loop."""
+
+    def __init__(self, node: Node) -> None:
+        self._executor = SingleThreadedExecutor()
+        self._executor.add_node(node)
+        self._lock = threading.Lock()
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._spin,
+            name='traffic-shortcut-monitor-ros',
+            daemon=True,
+        )
+
+    @property
+    def error(self) -> BaseException | None:
+        with self._lock:
+            return self._error
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _spin(self) -> None:
+        try:
+            self._executor.spin()
+        except BaseException as exc:  # noqa: BLE001 - process boundary
+            with self._lock:
+                self._error = exc
+
+    def shutdown(self) -> None:
+        self._executor.shutdown(timeout_sec=2.0)
+        if self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+
+
 class TrafficShortcutMonitorNode(Node):
     """Read-only subscriber node; it never publishes or runs inference."""
 
@@ -139,25 +187,25 @@ class TrafficShortcutMonitorNode(Node):
             String,
             self.signal_debug_topic,
             self._on_signal_debug,
-            10,
+            LATEST_RELIABLE_QOS,
         )
         self.prediction_subscription = self.create_subscription(
             Float32MultiArray,
             self.prediction_topic,
             self._on_prediction,
-            10,
+            LATEST_RELIABLE_QOS,
         )
         self.motor_subscription = self.create_subscription(
             Float32MultiArray,
             self.motor_topic,
             self._on_motor,
-            10,
+            LATEST_RELIABLE_QOS,
         )
         self.enabled_subscription = self.create_subscription(
             Bool,
             self.enabled_topic,
             self._on_enabled,
-            10,
+            LATEST_RELIABLE_QOS,
         )
         self.get_logger().warning(
             'Passive traffic shortcut monitor started. Closing this window '
@@ -182,6 +230,7 @@ class TrafficShortcutMonitorNode(Node):
         self.declare_parameter('prediction_stale_sec', 0.5)
         self.declare_parameter('motor_stale_sec', 0.5)
         self.declare_parameter('frame_buffer_size', 30)
+        self.declare_parameter('monitor_refresh_hz', 15.0)
 
     def _read_parameters(self) -> None:
         self.bundle_dir = str(self.get_parameter('bundle_dir').value).strip()
@@ -215,6 +264,9 @@ class TrafficShortcutMonitorNode(Node):
         self.frame_buffer_size = int(
             self.get_parameter('frame_buffer_size').value
         )
+        self.monitor_refresh_hz = float(
+            self.get_parameter('monitor_refresh_hz').value
+        )
 
     def _validate_parameters(self) -> None:
         for label, value in (
@@ -232,6 +284,7 @@ class TrafficShortcutMonitorNode(Node):
             ('signal_stale_sec', self.signal_stale_sec),
             ('prediction_stale_sec', self.prediction_stale_sec),
             ('motor_stale_sec', self.motor_stale_sec),
+            ('monitor_refresh_hz', self.monitor_refresh_hz),
         ):
             if not math.isfinite(value) or value <= 0.0:
                 raise ValueError(f'{label} must be finite and positive')
@@ -284,7 +337,8 @@ class TrafficShortcutMonitorNode(Node):
 
     def _store_camera_frame_locked(self, frame: MonitorFrame) -> None:
         """Retain a camera frame and pin it if current diagnostics use it."""
-        self._latest_frame = frame
+        if _frame_is_newer(frame, self._latest_frame):
+            self._latest_frame = frame
         stamp_key = frame.stamp_key
         if stamp_key is None:
             return
@@ -324,6 +378,11 @@ class TrafficShortcutMonitorNode(Node):
         received_monotonic: float,
     ) -> None:
         """Store diagnostics and pin only their exact timestamped frame."""
+        if (
+            self._signal is not None
+            and signal.frame_sequence <= self._signal.frame_sequence
+        ):
+            return
         self._signal = signal
         self._signal_received_monotonic = received_monotonic
         self._matched_frame = (
@@ -403,18 +462,24 @@ class TrafficShortcutMonitorNode(Node):
 class TrafficShortcutMonitorApplication:
     """One-window visualization of signal and drive diagnostics."""
 
-    def __init__(self, node: TrafficShortcutMonitorNode) -> None:
+    def __init__(
+        self,
+        node: TrafficShortcutMonitorNode,
+        executor_thread: MonitorExecutorThread,
+    ) -> None:
         self.node = node
+        self.executor_thread = executor_thread
         self.closed = False
         self.root = tk.Tk()
         self.root.title('Xycar traffic shortcut live monitor (PASSIVE)')
-        self.root.geometry('1500x900')
-        self.root.minsize(1220, 760)
+        self.root.geometry('1720x900')
+        self.root.minsize(1380, 760)
         self.root.protocol('WM_DELETE_WINDOW', self.close)
         self.root.report_callback_exception = self._on_gui_exception
         self.root.bind('<Escape>', lambda _event: self.close())
         self.root.bind('q', lambda _event: self.close())
-        self._frame_photo: ImageTk.PhotoImage | None = None
+        self._live_photo: ImageTk.PhotoImage | None = None
+        self._exact_photo: ImageTk.PhotoImage | None = None
         self._crop_photo: ImageTk.PhotoImage | None = None
         self._render_signature: tuple[object, ...] | None = None
         self._probability_vars = {
@@ -435,7 +500,11 @@ class TrafficShortcutMonitorApplication:
         self._actual_text = tk.StringVar(value='Motor output: waiting')
         self._warning_text = tk.StringVar(value='')
         self._build_layout()
-        self.root.after(20, self._schedule_update)
+        self._refresh_interval_ms = max(
+            1,
+            int(round(1000.0 / self.node.monitor_refresh_hz)),
+        )
+        self.root.after(self._refresh_interval_ms, self._schedule_update)
 
     def run(self) -> None:
         self.root.mainloop()
@@ -452,26 +521,42 @@ class TrafficShortcutMonitorApplication:
         preview.rowconfigure(1, weight=4)
         preview.rowconfigure(3, minsize=CROP_PANEL_HEIGHT, weight=1)
         preview.columnconfigure(0, weight=1)
+        preview.columnconfigure(1, weight=1)
         ttk.Label(
             preview,
-            text='Camera frame used by the policy signal result',
+            text='LIVE CAMERA — latest subscriber frame (no bbox)',
         ).grid(row=0, column=0, sticky='w')
-        self.frame_label = ttk.Label(preview, anchor=tk.CENTER)
-        self.frame_label.grid(
+        ttk.Label(
+            preview,
+            text='MODEL INPUT (EXACT) — timestamp-matched inference frame',
+        ).grid(row=0, column=1, sticky='w', padx=(8, 0))
+        self.live_frame_label = ttk.Label(preview, anchor=tk.CENTER)
+        self.live_frame_label.grid(
             row=1,
             column=0,
             sticky='nsew',
+            padx=(0, 4),
+            pady=(4, 10),
+        )
+        self.exact_frame_label = ttk.Label(preview, anchor=tk.CENTER)
+        self.exact_frame_label.grid(
+            row=1,
+            column=1,
+            sticky='nsew',
+            padx=(4, 0),
             pady=(4, 10),
         )
         ttk.Label(preview, text='Padded CNN classifier crop').grid(
             row=2,
             column=0,
+            columnspan=2,
             sticky='w',
         )
         self.crop_label = ttk.Label(preview, anchor=tk.CENTER)
         self.crop_label.grid(
             row=3,
             column=0,
+            columnspan=2,
             sticky='nsew',
             pady=(4, 0),
         )
@@ -645,9 +730,16 @@ class TrafficShortcutMonitorApplication:
         if not rclpy.ok():
             self.close()
             return
-        rclpy.spin_once(self.node, timeout_sec=0.0)
+        executor_error = self.executor_thread.error
+        if executor_error is not None:
+            self.node.get_logger().error(
+                'traffic shortcut monitor ROS executor failed: '
+                f'{executor_error}'
+            )
+            self.close()
+            return
         self._refresh()
-        self.root.after(20, self._schedule_update)
+        self.root.after(self._refresh_interval_ms, self._schedule_update)
 
     def _refresh(self) -> None:
         snapshot = self.node.snapshot()
@@ -661,28 +753,46 @@ class TrafficShortcutMonitorApplication:
             now_monotonic=now,
             signal_stale_sec=self.node.signal_stale_sec,
         )
-        display_frame = selection.display_frame
+        exact_frame = selection.display_frame
+        live_model_delta_sec = _frame_signal_delta_seconds(
+            snapshot.latest_frame,
+            snapshot.signal,
+        )
         signature = (
-            None
-            if display_frame is None
-            else display_frame.stamp_key,
+            None if snapshot.latest_frame is None else snapshot.latest_frame.stamp_key,
+            None if exact_frame is None else exact_frame.stamp_key,
             snapshot.signal,
             selection.mode,
             snapshot.camera_error,
         )
         if signature != self._render_signature:
-            frame_panel = monitor_frame_panel(
-                None if display_frame is None else display_frame.image,
+            live_panel = monitor_live_panel(
+                None
+                if snapshot.latest_frame is None
+                else snapshot.latest_frame.image,
+                camera_age=camera_age,
+                stamp_key=(
+                    None
+                    if snapshot.latest_frame is None
+                    else snapshot.latest_frame.stamp_key
+                ),
+            )
+            exact_panel = monitor_frame_panel(
+                None if exact_frame is None else exact_frame.image,
                 selection.overlay_signal,
                 display_mode=selection.mode,
+                signal_age=signal_age,
+                live_model_delta_sec=live_model_delta_sec,
             )
             crop_panel = monitor_crop_panel(
-                None if display_frame is None else display_frame.image,
+                None if exact_frame is None else exact_frame.image,
                 selection.overlay_signal,
                 display_mode=selection.mode,
             )
-            self._frame_photo = _photo_for_panel(frame_panel, (880, 570))
-            self.frame_label.configure(image=self._frame_photo)
+            self._live_photo = _photo_for_panel(live_panel, (430, 570))
+            self.live_frame_label.configure(image=self._live_photo)
+            self._exact_photo = _photo_for_panel(exact_panel, (430, 570))
+            self.exact_frame_label.configure(image=self._exact_photo)
             self._crop_photo = _photo_for_panel(
                 crop_panel,
                 (CROP_PANEL_WIDTH, CROP_PANEL_HEIGHT),
@@ -715,7 +825,7 @@ class TrafficShortcutMonitorApplication:
         elif signal_stale:
             raw_class = f'{signal.raw_class} (STALE)'
             self._signal_status_text.set(
-                'SIGNAL STALE | live camera | bbox/crop cleared'
+                'HISTORICAL/STALE | exact model frame retained separately'
             )
             self._signal_detail_text.set(
                 f'last raw={signal.raw_class} | final={signal.final_action} | '
@@ -725,7 +835,9 @@ class TrafficShortcutMonitorApplication:
                 f'vote update={"YES" if signal.vote_updated else "NO"}\n'
                 f'policy frame={signal.frame_sequence} | traffic inference='
                 f'{signal.detector_inference_ms:.1f}ms | signal age='
-                f'{_age_text(signal_age)}'
+                f'{_age_text(signal_age)} | live-model delta='
+                f'{_delta_text(live_model_delta_sec)}\n'
+                f'model stamp={_stamp_text(signal.stamp_key)}'
             )
         else:
             raw_class = signal.raw_class
@@ -746,7 +858,9 @@ class TrafficShortcutMonitorApplication:
                 f'vote update={"YES" if signal.vote_updated else "NO"}\n'
                 f'policy frame={signal.frame_sequence} | traffic inference='
                 f'{signal.detector_inference_ms:.1f}ms | signal age='
-                f'{_age_text(signal_age)}'
+                f'{_age_text(signal_age)} | live-model delta='
+                f'{_delta_text(live_model_delta_sec)}\n'
+                f'model stamp={_stamp_text(signal.stamp_key)}'
             )
         self._signal_class_text.set(raw_class)
         self.signal_class_label.configure(fg=_signal_color(raw_class))
@@ -900,13 +1014,44 @@ def frame_stamp_key(sec: int, nanosec: int) -> tuple[int, int] | None:
     return sec, nanosec
 
 
+def _frame_is_newer(
+    candidate: MonitorFrame,
+    current: MonitorFrame | None,
+) -> bool:
+    """Prevent delayed camera callbacks from rewinding the live panel."""
+    if current is None:
+        return True
+    if candidate.stamp_key is not None and current.stamp_key is not None:
+        if candidate.stamp_key != current.stamp_key:
+            return candidate.stamp_key > current.stamp_key
+    return candidate.received_monotonic >= current.received_monotonic
+
+
+def _frame_signal_delta_seconds(
+    frame: MonitorFrame | None,
+    signal: SignalDebugSnapshot | None,
+) -> float | None:
+    if frame is None or signal is None:
+        return None
+    return _stamp_delta_seconds(frame.stamp_key, signal.stamp_key)
+
+
+def _stamp_delta_seconds(
+    newer: tuple[int, int] | None,
+    older: tuple[int, int] | None,
+) -> float | None:
+    if newer is None or older is None:
+        return None
+    return (newer[0] - older[0]) + (newer[1] - older[1]) / 1_000_000_000.0
+
+
 def select_signal_panel(
     snapshot: TrafficShortcutMonitorSnapshot,
     *,
     now_monotonic: float,
     signal_stale_sec: float,
 ) -> SignalPanelSelection:
-    """Select an exact diagnostic frame or a safe live-camera fallback."""
+    """Select only the exact model frame; live camera stays separate."""
     if not math.isfinite(now_monotonic):
         raise ValueError('monitor selection timestamp must be finite')
     if not math.isfinite(signal_stale_sec) or signal_stale_sec <= 0.0:
@@ -915,15 +1060,21 @@ def select_signal_panel(
     if signal is None:
         return SignalPanelSelection(
             mode=SignalPanelMode.WAITING,
-            display_frame=snapshot.latest_frame,
+            display_frame=None,
             overlay_signal=None,
         )
     signal_age = _age(snapshot.signal_received_monotonic, now_monotonic)
     if signal_age is None or signal_age >= signal_stale_sec:
+        matched = snapshot.matched_frame
+        exact = (
+            matched
+            if matched is not None and matched.stamp_key == signal.stamp_key
+            else None
+        )
         return SignalPanelSelection(
             mode=SignalPanelMode.STALE,
-            display_frame=snapshot.latest_frame,
-            overlay_signal=None,
+            display_frame=exact,
+            overlay_signal=signal,
         )
     matched = snapshot.matched_frame
     if matched is not None and matched.stamp_key == signal.stamp_key:
@@ -934,9 +1085,28 @@ def select_signal_panel(
         )
     return SignalPanelSelection(
         mode=SignalPanelMode.UNMATCHED,
-        display_frame=snapshot.latest_frame,
+        display_frame=None,
         overlay_signal=signal,
     )
+
+
+def monitor_live_panel(
+    frame: np.ndarray | None,
+    *,
+    camera_age: float | None,
+    stamp_key: tuple[int, int] | None,
+) -> np.ndarray:
+    """Render the latest camera frame without model overlays."""
+    if frame is None:
+        return _placeholder_panel('WAITING FOR LIVE CAMERA', width=640, height=420)
+    panel = frame.copy()
+    _put_overlay_text(
+        panel,
+        f'LIVE age={_age_text(camera_age)} stamp={_stamp_text(stamp_key)}',
+        (20, 38),
+        (255, 210, 80),
+    )
+    return panel
 
 
 def drive_vector_endpoint(
@@ -969,21 +1139,24 @@ def monitor_frame_panel(
     signal: SignalDebugSnapshot | None,
     *,
     display_mode: SignalPanelMode,
+    signal_age: float | None = None,
+    live_model_delta_sec: float | None = None,
 ) -> np.ndarray:
     """Render bbox only when diagnostics match the exact camera stamp."""
     if frame is None:
-        return _placeholder_panel('WAITING FOR CAMERA', width=640, height=420)
+        message = {
+            SignalPanelMode.UNMATCHED: 'FRAME MATCH UNAVAILABLE',
+            SignalPanelMode.STALE: 'HISTORICAL FRAME UNAVAILABLE',
+        }.get(display_mode, 'WAITING FOR MODEL INPUT')
+        return _placeholder_panel(message, width=640, height=420)
     panel = frame.copy()
-    if display_mode == SignalPanelMode.STALE:
+    if display_mode == SignalPanelMode.WAITING or signal is None:
         _put_overlay_text(
             panel,
-            'WAITING FOR NEW SIGNAL',
+            'WAITING FOR MODEL INPUT',
             (20, 38),
             (0, 165, 255),
         )
-        return panel
-    if display_mode == SignalPanelMode.WAITING or signal is None:
-        _put_overlay_text(panel, 'WAITING FOR SIGNAL', (20, 38), (0, 165, 255))
         return panel
     if display_mode == SignalPanelMode.UNMATCHED:
         _put_overlay_text(
@@ -995,23 +1168,44 @@ def monitor_frame_panel(
         return panel
     if signal.bbox is None:
         _put_overlay_text(panel, 'YOLO: NO BOX', (20, 38), (0, 165, 255))
-        return panel
-    box = signal.bbox
-    height, width = panel.shape[:2]
-    x1 = min(max(math.floor(box.x), 0), width - 1)
-    y1 = min(max(math.floor(box.y), 0), height - 1)
-    x2 = min(max(math.ceil(box.x + box.width), 0), width - 1)
-    y2 = min(max(math.ceil(box.y + box.height), 0), height - 1)
-    color = (0, 190, 0) if signal.width_gate_accepted else (0, 120, 255)
-    if x2 > x1 and y2 > y1:
-        cv2.rectangle(panel, (x1, y1), (x2, y2), color, 2)
-    probability = _raw_probability(signal)
-    label = (
-        f'{signal.raw_class} {probability * 100.0:.1f}% '
-        f'w={box.width:.1f} conf={box.confidence:.2f} '
-        f'{signal.source}'
+    else:
+        box = signal.bbox
+        height, width = panel.shape[:2]
+        x1 = min(max(math.floor(box.x), 0), width - 1)
+        y1 = min(max(math.floor(box.y), 0), height - 1)
+        x2 = min(max(math.ceil(box.x + box.width), 0), width - 1)
+        y2 = min(max(math.ceil(box.y + box.height), 0), height - 1)
+        color = (
+            (0, 190, 0)
+            if signal.width_gate_accepted
+            else (0, 120, 255)
+        )
+        if x2 > x1 and y2 > y1:
+            cv2.rectangle(panel, (x1, y1), (x2, y2), color, 2)
+        probability = _raw_probability(signal)
+        label = (
+            f'{signal.raw_class} {probability * 100.0:.1f}% '
+            f'w={box.width:.1f} conf={box.confidence:.2f} '
+            f'{signal.source}'
+        )
+        _put_overlay_text(panel, label, (x1, max(24, y1 - 8)), color)
+    height = panel.shape[0]
+    _put_overlay_text(
+        panel,
+        f'policy_seq={signal.frame_sequence} '
+        f'stamp={_stamp_text(signal.stamp_key)} '
+        f'age={_age_text(signal_age)} '
+        f'live-model={_delta_text(live_model_delta_sec)}',
+        (20, max(38, height - 18)),
+        (220, 220, 220),
     )
-    _put_overlay_text(panel, label, (x1, max(24, y1 - 8)), color)
+    if display_mode == SignalPanelMode.STALE:
+        _put_overlay_text(
+            panel,
+            'HISTORICAL/STALE',
+            (20, 72),
+            (0, 0, 255),
+        )
     return panel
 
 
@@ -1022,12 +1216,6 @@ def monitor_crop_panel(
     display_mode: SignalPanelMode,
 ) -> np.ndarray:
     """Render an enlarged padded crop only from the exact policy frame."""
-    if display_mode == SignalPanelMode.STALE:
-        return _placeholder_panel(
-            'WAITING FOR NEW SIGNAL',
-            width=CROP_PANEL_WIDTH,
-            height=CROP_PANEL_HEIGHT,
-        )
     if display_mode == SignalPanelMode.UNMATCHED:
         return _placeholder_panel(
             'FRAME MATCH UNAVAILABLE',
@@ -1038,7 +1226,7 @@ def monitor_crop_panel(
         frame is None
         or signal is None
         or signal.crop is None
-        or display_mode != SignalPanelMode.MATCHED
+        or display_mode not in {SignalPanelMode.MATCHED, SignalPanelMode.STALE}
     ):
         return _placeholder_panel(
             'NO CNN CROP',
@@ -1058,13 +1246,21 @@ def monitor_crop_panel(
             height=CROP_PANEL_HEIGHT,
         )
     crop = frame[y1:y2, x1:x2]
-    return _enlarged_crop_panel(
+    panel = _enlarged_crop_panel(
         crop,
         label=(
             f'{signal.source} crop=({x1},{y1})-({x2},{y2}) '
             f'size={x2 - x1}x{y2 - y1}'
         ),
     )
+    if display_mode == SignalPanelMode.STALE:
+        _put_overlay_text(
+            panel,
+            'HISTORICAL/STALE',
+            (CROP_PANEL_WIDTH - 230, 23),
+            (0, 0, 255),
+        )
+    return panel
 
 
 def _enlarged_crop_panel(crop: np.ndarray, *, label: str) -> np.ndarray:
@@ -1169,6 +1365,16 @@ def _age_text(age: float | None) -> str:
     return 'n/a' if age is None else f'{age:.2f}s'
 
 
+def _delta_text(delta: float | None) -> str:
+    return 'n/a' if delta is None else f'{delta:+.3f}s'
+
+
+def _stamp_text(stamp_key: tuple[int, int] | None) -> str:
+    if stamp_key is None:
+        return 'UNSTAMPED'
+    return f'{stamp_key[0]}.{stamp_key[1]:09d}'
+
+
 def _signal_color(raw_class: str) -> str:
     return {
         'STOP': '#cc0000',
@@ -1232,13 +1438,25 @@ def _photo_for_panel(
 def main(args: list[str] | None = None) -> int:
     rclpy.init(args=args)
     node: TrafficShortcutMonitorNode | None = None
+    executor_thread: MonitorExecutorThread | None = None
     try:
         node = TrafficShortcutMonitorNode()
-        application = TrafficShortcutMonitorApplication(node)
+        executor_thread = MonitorExecutorThread(node)
+        executor_thread.start()
+        application = TrafficShortcutMonitorApplication(
+            node,
+            executor_thread,
+        )
         application.run()
+        if executor_thread.error is not None:
+            raise RuntimeError(
+                'traffic shortcut monitor ROS executor failed'
+            ) from executor_thread.error
     except KeyboardInterrupt:
         pass
     finally:
+        if executor_thread is not None:
+            executor_thread.shutdown()
         if node is not None:
             node.destroy_node()
         if rclpy.ok():

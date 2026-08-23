@@ -35,6 +35,7 @@ def generate_launch_description():
     )
     signal_status_log_hz = LaunchConfiguration('signal_status_log_hz')
     use_monitor_gui = LaunchConfiguration('use_monitor_gui')
+    monitor_refresh_hz = LaunchConfiguration('monitor_refresh_hz')
 
     return LaunchDescription(
         [
@@ -78,6 +79,10 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 'use_monitor_gui',
                 default_value='false',
+            ),
+            DeclareLaunchArgument(
+                'monitor_refresh_hz',
+                default_value='15.0',
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -161,6 +166,10 @@ def generate_launch_description():
                     {
                         'bundle_dir': PathJoinSubstitution(
                             [bundle_root, bundle_id]
+                        ),
+                        'monitor_refresh_hz': ParameterValue(
+                            monitor_refresh_hz,
+                            value_type=float,
                         ),
                     },
                 ],
