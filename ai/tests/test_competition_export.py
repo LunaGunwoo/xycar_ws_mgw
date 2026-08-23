@@ -21,6 +21,7 @@ from xycar_ai.export_competition_policy import (
     verify_bundle,
 )
 from xycar_ai.export_traffic_shortcut_bundle import (
+    ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPANDED_SHORTCUT_ID,
     HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     HUMAN_BBOX_CLASSIFIER_SHA256,
@@ -230,3 +231,22 @@ def test_human_bbox_traffic_bundle_manifests_preserve_models_and_version_votes(
     assert stabilized['signal_vote'][
         'consecutive_reads_by_raw_class'
     ] == {'STOP': 3, 'STRAIGHT': 15, 'LEFT': 15}
+
+    adaptive = _bundle_manifest(
+        artifact_id=ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+        schema_version=8,
+        consecutive_signal_reads_by_action=(3, 15, 15),
+        base_artifact=base,
+        shortcut_artifact=shortcut,
+        shortcut_artifact_id=EXPANDED_SHORTCUT_ID,
+        traffic_classifier=tmp_path / 'classifier.onnx',
+    )
+
+    adaptive_detector = adaptive['detector']
+    assert adaptive_detector[
+        'classification_every_n_frames_after_detection'
+    ] == 1
+    assert adaptive_detector[
+        'reuse_detected_bbox_between_yolo_frames'
+    ] is True
+    assert adaptive['signal_vote'] == stabilized['signal_vote']

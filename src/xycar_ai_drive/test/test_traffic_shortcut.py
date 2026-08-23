@@ -19,6 +19,7 @@ from xycar_ai_drive.traffic_light_detector import (
     SignalClass,
     SignalInspection,
     SignalReading,
+    TrafficClassifierCadence,
     TrafficClassifierDetector,
     TrafficLampLatch,
     TrafficLightDetector,
@@ -39,6 +40,7 @@ from xycar_ai_drive.traffic_shortcut_fsm import (
     TrafficShortcutFsm,
 )
 from xycar_ai_drive.traffic_shortcut_artifact import (
+    EXPECTED_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID,
     EXPECTED_EXPANDED_SIGNAL_VOTE_BUNDLE_ID,
     EXPECTED_CLASSIFIER_BUNDLE_ID,
@@ -291,12 +293,49 @@ def test_human_bbox_classifier_uses_letterbox_416_input_and_threshold():
     assert tensor.dtype == np.float32
     assert np.isfinite(tensor).all()
 
+    yolo_calls = len(yolo.inputs)
+    cached = detector.classify_signal_box(frame, inspection.bbox)
+    assert cached.reading == inspection.reading
+    assert len(yolo.inputs) == yolo_calls
+    assert len(classifier.inputs) == 2
+
     classifier.output = np.zeros((1, 3), dtype=np.float32)
     unknown = detector.read_signal(frame)
     assert unknown is not None
     assert unknown.signal_class == SignalClass.UNKNOWN
     latch = TrafficSignalLatch(bbox_width_min=40, bbox_width_max=225)
     assert latch.observe(unknown) == LampAction.UNKNOWN
+
+
+def test_classifier_cadence_searches_every_three_then_classifies_every_frame():
+    cadence = TrafficClassifierCadence(
+        detector_every_n_frames=3,
+        classification_every_n_frames_after_detection=1,
+        reuse_detected_bbox_between_yolo_frames=True,
+    )
+    box = DetectionBox(10.0, 20.0, 100.0, 40.0, 0.9)
+
+    assert not cadence.plan(frame_sequence=1).run_detector
+    assert not cadence.plan(frame_sequence=2).run_detector
+    search = cadence.plan(frame_sequence=3)
+    assert search.run_detector
+    assert search.detector_frame_span == 3
+    cadence.observe_detection(frame_sequence=3, box=box)
+
+    classify_4 = cadence.plan(frame_sequence=4)
+    assert not classify_4.run_detector
+    assert classify_4.classification_box == box
+    cadence.observe_classification(frame_sequence=4)
+    classify_5 = cadence.plan(frame_sequence=5)
+    assert classify_5.classification_box == box
+    cadence.observe_classification(frame_sequence=5)
+
+    refresh = cadence.plan(frame_sequence=6)
+    assert refresh.run_detector
+    cadence.observe_detection(frame_sequence=6, box=None)
+    assert cadence.plan(frame_sequence=7).classification_box is None
+    assert cadence.plan(frame_sequence=8).classification_box is None
+    assert cadence.plan(frame_sequence=9).run_detector
 
 
 def test_action_classifier_stop_maps_to_latched_red():
@@ -668,6 +707,15 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
         schema_version=7,
         artifact_id=EXPECTED_STABILIZED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert _load_signal_vote_contract(
+        {'signal_vote': stabilized_human_bbox_classifier_vote},
+        schema_version=8,
+        artifact_id=EXPECTED_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    ) == (3, 15, 15)
+    assert _expected_shortcut_artifact_id(
+        schema_version=8,
+        artifact_id=EXPECTED_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
     with pytest.raises(ArtifactContractError, match='signal vote'):
         _load_signal_vote_contract(
             {
@@ -716,6 +764,22 @@ def test_yolo_missing_release_requires_ten_scheduled_misses():
         detector_observed=True,
         yolo_box_found=True,
     ) is False
+    assert counter.missing_frames == 0
+
+    for frame_span in (4, 4, 4, 4, 4, 4, 4):
+        assert not counter.observe(
+            red_stop_active=True,
+            detector_observed=True,
+            yolo_box_found=False,
+            detector_frame_span=frame_span,
+        )
+    assert counter.missing_frames == 28
+    assert counter.observe(
+        red_stop_active=True,
+        detector_observed=True,
+        yolo_box_found=False,
+        detector_frame_span=3,
+    )
     assert counter.missing_frames == 0
 
     for _ in range(9):

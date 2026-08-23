@@ -37,6 +37,7 @@ from xycar_ai_drive.front_cam_policy_node import (
 from xycar_ai_drive.policy_ipc import UnixSocketPolicyClient
 from xycar_ai_drive.traffic_light_detector import (
     LampAction,
+    TrafficClassifierCadence,
     TrafficLampLatch,
     TrafficSignalLatch,
 )
@@ -95,6 +96,7 @@ class YoloMissingReleaseCounter:
         red_stop_active: bool,
         detector_observed: bool,
         yolo_box_found: bool,
+        detector_frame_span: int | None = None,
     ) -> bool:
         if not red_stop_active:
             self.reset()
@@ -104,7 +106,14 @@ class YoloMissingReleaseCounter:
         if yolo_box_found:
             self.reset()
             return False
-        self.missing_frames += self._inference_every_n_frames
+        frame_span = (
+            self._inference_every_n_frames
+            if detector_frame_span is None
+            else detector_frame_span
+        )
+        if frame_span < 1:
+            raise ValueError('detector frame span must be positive')
+        self.missing_frames += frame_span
         if self.missing_frames < self._release_frames:
             return False
         self.reset()
@@ -180,6 +189,19 @@ class TrafficShortcutPolicyNode(Node):
             detector_factory(self.bundle)
             if detector_factory is not None
             else create_onnx_detector(self.bundle)
+        )
+        self._signal_cadence = TrafficClassifierCadence(
+            detector_every_n_frames=(
+                self.bundle.detector.inference_every_n_frames
+            ),
+            classification_every_n_frames_after_detection=(
+                self.bundle.detector
+                .classification_every_n_frames_after_detection
+            ),
+            reuse_detected_bbox_between_yolo_frames=(
+                self.bundle.detector
+                .reuse_detected_bbox_between_yolo_frames
+            ),
         )
         self._base_policy = self._create_policy_client(
             policy_client_factory,
@@ -401,12 +423,12 @@ class TrafficShortcutPolicyNode(Node):
         detector = self.bundle.detector
         expected_width = (
             (40, 225)
-            if self.bundle.schema_version in {6, 7}
+            if self.bundle.schema_version in {6, 7, 8}
             else (45, 200)
         )
         expected_votes = (
             (3, 15, 15)
-            if self.bundle.schema_version == 7
+            if self.bundle.schema_version in {7, 8}
             else (2, 2, 2)
             if self.bundle.schema_version >= 4
             else (5, 5, 5)
@@ -425,6 +447,17 @@ class TrafficShortcutPolicyNode(Node):
             != expected_votes
         ):
             raise ValueError('traffic detector width/votes/every contract mismatch')
+        expected_classification_every = (
+            1 if self.bundle.schema_version == 8 else 3
+        )
+        expected_reuse_detected_bbox = self.bundle.schema_version == 8
+        if (
+            detector.classification_every_n_frames_after_detection
+            != expected_classification_every
+            or detector.reuse_detected_bbox_between_yolo_frames
+            is not expected_reuse_detected_bbox
+        ):
+            raise ValueError('traffic classifier cadence contract mismatch')
         expected_yolo_missing_release_frames = (
             30 if self.bundle.schema_version >= 5 else None
         )
@@ -553,6 +586,9 @@ class TrafficShortcutPolicyNode(Node):
             self._fsm.enable()
             self._lamp_latch.reset()
             self._reset_yolo_missing_release_locked()
+            self._signal_cadence.reset(
+                frame_sequence=self._frame_sequence,
+            )
             self._last_signal = LampAction.UNKNOWN
             self._history = self._initial_external_history()
             self._discard_base_shadow_locked()
@@ -568,6 +604,9 @@ class TrafficShortcutPolicyNode(Node):
         elif action == ToggleAction.DISABLED:
             self._fsm.disable()
             self._reset_yolo_missing_release_locked()
+            self._signal_cadence.reset(
+                frame_sequence=self._frame_sequence,
+            )
             self._decision = None
             self._awaiting_post_reset_decision = False
             self._history_reset_monotonic = None
@@ -630,20 +669,44 @@ class TrafficShortcutPolicyNode(Node):
                     continue
                 generation = self._mission_generation
                 signal = self._last_signal
+                inference_plan = self._signal_cadence.plan(
+                    frame_sequence=sequence,
+                )
             try:
                 reading_observed = False
                 reading = None
-                if (
-                    sequence
-                    % self.bundle.detector.inference_every_n_frames
-                    == 0
-                ):
+                detected_box = None
+                detector_observed = inference_plan.run_detector
+                if inference_plan.run_detector:
                     bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-                    reading = self._read_detector(bgr)
+                    if self.bundle.detector.mode == 'yolo_cnn_classifier':
+                        inspection = self._detector.inspect_signal(bgr)
+                        if inspection is not None:
+                            reading = inspection.reading
+                            detected_box = inspection.bbox
+                    else:
+                        reading = self._detector.read_lamp(bgr)
+                    reading_observed = True
+                elif inference_plan.classification_box is not None:
+                    bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+                    inspection = self._detector.classify_signal_box(
+                        bgr,
+                        inference_plan.classification_box,
+                    )
+                    reading = inspection.reading
                     reading_observed = True
                 with self._lock:
                     if generation != self._mission_generation:
                         continue
+                    if inference_plan.run_detector:
+                        self._signal_cadence.observe_detection(
+                            frame_sequence=sequence,
+                            box=detected_box,
+                        )
+                    elif inference_plan.classification_box is not None:
+                        self._signal_cadence.observe_classification(
+                            frame_sequence=sequence,
+                        )
                     if reading_observed:
                         signal = self._lamp_latch.observe(reading)
                     if self._yolo_missing_release is not None:
@@ -653,8 +716,13 @@ class TrafficShortcutPolicyNode(Node):
                                     self._fsm.state
                                     == MissionState.RED_STOP
                                 ),
-                                detector_observed=reading_observed,
-                                yolo_box_found=reading is not None,
+                                detector_observed=detector_observed,
+                                yolo_box_found=detected_box is not None,
+                                detector_frame_span=(
+                                    inference_plan.detector_frame_span
+                                    if detector_observed
+                                    else None
+                                ),
                             )
                         )
                         if release_after_yolo_loss:
@@ -762,11 +830,6 @@ class TrafficShortcutPolicyNode(Node):
                 self._publish_prediction(decision)
             except Exception as exc:  # noqa: BLE001 - fail-closed boundary
                 self._force_fault(f'mission inference failed: {exc}')
-
-    def _read_detector(self, bgr: np.ndarray):
-        if self.bundle.detector.mode == 'yolo_cnn_classifier':
-            return self._detector.read_signal(bgr)
-        return self._detector.read_lamp(bgr)
 
     def _decision_from_result(
         self,
@@ -1143,6 +1206,9 @@ class TrafficShortcutPolicyNode(Node):
             self._history_reset_monotonic = None
             self._transition_stop_pending = False
             self._discard_base_shadow_locked()
+            self._signal_cadence.reset(
+                frame_sequence=self._frame_sequence,
+            )
             self._mission_generation += 1
             self._publish_stop()
         if was_enabled:
@@ -1186,6 +1252,9 @@ class TrafficShortcutPolicyNode(Node):
             self._drive_gate.fault()
             self._fsm.fault()
             self._reset_yolo_missing_release_locked()
+            self._signal_cadence.reset(
+                frame_sequence=self._frame_sequence,
+            )
             self._mission_generation += 1
             self._frame_condition.notify_all()
         self.publish_stop_burst()

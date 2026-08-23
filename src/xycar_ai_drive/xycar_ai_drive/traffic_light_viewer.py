@@ -25,6 +25,7 @@ from xycar_ai_drive.traffic_light_detector import (
     LampAction,
     SignalClass,
     SignalInspection,
+    TrafficClassifierCadence,
     TrafficClassifierDetector,
     TrafficSignalLatch,
     TrafficSignalLatchSnapshot,
@@ -52,6 +53,7 @@ class TrafficLightViewerResult:
     width_gate_accepted: bool
     final_action: LampAction
     latch_snapshot: TrafficSignalLatchSnapshot
+    inference_kind: str = 'YOLO+CNN'
     error: str | None = None
 
 
@@ -101,6 +103,19 @@ class TrafficLightViewerNode(Node):
                 'traffic viewer requires the CNN classifier detector'
             )
         self._detector = detector
+        self._signal_cadence = TrafficClassifierCadence(
+            detector_every_n_frames=(
+                self.bundle.detector.inference_every_n_frames
+            ),
+            classification_every_n_frames_after_detection=(
+                self.bundle.detector
+                .classification_every_n_frames_after_detection
+            ),
+            reuse_detected_bbox_between_yolo_frames=(
+                self.bundle.detector
+                .reuse_detected_bbox_between_yolo_frames
+            ),
+        )
         self._latch = TrafficSignalLatch(
             bbox_width_min=self.bundle.detector.bbox_width_min,
             bbox_width_max=self.bundle.detector.bbox_width_max,
@@ -144,7 +159,9 @@ class TrafficLightViewerNode(Node):
         self.get_logger().info(
             f'bundle={self.bundle.artifact_id}, camera={self.camera_topic}, '
             f'classes={"/".join(value.value for value in self.class_labels)}, '
-            f'every={self.bundle.detector.inference_every_n_frames}, '
+            f'search_every={self.bundle.detector.inference_every_n_frames}, '
+            f'classify_every='
+            f'{self.bundle.detector.classification_every_n_frames_after_detection}, '
             f'width={self.bundle.detector.bbox_width_min}..'
             f'{self.bundle.detector.bbox_width_max}, '
             f'votes=stop:{self.bundle.detector.red_consecutive_reads},'
@@ -154,9 +171,9 @@ class TrafficLightViewerNode(Node):
 
     def _validate_bundle_contract(self) -> None:
         detector = self.bundle.detector
-        if self.bundle.schema_version not in {4, 5, 6, 7}:
+        if self.bundle.schema_version not in {4, 5, 6, 7, 8}:
             raise ValueError(
-                'traffic viewer supports classifier bundle schema 4, 5, 6 or 7'
+                'traffic viewer supports classifier bundle schema 4..8'
             )
         if detector.mode != 'yolo_cnn_classifier':
             raise ValueError(
@@ -164,12 +181,12 @@ class TrafficLightViewerNode(Node):
             )
         expected_width = (
             (40, 225)
-            if self.bundle.schema_version in {6, 7}
+            if self.bundle.schema_version in {6, 7, 8}
             else (45, 200)
         )
         expected_votes = (
             (3, 15, 15)
-            if self.bundle.schema_version == 7
+            if self.bundle.schema_version in {7, 8}
             else (2, 2, 2)
         )
         if (
@@ -186,6 +203,17 @@ class TrafficLightViewerNode(Node):
             raise ValueError(
                 'traffic viewer bundle width/every3/vote contract mismatch'
             )
+        expected_classification_every = (
+            1 if self.bundle.schema_version == 8 else 3
+        )
+        expected_reuse_detected_bbox = self.bundle.schema_version == 8
+        if (
+            detector.classification_every_n_frames_after_detection
+            != expected_classification_every
+            or detector.reuse_detected_bbox_between_yolo_frames
+            is not expected_reuse_detected_bbox
+        ):
+            raise ValueError('traffic viewer classifier cadence mismatch')
 
     def _on_camera(self, message: Image) -> None:
         try:
@@ -216,8 +244,6 @@ class TrafficLightViewerNode(Node):
             sequence = self._frame_sequence
             self._last_camera_monotonic = now
             self._camera_error = None
-            if sequence % self.bundle.detector.inference_every_n_frames != 0:
-                return
             self._pending_frame = (
                 sequence,
                 frame.copy(),
@@ -242,14 +268,45 @@ class TrafficLightViewerNode(Node):
                     self._pending_frame
                 )
                 processed_sequence = sequence
+                inference_plan = self._signal_cadence.plan(
+                    frame_sequence=sequence,
+                )
+
+            if (
+                not inference_plan.run_detector
+                and inference_plan.classification_box is None
+            ):
+                continue
 
             started = time.perf_counter()
             try:
-                inspection = self._detector.inspect_signal(frame)
+                if inference_plan.run_detector:
+                    inspection = self._detector.inspect_signal(frame)
+                    inference_kind = 'YOLO+CNN'
+                else:
+                    assert inference_plan.classification_box is not None
+                    inspection = self._detector.classify_signal_box(
+                        frame,
+                        inference_plan.classification_box,
+                    )
+                    inference_kind = 'CNN cached bbox'
                 inference_ms = (time.perf_counter() - started) * 1000.0
                 with self._lock:
                     if generation != self._latch_generation:
                         continue
+                    if inference_plan.run_detector:
+                        self._signal_cadence.observe_detection(
+                            frame_sequence=sequence,
+                            box=(
+                                None
+                                if inspection is None
+                                else inspection.bbox
+                            ),
+                        )
+                    else:
+                        self._signal_cadence.observe_classification(
+                            frame_sequence=sequence,
+                        )
                     reading = (
                         None if inspection is None else inspection.reading
                     )
@@ -270,6 +327,7 @@ class TrafficLightViewerNode(Node):
                         width_gate_accepted=width_gate_accepted,
                         final_action=final_action,
                         latch_snapshot=self._latch.snapshot,
+                        inference_kind=inference_kind,
                     )
             except Exception as exc:  # noqa: BLE001 - inference boundary
                 inference_ms = (time.perf_counter() - started) * 1000.0
@@ -287,6 +345,11 @@ class TrafficLightViewerNode(Node):
                         width_gate_accepted=False,
                         final_action=LampAction.UNKNOWN,
                         latch_snapshot=self._latch.snapshot,
+                        inference_kind=(
+                            'YOLO+CNN'
+                            if inference_plan.run_detector
+                            else 'CNN cached bbox'
+                        ),
                         error=error,
                     )
                 self.get_logger().error(
@@ -312,6 +375,9 @@ class TrafficLightViewerNode(Node):
         with self._frame_condition:
             self._latch_generation += 1
             self._latch.reset()
+            self._signal_cadence.reset(
+                frame_sequence=self._frame_sequence,
+            )
             if self._result is not None:
                 self._result = replace(
                     self._result,
@@ -477,8 +543,8 @@ class TrafficLightViewerApplication:
                 status += f' | latest camera frame {camera_age:.2f}s old'
             self._status_text.set(status)
             self._detail_text.set(
-                'Inference runs on every third camera frame. No stale '
-                'prediction is displayed before the first result.'
+                'YOLO searches every third camera frame. After detection, '
+                'CNN classification runs on each processed camera frame.'
             )
             return
 
@@ -558,7 +624,9 @@ class TrafficLightViewerApplication:
             f'width gate: {self.node.bundle.detector.bbox_width_min}..'
             f'{self.node.bundle.detector.bbox_width_max}px\n'
             f'frame: {result.frame_sequence} (every '
-            f'{self.node.bundle.detector.inference_every_n_frames}) | '
+            f'{self.node.bundle.detector.inference_every_n_frames} search, '
+            f'{self.node.bundle.detector.classification_every_n_frames_after_detection} '
+            f'classify) | mode: {result.inference_kind} | '
             f'inference: {result.inference_ms:.1f}ms\n'
             f'sampled frame age: {sample_age:.2f}s | '
             f'latest camera age: {camera_age_text}'

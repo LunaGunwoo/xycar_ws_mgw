@@ -83,6 +83,92 @@ class SignalInspection:
 
 
 @dataclass(frozen=True)
+class TrafficClassifierInferencePlan:
+    """Select one YOLO refresh or cached-box CNN classification."""
+
+    run_detector: bool
+    classification_box: DetectionBox | None
+    detector_frame_span: int
+
+
+class TrafficClassifierCadence:
+    """Search every N frames, then classify a cached bbox every frame."""
+
+    def __init__(
+        self,
+        *,
+        detector_every_n_frames: int,
+        classification_every_n_frames_after_detection: int,
+        reuse_detected_bbox_between_yolo_frames: bool,
+    ) -> None:
+        if (
+            detector_every_n_frames < 1
+            or classification_every_n_frames_after_detection < 1
+            or classification_every_n_frames_after_detection
+            > detector_every_n_frames
+        ):
+            raise ValueError('invalid traffic classifier cadence')
+        self._detector_every_n_frames = detector_every_n_frames
+        self._classification_every_n_frames = (
+            classification_every_n_frames_after_detection
+        )
+        self._reuse_detected_bbox = bool(
+            reuse_detected_bbox_between_yolo_frames
+        )
+        self.reset()
+
+    def reset(self, *, frame_sequence: int = 0) -> None:
+        if frame_sequence < 0:
+            raise ValueError('frame sequence must not be negative')
+        self._last_detector_sequence = frame_sequence
+        self._last_classification_sequence = frame_sequence
+        self._tracked_box: DetectionBox | None = None
+
+    def plan(self, *, frame_sequence: int) -> TrafficClassifierInferencePlan:
+        if frame_sequence <= self._last_detector_sequence:
+            return TrafficClassifierInferencePlan(False, None, 0)
+        detector_frame_span = frame_sequence - self._last_detector_sequence
+        if detector_frame_span >= self._detector_every_n_frames:
+            return TrafficClassifierInferencePlan(
+                run_detector=True,
+                classification_box=None,
+                detector_frame_span=detector_frame_span,
+            )
+        if (
+            self._reuse_detected_bbox
+            and self._tracked_box is not None
+            and frame_sequence - self._last_classification_sequence
+            >= self._classification_every_n_frames
+        ):
+            return TrafficClassifierInferencePlan(
+                run_detector=False,
+                classification_box=self._tracked_box,
+                detector_frame_span=0,
+            )
+        return TrafficClassifierInferencePlan(False, None, 0)
+
+    def observe_detection(
+        self,
+        *,
+        frame_sequence: int,
+        box: DetectionBox | None,
+    ) -> None:
+        if frame_sequence <= self._last_detector_sequence:
+            raise ValueError('detector frame sequence must increase')
+        self._last_detector_sequence = frame_sequence
+        self._last_classification_sequence = frame_sequence
+        self._tracked_box = box if self._reuse_detected_bbox else None
+
+    def observe_classification(self, *, frame_sequence: int) -> None:
+        if (
+            self._tracked_box is None
+            or frame_sequence <= self._last_classification_sequence
+        ):
+            raise ValueError('invalid cached-box classification sequence')
+        self._last_classification_sequence = frame_sequence
+
+
+@dataclass(frozen=True)
 class LetterboxTransform:
     """Geometry needed to map a centered 640 letterbox back to a frame."""
 
@@ -394,6 +480,26 @@ class TrafficClassifierDetector:
         )
         if box is None:
             return None
+        return self.classify_signal_box(bgr_frame, box)
+
+    def classify_signal_box(
+        self,
+        bgr_frame: np.ndarray,
+        box: DetectionBox,
+    ) -> SignalInspection:
+        """Classify the current frame using a recently detected YOLO bbox."""
+        _validate_bgr_frame(bgr_frame)
+        if not all(
+            math.isfinite(value)
+            for value in (
+                box.x,
+                box.y,
+                box.width,
+                box.height,
+                box.confidence,
+            )
+        ):
+            raise TrafficLightError('traffic detection bbox is invalid')
         crop_bounds = self._crop_bounds(bgr_frame, box)
         crop = bgr_frame[
             crop_bounds.y1:crop_bounds.y2,
