@@ -29,6 +29,8 @@ from xycar_ai.export_traffic_shortcut_bundle import (
     STABILIZED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     STOP10_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    SPEED35_BASE_ID,
+    SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     _bundle_manifest,
 )
 from xycar_ai.steering_contract import steering_contract_mapping
@@ -282,3 +284,24 @@ def test_human_bbox_traffic_bundle_manifests_preserve_models_and_version_votes(
     assert stop30_go30_adaptive['signal_vote'][
         'consecutive_reads_by_raw_class'
     ] == {'STOP': 30, 'STRAIGHT': 30, 'LEFT': 30}
+
+    speed35_stop30_go30_adaptive = _bundle_manifest(
+        artifact_id=(
+            SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+        schema_version=11,
+        consecutive_signal_reads_by_action=(30, 30, 30),
+        base_artifact=base,
+        shortcut_artifact=shortcut,
+        shortcut_artifact_id=EXPANDED_SHORTCUT_ID,
+        traffic_classifier=tmp_path / 'classifier.onnx',
+    )
+
+    assert speed35_stop30_go30_adaptive['detector'] == adaptive_detector
+    assert speed35_stop30_go30_adaptive['signal_vote'] == (
+        stop30_go30_adaptive['signal_vote']
+    )
+    assert speed35_stop30_go30_adaptive['mission']['base_speed_cap'] == 35.0
+    assert speed35_stop30_go30_adaptive['components']['base'][
+        'artifact_id'
+    ] == SPEED35_BASE_ID

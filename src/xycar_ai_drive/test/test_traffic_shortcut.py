@@ -48,10 +48,13 @@ from xycar_ai_drive.traffic_shortcut_artifact import (
     EXPECTED_STABILIZED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_STOP10_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    EXPECTED_SPEED35_BASE_ARTIFACT_ID,
+    EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID,
     EXPECTED_SHORTCUT_ARTIFACT_ID,
     EXPECTED_SIGNAL_VOTE_BUNDLE_ID,
     _expected_shortcut_artifact_id,
+    _expected_base_artifact_id,
     _load_signal_vote_contract,
 )
 from xycar_ai_drive.traffic_shortcut_policy_node import (
@@ -756,6 +759,25 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
             EXPECTED_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
         ),
     ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert _load_signal_vote_contract(
+        {'signal_vote': stop30_go30_adaptive_human_bbox_classifier_vote},
+        schema_version=11,
+        artifact_id=(
+            EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == (30, 30, 30)
+    assert _expected_shortcut_artifact_id(
+        schema_version=11,
+        artifact_id=(
+            EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert _expected_base_artifact_id(
+        schema_version=11,
+        artifact_id=(
+            EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
     with pytest.raises(ArtifactContractError, match='signal vote'):
         _load_signal_vote_contract(
             {
@@ -997,6 +1019,7 @@ def test_integrated_node_post_reset_timeout_and_actual_history_only():
 
     published = []
     history_node = SimpleNamespace(
+        bundle=SimpleNamespace(base=SimpleNamespace(speed_output_max=30.0)),
         _history=deque([(50, 75)] * 4, maxlen=4),
         _last_executed_decision_sequence=0,
         _publish=lambda command: published.append(command),
@@ -1015,6 +1038,19 @@ def test_integrated_node_post_reset_timeout_and_actual_history_only():
     method(history_node, DriveCommand(), decision_sequence=None)
     assert len(published) == 3
     assert tuple(history_node._history)[-2:] == ((60, 75), (50, 50))
+
+    speed35_history_node = SimpleNamespace(
+        bundle=SimpleNamespace(base=SimpleNamespace(speed_output_max=35.0)),
+        _history=deque([(50, 85)] * 4, maxlen=4),
+        _last_executed_decision_sequence=0,
+        _publish=lambda _command: None,
+    )
+    method(
+        speed35_history_node,
+        DriveCommand(20.0, 35.0),
+        decision_sequence=8,
+    )
+    assert tuple(speed35_history_node._history)[-1] == (60, 85)
 
 
 def test_integrated_node_without_gamepad_does_not_require_joy():
@@ -1131,6 +1167,7 @@ def test_base_shadow_recursively_uses_capped_predictions_without_publish():
                 base_shadow_enabled=True,
                 base_speed_cap=25.0,
                 shortcut_speed=23.0,
+                base=SimpleNamespace(speed_output_max=30.0),
             ),
             _history=deque([(50, 75)] * 4, maxlen=4),
             _base_shadow_history=None,

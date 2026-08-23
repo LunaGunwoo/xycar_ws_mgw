@@ -423,12 +423,12 @@ class TrafficShortcutPolicyNode(Node):
         detector = self.bundle.detector
         expected_width = (
             (40, 225)
-            if self.bundle.schema_version in {6, 7, 8, 9, 10}
+            if self.bundle.schema_version in {6, 7, 8, 9, 10, 11}
             else (45, 200)
         )
         expected_votes = (
             (30, 30, 30)
-            if self.bundle.schema_version == 10
+            if self.bundle.schema_version in {10, 11}
             else (10, 15, 15)
             if self.bundle.schema_version == 9
             else (3, 15, 15)
@@ -452,9 +452,14 @@ class TrafficShortcutPolicyNode(Node):
         ):
             raise ValueError('traffic detector width/votes/every contract mismatch')
         expected_classification_every = (
-            1 if self.bundle.schema_version in {8, 9, 10} else 3
+            1 if self.bundle.schema_version in {8, 9, 10, 11} else 3
         )
-        expected_reuse_detected_bbox = self.bundle.schema_version in {8, 9, 10}
+        expected_reuse_detected_bbox = self.bundle.schema_version in {
+            8,
+            9,
+            10,
+            11,
+        }
         if (
             detector.classification_every_n_frames_after_detection
             != expected_classification_every
@@ -470,8 +475,15 @@ class TrafficShortcutPolicyNode(Node):
             != expected_yolo_missing_release_frames
         ):
             raise ValueError('traffic YOLO missing-release contract mismatch')
-        if self.bundle.base_speed_cap != 25.0:
-            raise ValueError('bundle Base speed cap must be 25')
+        expected_base_speed_cap = (
+            35.0 if self.bundle.schema_version == 11 else 25.0
+        )
+        if self.bundle.base_speed_cap != expected_base_speed_cap:
+            raise ValueError(
+                f'bundle Base speed cap must be {expected_base_speed_cap:g}'
+            )
+        if self.bundle.base_speed_cap > self.bundle.base.speed_output_max:
+            raise ValueError('bundle Base speed cap exceeds policy maximum')
         if (
             self.bundle.shortcut_speed != 23.0
             or self.bundle.shortcut.fixed_speed != 23.0
@@ -861,6 +873,7 @@ class TrafficShortcutPolicyNode(Node):
             command = cap_command_speed(
                 command,
                 self.bundle.base_speed_cap,
+                maximum_speed=self.bundle.base.speed_output_max,
             )
         elif not math.isclose(
             command.speed,
@@ -938,7 +951,10 @@ class TrafficShortcutPolicyNode(Node):
         ):
             return
         self._base_shadow_history.append(
-            command_history_token_ids(decision.command)
+            command_history_token_ids(
+                decision.command,
+                speed_max=self.bundle.base.speed_output_max,
+            )
         )
         self._base_shadow_decision = decision
 
@@ -1104,10 +1120,20 @@ class TrafficShortcutPolicyNode(Node):
     ) -> None:
         self._publish(command)
         if decision_sequence is None:
-            self._history.append(command_history_token_ids(command))
+            self._history.append(
+                command_history_token_ids(
+                    command,
+                    speed_max=self.bundle.base.speed_output_max,
+                )
+            )
             return
         if decision_sequence != self._last_executed_decision_sequence:
-            self._history.append(command_history_token_ids(command))
+            self._history.append(
+                command_history_token_ids(
+                    command,
+                    speed_max=self.bundle.base.speed_output_max,
+                )
+            )
             self._last_executed_decision_sequence = decision_sequence
 
     def _unsafe_reason_locked(self, now: float) -> str | None:

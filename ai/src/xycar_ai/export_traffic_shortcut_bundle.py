@@ -28,6 +28,10 @@ BASE_ID = (
     "front-cam-policy-vit-small-ar4-v2-nice-adaptive-joint-regression-"
     "sequence-init25-window5-20260821"
 )
+SPEED35_BASE_ID = (
+    "front-cam-policy-vit-small-ar4-v2-nice-ada-very-fast-joint-"
+    "regression-sequence-init35-window5-speed35-20260823"
+)
 SHORTCUT_ID = "nice-shortcut-resnet18-squarewarp-speed23-20260821"
 EXPANDED_SHORTCUT_ID = (
     "nice-shortcut-resnet18-squarewarp-speed23-45sessions-20260821"
@@ -69,6 +73,12 @@ STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID = (
     "yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-stop30-go30-"
     "search3-classify1-yolo-miss30-release-45sessions-20260823"
 )
+SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID = (
+    "traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-"
+    "shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-"
+    "tl40to225-stop30-go30-search3-classify1-yolo-miss30-release-"
+    "45sessions-20260823"
+)
 BUNDLE_CONTRACTS = {
     LEGACY_BUNDLE_ID: (1, (3, 1, 1), SHORTCUT_ID),
     SHADOW_BUNDLE_ID: (2, (3, 1, 1), SHORTCUT_ID),
@@ -102,6 +112,11 @@ BUNDLE_CONTRACTS = {
     ),
     STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID: (
         10,
+        (30, 30, 30),
+        EXPANDED_SHORTCUT_ID,
+    ),
+    SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID: (
+        11,
         (30, 30, 30),
         EXPANDED_SHORTCUT_ID,
     ),
@@ -187,9 +202,11 @@ def build_traffic_shortcut_bundle(
         consecutive_signal_reads_by_action,
         shortcut_artifact_id,
     ) = bundle_contract
+    base_artifact_id = SPEED35_BASE_ID if schema_version == 11 else BASE_ID
+    base_speed_cap = 35.0 if schema_version == 11 else 25.0
     base_artifact = _verify_policy_artifact(
         base_artifact,
-        expected_id=BASE_ID,
+        expected_id=base_artifact_id,
         expected_schema=6,
     )
     shortcut_artifact = _verify_policy_artifact(
@@ -205,12 +222,12 @@ def build_traffic_shortcut_bundle(
         raise TrafficBundleBuildError(f"traffic ONNX is missing: {traffic_model}")
     expected_traffic_sha256 = (
         HUMAN_BBOX_TRAFFIC_SHA256
-        if schema_version in {6, 7, 8, 9, 10}
+        if schema_version in {6, 7, 8, 9, 10, 11}
         else TRAFFIC_SHA256
     )
     expected_classifier_sha256 = (
         HUMAN_BBOX_CLASSIFIER_SHA256
-        if schema_version in {6, 7, 8, 9, 10}
+        if schema_version in {6, 7, 8, 9, 10, 11}
         else CLASSIFIER_SHA256
     )
     if _sha256_file(traffic_model) != expected_traffic_sha256:
@@ -225,7 +242,7 @@ def build_traffic_shortcut_bundle(
         )
     elif traffic_classifier is not None:
         raise TrafficBundleBuildError(
-            "traffic classifier is only valid for schema v4..v10"
+            "traffic classifier is only valid for schema v4..v11"
         )
 
     base_manifest = _load_mapping(base_artifact / "manifest.yaml")
@@ -233,6 +250,8 @@ def build_traffic_shortcut_bundle(
     _validate_policy_manifests(
         base_manifest,
         shortcut_manifest,
+        expected_base_id=base_artifact_id,
+        expected_base_speed_cap=base_speed_cap,
         expected_shortcut_id=shortcut_artifact_id,
     )
 
@@ -248,7 +267,7 @@ def build_traffic_shortcut_bundle(
     try:
         policies_dir = temporary / "policies"
         policies_dir.mkdir()
-        _copy_artifact(base_artifact, policies_dir / BASE_ID)
+        _copy_artifact(base_artifact, policies_dir / base_artifact_id)
         _copy_artifact(
             shortcut_artifact,
             policies_dir / shortcut_artifact_id,
@@ -276,7 +295,7 @@ def build_traffic_shortcut_bundle(
                 "traffic_light_onnx": {
                     "read_only_path": (
                         str(traffic_model)
-                        if schema_version in {6, 7, 8, 9, 10}
+                        if schema_version in {6, 7, 8, 9, 10, 11}
                         else "/home/xytron/traffic_light.onnx"
                     ),
                     "sha256": expected_traffic_sha256,
@@ -284,7 +303,7 @@ def build_traffic_shortcut_bundle(
                 "tl_cls_onnx": {
                     "read_only_path": (
                         str(traffic_classifier)
-                        if schema_version in {6, 7, 8, 9, 10}
+                        if schema_version in {6, 7, 8, 9, 10, 11}
                         and traffic_classifier is not None
                         else "/home/xytron/tl_cls.onnx"
                     ),
@@ -292,7 +311,7 @@ def build_traffic_shortcut_bundle(
                 },
             },
         }
-        if schema_version in {6, 7, 8, 9, 10}:
+        if schema_version in {6, 7, 8, 9, 10, 11}:
             provenance["human_corrected_two_stage"] = {
                 "detector_checkpoint_sha256": (
                     HUMAN_BBOX_TRAFFIC_CHECKPOINT_SHA256
@@ -344,6 +363,8 @@ def build_traffic_shortcut_bundle(
             expected_signal_reads_by_action=(
                 consecutive_signal_reads_by_action
             ),
+            expected_base_id=base_artifact_id,
+            expected_base_speed_cap=base_speed_cap,
             expected_shortcut_id=shortcut_artifact_id,
             expected_classifier=traffic_classifier is not None,
         )
@@ -365,6 +386,8 @@ def _bundle_manifest(
     shortcut_artifact_id: str,
     traffic_classifier: Path | None,
 ) -> dict[str, object]:
+    base_artifact_id = SPEED35_BASE_ID if schema_version == 11 else BASE_ID
+    base_speed_cap = 35.0 if schema_version == 11 else 25.0
     mission = {
         "states": [
             "OFF",
@@ -381,7 +404,7 @@ def _bundle_manifest(
         "successful_shortcut_once": True,
         "red_cancels_shortcut": True,
         "red_cancel_consumes_success": False,
-        "base_speed_cap": 25.0,
+        "base_speed_cap": base_speed_cap,
         "shortcut_speed": 23.0,
     }
     if schema_version >= 5:
@@ -412,8 +435,8 @@ def _bundle_manifest(
         "created_at": datetime.now(UTC).isoformat(),
         "components": {
             "base": {
-                "directory": f"policies/{BASE_ID}",
-                "artifact_id": BASE_ID,
+                "directory": f"policies/{base_artifact_id}",
+                "artifact_id": base_artifact_id,
                 "schema_version": 6,
                 "source_sha256s_sha256": _sha256_file(
                     base_artifact / "SHA256SUMS"
@@ -432,7 +455,7 @@ def _bundle_manifest(
                 "file": "signal/traffic_light.onnx",
                 "sha256": (
                     HUMAN_BBOX_TRAFFIC_SHA256
-                    if schema_version in {6, 7, 8, 9, 10}
+                    if schema_version in {6, 7, 8, 9, 10, 11}
                     else TRAFFIC_SHA256
                 ),
                 "input": {
@@ -475,7 +498,7 @@ def _bundle_manifest(
     }
     if schema_version >= 4:
         assert traffic_classifier is not None
-        if schema_version in {6, 7, 8, 9, 10}:
+        if schema_version in {6, 7, 8, 9, 10, 11}:
             classifier_sha256 = HUMAN_BBOX_CLASSIFIER_SHA256
             classifier_height = 128
             classifier_width = 416
@@ -514,13 +537,13 @@ def _bundle_manifest(
             "confidence_threshold": 0.25,
             "bbox_width_px": (
                 [40, 225]
-                if schema_version in {6, 7, 8, 9, 10}
+                if schema_version in {6, 7, 8, 9, 10, 11}
                 else [45, 200]
             ),
             "inference_every_n_frames": 3,
             "preprocessing": (
                 "letterbox_640_center_pad114_bgr_to_rgb_float32_nchw_div255"
-                if schema_version in {6, 7, 8, 9, 10}
+                if schema_version in {6, 7, 8, 9, 10, 11}
                 else "resize_640_bgr_to_rgb_float32_nchw_div255"
             ),
             "selection": "maximum_confidence_box",
@@ -537,10 +560,10 @@ def _bundle_manifest(
                 "decision": classifier_decision,
             },
         }
-        if schema_version in {6, 7, 8, 9, 10}:
+        if schema_version in {6, 7, 8, 9, 10, 11}:
             manifest["detector"]["max_detections"] = 1
             manifest["detector"]["classifier"]["minimum_probability"] = 0.5
-        if schema_version in {8, 9, 10}:
+        if schema_version in {8, 9, 10, 11}:
             manifest["detector"][
                 "classification_every_n_frames_after_detection"
             ] = 1
@@ -586,7 +609,7 @@ def _classifier_signal_vote_contract(
     schema_version: int,
 ) -> dict[str, object]:
     stop_reads, left_reads, straight_reads = consecutive_reads_by_action
-    if schema_version in {7, 8, 9, 10}:
+    if schema_version in {7, 8, 9, 10, 11}:
         return {
             "raw_classes": ["STOP", "STRAIGHT", "LEFT"],
             "consecutive_reads_by_raw_class": {
@@ -630,9 +653,14 @@ def _validate_policy_manifests(
     base: Mapping[str, object],
     shortcut: Mapping[str, object],
     *,
+    expected_base_id: str,
+    expected_base_speed_cap: float,
     expected_shortcut_id: str,
 ) -> None:
-    if base.get("schema_version") != 6 or base.get("artifact_id") != BASE_ID:
+    if (
+        base.get("schema_version") != 6
+        or base.get("artifact_id") != expected_base_id
+    ):
         raise TrafficBundleBuildError("base manifest contract mismatch")
     if (
         shortcut.get("schema_version") != 7
@@ -647,8 +675,25 @@ def _validate_policy_manifests(
     ):
         raise TrafficBundleBuildError("base regression contract mismatch")
     history = _required_mapping(base, "history", "base")
-    if history.get("update") != "externally_executed_commands":
+    if (
+        history.get("update") != "externally_executed_commands"
+        or history.get("initial_command") != [0, int(expected_base_speed_cap)]
+        or history.get("initial_token_ids")
+        != [50, 50 + int(expected_base_speed_cap)]
+        or history.get("actual_speed_token_range")
+        != [50, 50 + int(expected_base_speed_cap)]
+    ):
         raise TrafficBundleBuildError("base must use executed AR history")
+    output = _required_mapping(base_model, "output", "base model")
+    output_values = output.get("values")
+    if (
+        not isinstance(output_values, list)
+        or len(output_values) != 2
+        or not isinstance(output_values[1], Mapping)
+        or output_values[1].get("name") != "speed"
+        or output_values[1].get("range") != [0.0, expected_base_speed_cap]
+    ):
+        raise TrafficBundleBuildError("base speed output contract mismatch")
     runtime = _required_mapping(shortcut, "runtime", "shortcut")
     if (
         shortcut_model.get("prediction_mode") != "angle_regression_fixed_speed"
@@ -728,6 +773,8 @@ def _verify_built_bundle(
     expected_id: str,
     expected_schema: int,
     expected_signal_reads_by_action: tuple[int, int, int],
+    expected_base_id: str,
+    expected_base_speed_cap: float,
     expected_shortcut_id: str,
     expected_classifier: bool,
 ) -> None:
@@ -741,12 +788,12 @@ def _verify_built_bundle(
         raise TrafficBundleBuildError("built bundle identity mismatch")
     expected_traffic_sha256 = (
         HUMAN_BBOX_TRAFFIC_SHA256
-        if expected_schema in {6, 7, 8, 9, 10}
+        if expected_schema in {6, 7, 8, 9, 10, 11}
         else TRAFFIC_SHA256
     )
     expected_classifier_sha256 = (
         HUMAN_BBOX_CLASSIFIER_SHA256
-        if expected_schema in {6, 7, 8, 9, 10}
+        if expected_schema in {6, 7, 8, 9, 10, 11}
         else CLASSIFIER_SHA256
     )
     if (
@@ -797,9 +844,13 @@ def _verify_built_bundle(
         raise TrafficBundleBuildError(
             "built bundle YOLO missing-release contract mismatch"
         )
+    if _required_mapping(manifest, "mission", "bundle").get(
+        "base_speed_cap"
+    ) != expected_base_speed_cap:
+        raise TrafficBundleBuildError("built bundle Base speed cap mismatch")
     _verify_policy_artifact(
-        root / "policies" / BASE_ID,
-        expected_id=BASE_ID,
+        root / "policies" / expected_base_id,
+        expected_id=expected_base_id,
         expected_schema=6,
     )
     _verify_policy_artifact(
