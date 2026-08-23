@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from launch import LaunchDescription
+from launch.actions import Shutdown
 from launch_ros.actions import Node
 
 
@@ -34,6 +35,9 @@ def generate_launch_description():
                         'camera_frame_id': 'camera',
                     }
                 ],
+                on_exit=Shutdown(
+                    reason='front camera exited; stopping dependent launch'
+                ),
             )
         ]
     )

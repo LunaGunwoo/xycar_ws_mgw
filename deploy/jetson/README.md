@@ -181,6 +181,10 @@ ONNX synthetic inference가 끝나면 network-none CUDA container 하나에 Base
 ResNet18을 모두 preload하고 두 socket을 연다. 두 server는 한 CUDA lock을 공유하고
 host 통합 node만 선택된 policy를 호출한다. `install_runtime.sh`가 설치하는
 `run_gpu_traffic_shortcut.sh`의 절대 경로를 사용하며 motor bridge는 시작하지 않는다.
+managed camera 또는 gamepad가 종료되면 mission launch 전체를 종료한다. wrapper는
+inner launch leader가 먼저 사라진 경우에도 남은 process group과 CUDA container를
+정리하며, SIGINT/SIGTERM 제한 시간을 넘긴 고아 group은 마지막에 SIGKILL로 제거한다.
+이전 `traffic_shortcut_policy` process가 남아 있으면 새 실행을 거부한다.
 schema v13은 speed-35 Base와 사람 보정 YOLO11s의 640 letterbox 결과에서 confidence `0.25` 이상
 최고 box 하나만 선택하고 폭 `40..225`를 gate한다. 각 축 `15%` padded crop은
 Pillow bilinear 416×128/ImageNet 전처리 후 `STOP/STRAIGHT/LEFT` CNN으로 분류한다.

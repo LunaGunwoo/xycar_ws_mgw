@@ -18,21 +18,43 @@ BASE_SOCKET="${SOCKET_DIR}/traffic-base.sock"
 SHORTCUT_SOCKET="${SOCKET_DIR}/traffic-shortcut.sock"
 CONTAINER=xycar_ai_traffic_shortcut_gpu
 INNER_LAUNCH_PID=""
+CONTAINER_STARTED=false
 
 cleanup() {
     set +e
     if [ -n "${INNER_LAUNCH_PID}" ] \
-        && kill -0 "${INNER_LAUNCH_PID}" 2>/dev/null; then
+        && kill -0 -- "-${INNER_LAUNCH_PID}" 2>/dev/null; then
         kill -INT -- "-${INNER_LAUNCH_PID}" 2>/dev/null
-        sleep 1
-        kill -TERM -- "-${INNER_LAUNCH_PID}" 2>/dev/null
+        for _ in $(seq 1 10); do
+            if ! kill -0 -- "-${INNER_LAUNCH_PID}" 2>/dev/null; then
+                break
+            fi
+            sleep 0.1
+        done
+        if kill -0 -- "-${INNER_LAUNCH_PID}" 2>/dev/null; then
+            kill -TERM -- "-${INNER_LAUNCH_PID}" 2>/dev/null
+        fi
+        for _ in $(seq 1 10); do
+            if ! kill -0 -- "-${INNER_LAUNCH_PID}" 2>/dev/null; then
+                break
+            fi
+            sleep 0.1
+        done
+        if kill -0 -- "-${INNER_LAUNCH_PID}" 2>/dev/null; then
+            kill -KILL -- "-${INNER_LAUNCH_PID}" 2>/dev/null
+        fi
+    fi
+    if [ -n "${INNER_LAUNCH_PID}" ]; then
         wait "${INNER_LAUNCH_PID}" 2>/dev/null
     fi
-    docker stop --time 3 "${CONTAINER}" >/dev/null 2>&1
+    if [ "${CONTAINER_STARTED}" = true ]; then
+        docker stop --time 3 "${CONTAINER}" >/dev/null 2>&1
+    fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 set +u
 source /opt/ros/humble/setup.bash
@@ -42,6 +64,16 @@ export ROS_DOMAIN_ID=7
 export ROS_LOCALHOST_ONLY=1
 export ROS_NAMESPACE=xycar
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+
+EXISTING_POLICY_PIDS=$(pgrep -f \
+    '(^|/)traffic_shortcut_policy([[:space:]]|$)' || true)
+if [ -n "${EXISTING_POLICY_PIDS}" ]; then
+    echo "[ERROR] 이전 traffic_shortcut_policy process가 남아 있습니다:" >&2
+    ps -o pid,ppid,pgid,sid,stat,args -p \
+        "$(printf '%s\n' "${EXISTING_POLICY_PIDS}" | paste -sd, -)" >&2
+    echo "[ERROR] 이전 실행을 안전하게 종료한 뒤 다시 시작하세요." >&2
+    exit 1
+fi
 
 if [ ! -f "${BUNDLE_PATH}/SHA256SUMS" ]; then
     echo "[ERROR] traffic shortcut bundle이 없습니다: ${BUNDLE_PATH}" >&2
@@ -140,6 +172,7 @@ if docker ps -a --format '{{.Names}}' | grep -Fxq "${CONTAINER}"; then
 fi
 install -d -m 700 "${SOCKET_DIR}"
 
+CONTAINER_STARTED=true
 docker run --detach --rm \
     --name "${CONTAINER}" \
     --runtime nvidia \
@@ -185,5 +218,4 @@ set +e
 wait "${INNER_LAUNCH_PID}"
 STATUS=$?
 set -e
-INNER_LAUNCH_PID=""
 exit "${STATUS}"

@@ -514,6 +514,12 @@ detector와 3-class CNN 전체를 포함한다. detector ONNX SHA-256은
   camera와 motor subscriber가 준비되면 자동으로 ON이 되어 `Ctrl+C` 또는 fault까지
   계속 주행한다. camera/IPC stale, ONNX shape·NaN/Inf, 경쟁 publisher와 motor
   subscriber 소실은 어느 mode에서나 FAULT와 `[0,0]`이다.
+- managed camera 또는 gamepad process가 종료되면 전체 mission launch를 종료한다.
+  Jetson wrapper는 종료 시 launch process group leader가 이미 사라졌더라도 남은
+  policy를 process group 단위로 정리하고 CUDA container를 내린다. 이전
+  `traffic_shortcut_policy`가 남아 있으면 새 실행은 중복 motor publisher를 만들지
+  않고 시작 전에 거부한다. cleanup은 SIGINT와 SIGTERM에 제한 시간 동안 응답하지
+  않는 고아 group에만 마지막으로 SIGKILL을 적용한다.
 - schema v5/v6/v7/v8/v9/v10/v11/v12/v13의 STOP은 YOLO가 confidence `0.25` 이상 box를 10번 연속
   찾지 못하면(매 3 frame 판독, 총 30 camera frame·약 1초) 예외적으로 latch를
   해제하고 Base로 재출발한다. 폭 gate 실패나 classifier UNKNOWN은 YOLO box가

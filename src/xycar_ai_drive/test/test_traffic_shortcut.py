@@ -1168,6 +1168,37 @@ def test_traffic_shortcut_launch_ties_gamepad_to_hold_gate():
 
     assert "'require_gamepad_hold': ParameterValue(" in launch_text
     assert 'use_gamepad,' in launch_text
+    assert 'traffic shortcut gamepad exited; stopping mission' in launch_text
+
+    camera_launch_text = (
+        Path(__file__).parents[3]
+        / 'src'
+        / 'xycar_device'
+        / 'xycar_cam'
+        / 'launch'
+        / 'xycar_cam.launch.py'
+    ).read_text(encoding='utf-8')
+    assert 'front camera exited; stopping dependent launch' in (
+        camera_launch_text
+    )
+
+
+def test_traffic_shortcut_wrapper_rejects_orphans_and_cleans_process_group():
+    wrapper_path = (
+        Path(__file__).parents[3]
+        / 'deploy'
+        / 'jetson'
+        / 'run_gpu_traffic_shortcut.sh'
+    )
+    wrapper_text = wrapper_path.read_text(encoding='utf-8')
+
+    assert "'(^|/)traffic_shortcut_policy([[:space:]]|$)'" in wrapper_text
+    assert 'kill -0 -- "-${INNER_LAUNCH_PID}"' in wrapper_text
+    assert 'kill -KILL -- "-${INNER_LAUNCH_PID}"' in wrapper_text
+    assert "trap 'exit 129' HUP" in wrapper_text
+    assert 'if [ "${CONTAINER_STARTED}" = true ]; then' in wrapper_text
+    assert 'CONTAINER_STARTED=true\ndocker run --detach --rm' in wrapper_text
+    assert 'INNER_LAUNCH_PID=""\nexit "${STATUS}"' not in wrapper_text
 
 
 def test_traffic_light_viewer_launch_has_no_motion_endpoints():

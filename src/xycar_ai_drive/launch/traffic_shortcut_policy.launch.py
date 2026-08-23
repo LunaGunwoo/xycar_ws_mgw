@@ -85,6 +85,11 @@ def generate_launch_description():
                     },
                 ],
                 remappings=[('joy', '/joy')],
+                on_exit=Shutdown(
+                    reason=(
+                        'traffic shortcut gamepad exited; stopping mission'
+                    )
+                ),
             ),
             Node(
                 package='xycar_ai_drive',
