@@ -1019,16 +1019,16 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 신호등 통합 runtime에는 두 policy artifact 전체와 검증된 ONNX를 atomic bundle로
 묶는다. builder는 Base schema v6/compact external history, shortcut schema v7/fixed
 speed `23`, 224 square warp, steering 계약과 ONNX SHA-256을 확인하고 기존 bundle을
-덮어쓰지 않는다. 현재 bundle schema v8은 사람 보정 GT로 재학습한 YOLO11s의
+덮어쓰지 않는다. 현재 bundle schema v9는 사람 보정 GT로 재학습한 YOLO11s의
 640 centered letterbox 결과 중 최고 confidence box 하나를 선택하고 bbox 폭
 `40..225`를 gate한다. box에 축별 `15%` padding을 적용한 crop을 Pillow bilinear
 416×128로 바꿔 3-class `STOP/STRAIGHT/LEFT` CNN을 실행한다. classifier softmax
 확률 `0.50` 미만은 `UNKNOWN`이다. YOLO는 매 3 camera frame에 box를 탐색·갱신하고,
 검출 뒤의 중간 frame은 직전 bbox를 현재 frame에 적용해 CNN만 매 frame 실행한다.
-동일 `STOP` 3회, `LEFT/STRAIGHT` 15회가 확정 기준이며 STOP latch도 같은 go class
+동일 `STOP` 10회, `LEFT/STRAIGHT` 15회가 확정 기준이며 STOP latch도 같은 go class
 15회까지 유지한다. 다음 scheduled YOLO가 box를 놓치면 bbox cache를 즉시 지우고
 재검출 전까지 CNN 판정을 중단한다.
-8초 Base self-AR shadow handoff와 schema v1-v6 rollback bundle은 그대로 보존한다.
+8초 Base self-AR shadow handoff와 schema v1-v8 rollback bundle은 그대로 보존한다.
 
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
@@ -1038,7 +1038,7 @@ SOURCE_BUNDLE=artifacts/models/traffic-shortcut-nice-regression-resnet18-8s-shad
   --shortcut-artifact "${SOURCE_BUNDLE}/policies/nice-shortcut-resnet18-squarewarp-speed23-45sessions-20260821" \
   --traffic-model "${SOURCE_BUNDLE}/signal/traffic_light.onnx" \
   --traffic-classifier "${SOURCE_BUNDLE}/signal/tl_cls.onnx" \
-  --artifact-id traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-stop3-go15-search3-classify1-yolo-miss30-release-45sessions-20260823 \
+  --artifact-id traffic-shortcut-nice-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-stop10-go15-search3-classify1-yolo-miss30-release-45sessions-20260823 \
   --output-root artifacts/models
 ```
 

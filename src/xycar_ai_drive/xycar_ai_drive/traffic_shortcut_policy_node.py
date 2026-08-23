@@ -423,11 +423,13 @@ class TrafficShortcutPolicyNode(Node):
         detector = self.bundle.detector
         expected_width = (
             (40, 225)
-            if self.bundle.schema_version in {6, 7, 8}
+            if self.bundle.schema_version in {6, 7, 8, 9}
             else (45, 200)
         )
         expected_votes = (
-            (3, 15, 15)
+            (10, 15, 15)
+            if self.bundle.schema_version == 9
+            else (3, 15, 15)
             if self.bundle.schema_version in {7, 8}
             else (2, 2, 2)
             if self.bundle.schema_version >= 4
@@ -448,9 +450,9 @@ class TrafficShortcutPolicyNode(Node):
         ):
             raise ValueError('traffic detector width/votes/every contract mismatch')
         expected_classification_every = (
-            1 if self.bundle.schema_version == 8 else 3
+            1 if self.bundle.schema_version in {8, 9} else 3
         )
-        expected_reuse_detected_bbox = self.bundle.schema_version == 8
+        expected_reuse_detected_bbox = self.bundle.schema_version in {8, 9}
         if (
             detector.classification_every_n_frames_after_detection
             != expected_classification_every

@@ -27,6 +27,7 @@ from xycar_ai.export_traffic_shortcut_bundle import (
     HUMAN_BBOX_CLASSIFIER_SHA256,
     HUMAN_BBOX_TRAFFIC_SHA256,
     STABILIZED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    STOP10_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     _bundle_manifest,
 )
 from xycar_ai.steering_contract import steering_contract_mapping
@@ -250,3 +251,18 @@ def test_human_bbox_traffic_bundle_manifests_preserve_models_and_version_votes(
         'reuse_detected_bbox_between_yolo_frames'
     ] is True
     assert adaptive['signal_vote'] == stabilized['signal_vote']
+
+    stop10_adaptive = _bundle_manifest(
+        artifact_id=STOP10_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+        schema_version=9,
+        consecutive_signal_reads_by_action=(10, 15, 15),
+        base_artifact=base,
+        shortcut_artifact=shortcut,
+        shortcut_artifact_id=EXPANDED_SHORTCUT_ID,
+        traffic_classifier=tmp_path / 'classifier.onnx',
+    )
+
+    assert stop10_adaptive['detector'] == adaptive_detector
+    assert stop10_adaptive['signal_vote'][
+        'consecutive_reads_by_raw_class'
+    ] == {'STOP': 10, 'STRAIGHT': 15, 'LEFT': 15}

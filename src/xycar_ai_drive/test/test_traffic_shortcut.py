@@ -46,6 +46,7 @@ from xycar_ai_drive.traffic_shortcut_artifact import (
     EXPECTED_CLASSIFIER_BUNDLE_ID,
     EXPECTED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_STABILIZED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    EXPECTED_STOP10_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID,
     EXPECTED_SHORTCUT_ARTIFACT_ID,
     EXPECTED_SIGNAL_VOTE_BUNDLE_ID,
@@ -354,11 +355,11 @@ def test_action_classifier_stop_maps_to_latched_red():
     assert latch.observe(straight) == LampAction.STRAIGHT
 
 
-def test_action_classifier_stop3_go15_applies_before_and_after_stop():
+def test_action_classifier_stop10_go15_applies_before_and_after_stop():
     latch = TrafficSignalLatch(
         bbox_width_min=40,
         bbox_width_max=225,
-        red_consecutive_reads=3,
+        red_consecutive_reads=10,
         left_consecutive_reads=15,
         straight_consecutive_reads=15,
     )
@@ -368,9 +369,9 @@ def test_action_classifier_stop3_go15_applies_before_and_after_stop():
     fsm = TrafficShortcutFsm()
     fsm.enable()
 
-    for step in range(2):
+    for step in range(9):
         assert latch.observe(stop) == LampAction.UNKNOWN
-        assert latch.snapshot.required_reads == 3
+        assert latch.snapshot.required_reads == 10
         assert latch.snapshot.candidate_reads == step + 1
         assert fsm.on_frame(
             LampAction.UNKNOWN,
@@ -379,7 +380,7 @@ def test_action_classifier_stop3_go15_applies_before_and_after_stop():
     assert latch.observe(stop) == LampAction.RED
     assert fsm.on_frame(
         LampAction.RED,
-        now_monotonic=2.0,
+        now_monotonic=9.0,
     ).state == MissionState.RED_STOP
 
     for step in range(14):
@@ -387,11 +388,11 @@ def test_action_classifier_stop3_go15_applies_before_and_after_stop():
         assert latch.snapshot.required_reads == 15
         assert fsm.on_frame(
             LampAction.RED,
-            now_monotonic=3.0 + step,
+            now_monotonic=10.0 + step,
         ).publish_stop
     confirmed_left = latch.observe(left)
     assert confirmed_left == LampAction.LEFT
-    left_plan = fsm.on_frame(confirmed_left, now_monotonic=17.0)
+    left_plan = fsm.on_frame(confirmed_left, now_monotonic=24.0)
     assert left_plan.state == MissionState.SWITCH_TO_SHORTCUT
     assert left_plan.publish_stop
 
@@ -402,26 +403,26 @@ def test_action_classifier_stop3_go15_applies_before_and_after_stop():
     assert latch.observe(left) == LampAction.LEFT
     assert fsm.on_frame(
         LampAction.LEFT,
-        now_monotonic=20.0,
+        now_monotonic=30.0,
     ).state == MissionState.SWITCH_TO_SHORTCUT
 
     latch.reset()
     fsm.enable()
-    for _ in range(3):
+    for _ in range(10):
         stopped = latch.observe(stop)
     assert stopped == LampAction.RED
-    assert fsm.on_frame(stopped, now_monotonic=30.0).state == MissionState.RED_STOP
+    assert fsm.on_frame(stopped, now_monotonic=40.0).state == MissionState.RED_STOP
     for _ in range(14):
         assert latch.observe(straight) == LampAction.RED
     assert latch.observe(straight) == LampAction.STRAIGHT
-    resumed = fsm.on_frame(LampAction.STRAIGHT, now_monotonic=31.0)
+    resumed = fsm.on_frame(LampAction.STRAIGHT, now_monotonic=41.0)
     assert resumed.state == MissionState.BASE
     assert resumed.policy == PolicyChoice.BASE
 
 
 def test_action_specific_signal_vote_resets_on_unknown_and_class_change():
     latch = TrafficSignalLatch(
-        red_consecutive_reads=3,
+        red_consecutive_reads=10,
         left_consecutive_reads=15,
         straight_consecutive_reads=15,
     )
@@ -651,6 +652,14 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
         'stop_latch_behavior': 'retain_until_confirmed_go_action',
         'stop_clear_classes': ['LEFT', 'STRAIGHT'],
     }
+    stop10_adaptive_human_bbox_classifier_vote = {
+        **stabilized_human_bbox_classifier_vote,
+        'consecutive_reads_by_raw_class': {
+            'STOP': 10,
+            'STRAIGHT': 15,
+            'LEFT': 15,
+        },
+    }
 
     assert _load_signal_vote_contract(
         legacy,
@@ -715,6 +724,15 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
     assert _expected_shortcut_artifact_id(
         schema_version=8,
         artifact_id=EXPECTED_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert _load_signal_vote_contract(
+        {'signal_vote': stop10_adaptive_human_bbox_classifier_vote},
+        schema_version=9,
+        artifact_id=EXPECTED_STOP10_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    ) == (10, 15, 15)
+    assert _expected_shortcut_artifact_id(
+        schema_version=9,
+        artifact_id=EXPECTED_STOP10_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
     with pytest.raises(ArtifactContractError, match='signal vote'):
         _load_signal_vote_contract(
