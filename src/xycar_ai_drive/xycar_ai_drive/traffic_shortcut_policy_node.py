@@ -19,7 +19,7 @@ from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import Image, Joy
-from std_msgs.msg import Bool, Float32MultiArray
+from std_msgs.msg import Bool, Float32MultiArray, String
 
 from xycar_ai_drive.control import (
     STOP_COMMAND,
@@ -42,6 +42,7 @@ from xycar_ai_drive.traffic_light_detector import (
     InitialWaitSignalLatch,
     LampAction,
     SignalClass,
+    SignalInspection,
     SignalReading,
     TrafficClassifierCadence,
     TrafficLampLatch,
@@ -57,6 +58,13 @@ from xycar_ai_drive.traffic_shortcut_fsm import (
     MissionState,
     PolicyChoice,
     TrafficShortcutFsm,
+)
+from xycar_ai_drive.traffic_shortcut_diagnostics import (
+    SIGNAL_DEBUG_SCHEMA_VERSION,
+    SignalDebugBbox,
+    SignalDebugCrop,
+    SignalDebugSnapshot,
+    encode_signal_debug,
 )
 
 PolicyClientFactory = Callable[..., object]
@@ -311,7 +319,9 @@ class TrafficShortcutPolicyNode(Node):
         )
         self._validate_client_artifacts()
 
-        self._latest_frame: tuple[int, np.ndarray, float] | None = None
+        self._latest_frame: (
+            tuple[int, np.ndarray, float, int, int] | None
+        ) = None
         self._frame_sequence = 0
         self._minimum_next_frame_sequence = 0
         self._decision: MissionDecision | None = None
@@ -354,6 +364,11 @@ class TrafficShortcutPolicyNode(Node):
         self.enabled_publisher = self.create_publisher(
             Bool,
             self.enabled_topic,
+            10,
+        )
+        self.signal_debug_publisher = self.create_publisher(
+            String,
+            self.signal_debug_topic,
             10,
         )
         self.publish_stop_burst()
@@ -414,6 +429,10 @@ class TrafficShortcutPolicyNode(Node):
             '/traffic_shortcut/prediction',
         )
         self.declare_parameter('enabled_topic', '/traffic_shortcut/enabled')
+        self.declare_parameter(
+            'signal_debug_topic',
+            '/traffic_shortcut/signal_debug',
+        )
         self.declare_parameter('a_button_index', 0)
         self.declare_parameter('initial_stop_arm_button_index', 4)
         self.declare_parameter('a_release_grace_sec', 0.12)
@@ -450,6 +469,9 @@ class TrafficShortcutPolicyNode(Node):
             self.get_parameter('prediction_topic').value
         )
         self.enabled_topic = str(self.get_parameter('enabled_topic').value)
+        self.signal_debug_topic = str(
+            self.get_parameter('signal_debug_topic').value
+        )
         self.a_button_index = int(self.get_parameter('a_button_index').value)
         self.initial_stop_arm_button_index = int(
             self.get_parameter('initial_stop_arm_button_index').value
@@ -503,6 +525,7 @@ class TrafficShortcutPolicyNode(Node):
             ('motor_topic', self.motor_topic),
             ('prediction_topic', self.prediction_topic),
             ('enabled_topic', self.enabled_topic),
+            ('signal_debug_topic', self.signal_debug_topic),
             ('base_socket_path', self.base_socket_path),
             ('shortcut_socket_path', self.shortcut_socket_path),
         ):
@@ -970,6 +993,100 @@ class TrafficShortcutPolicyNode(Node):
         except Exception:  # noqa: BLE001 - diagnostics must not affect motion
             pass
 
+    def _make_signal_debug_snapshot_locked(
+        self,
+        *,
+        frame_sequence: int,
+        stamp_sec: int,
+        stamp_nanosec: int,
+        source: str,
+        vote_updated: bool,
+        raw_class: SignalClass,
+        final_action: LampAction,
+        inspection: SignalInspection | None,
+        plan,
+        detector_inference_ms: float,
+    ) -> SignalDebugSnapshot:
+        latch_snapshot = self._lamp_latch.snapshot
+        bbox = None
+        crop = None
+        probabilities = None
+        if inspection is not None:
+            box = inspection.bbox
+            bounds = inspection.crop_bounds
+            bbox = SignalDebugBbox(
+                x=float(box.x),
+                y=float(box.y),
+                width=float(box.width),
+                height=float(box.height),
+                confidence=float(box.confidence),
+            )
+            crop = SignalDebugCrop(
+                x1=int(bounds.x1),
+                y1=int(bounds.y1),
+                x2=int(bounds.x2),
+                y2=int(bounds.y2),
+            )
+            probabilities = tuple(
+                float(value) for value in inspection.probabilities
+            )
+        phase = (
+            latch_snapshot.phase.value
+            if isinstance(
+                latch_snapshot,
+                InitialStopSignalLatchSnapshot,
+            )
+            else 'LEGACY'
+        )
+        return SignalDebugSnapshot(
+            schema_version=SIGNAL_DEBUG_SCHEMA_VERSION,
+            bundle_id=self.bundle.artifact_id,
+            frame_sequence=frame_sequence,
+            stamp_sec=stamp_sec,
+            stamp_nanosec=stamp_nanosec,
+            source=source,
+            vote_updated=vote_updated,
+            raw_class=raw_class.value,
+            final_action=final_action.value,
+            class_labels=tuple(
+                self.bundle.detector.classifier_classes
+            ),
+            probabilities=probabilities,
+            bbox=bbox,
+            crop=crop,
+            width_gate_accepted=bool(
+                inspection is not None
+                and self.bundle.detector.bbox_width_min
+                <= inspection.reading.bbox_width
+                <= self.bundle.detector.bbox_width_max
+            ),
+            candidate=latch_snapshot.candidate.value,
+            candidate_reads=latch_snapshot.candidate_reads,
+            required_reads=latch_snapshot.required_reads,
+            phase=phase,
+            mission_state=plan.state.value,
+            detector_inference_ms=detector_inference_ms,
+        )
+
+    def _publish_signal_debug(
+        self,
+        snapshot: SignalDebugSnapshot,
+    ) -> None:
+        try:
+            if self.signal_debug_publisher.get_subscription_count() < 1:
+                return
+            message = String()
+            message.data = encode_signal_debug(snapshot)
+            self.signal_debug_publisher.publish(message)
+        except Exception as exc:  # noqa: BLE001 - diagnostics are non-control
+            try:
+                self.get_logger().warning(
+                    f'signal-debug publish failed: {exc}',
+                    throttle_duration_sec=1.0,
+                )
+            except Exception:  # noqa: BLE001 - preserve motion isolation
+                pass
+
     def _on_camera(self, message: Image) -> None:
         try:
             image = self.bridge.imgmsg_to_cv2(
@@ -988,6 +1105,7 @@ class TrafficShortcutPolicyNode(Node):
             self._force_fault('camera image is not uint8 RGB')
             return
         now = time.monotonic()
+        stamp = message.header.stamp
         with self._frame_condition:
             self._frame_sequence += 1
             self._last_camera_monotonic = now
@@ -995,6 +1113,8 @@ class TrafficShortcutPolicyNode(Node):
                 self._frame_sequence,
                 np.ascontiguousarray(image.copy()),
                 now,
+                int(stamp.sec),
+                int(stamp.nanosec),
             )
             self._frame_condition.notify()
 
@@ -1010,7 +1130,13 @@ class TrafficShortcutPolicyNode(Node):
                 if self._worker_stop:
                     return
                 assert self._latest_frame is not None
-                sequence, image, source_monotonic = self._latest_frame
+                (
+                    sequence,
+                    image,
+                    source_monotonic,
+                    stamp_sec,
+                    stamp_nanosec,
+                ) = self._latest_frame
                 processed_sequence = sequence
                 if (
                     not self._drive_gate.enabled
@@ -1027,9 +1153,12 @@ class TrafficShortcutPolicyNode(Node):
                 reading_observed = False
                 reading = None
                 detected_box = None
+                inspection: SignalInspection | None = None
                 inference_source = 'NO_INFERENCE'
                 operator_messages: list[str] = []
+                signal_debug_snapshot: SignalDebugSnapshot | None = None
                 detector_observed = inference_plan.run_detector
+                detector_started = time.perf_counter()
                 if inference_plan.run_detector:
                     bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
                     if self.bundle.detector.mode == 'yolo_cnn_classifier':
@@ -1052,6 +1181,11 @@ class TrafficShortcutPolicyNode(Node):
                     reading = inspection.reading
                     inference_source = 'CACHED_CNN'
                     reading_observed = True
+                detector_inference_ms = (
+                    (time.perf_counter() - detector_started) * 1000.0
+                    if reading_observed
+                    else 0.0
+                )
                 with self._lock:
                     if generation != self._mission_generation:
                         continue
@@ -1121,17 +1255,17 @@ class TrafficShortcutPolicyNode(Node):
                         signal,
                         now_monotonic=time.monotonic(),
                     )
-                    if previous_initial_snapshot is not None:
-                        raw_class = (
-                            SignalClass.UNKNOWN
-                            if reading is None
-                            or not (
-                                self.bundle.detector.bbox_width_min
-                                <= reading.bbox_width
-                                <= self.bundle.detector.bbox_width_max
-                            )
-                            else reading.signal_class
+                    raw_class = (
+                        SignalClass.UNKNOWN
+                        if reading is None
+                        or not (
+                            self.bundle.detector.bbox_width_min
+                            <= reading.bbox_width
+                            <= self.bundle.detector.bbox_width_max
                         )
+                        else reading.signal_class
+                    )
+                    if previous_initial_snapshot is not None:
                         operator_messages.extend(
                             self._one_shot_signal_logs_locked(
                                 previous=previous_initial_snapshot,
@@ -1142,6 +1276,27 @@ class TrafficShortcutPolicyNode(Node):
                                 plan=plan,
                                 now_monotonic=time.monotonic(),
                                 vote_updated=vote_updated,
+                            )
+                        )
+                    if (
+                        reading_observed
+                        and self.bundle.detector.mode
+                        == 'yolo_cnn_classifier'
+                    ):
+                        signal_debug_snapshot = (
+                            self._make_signal_debug_snapshot_locked(
+                                frame_sequence=sequence,
+                                stamp_sec=stamp_sec,
+                                stamp_nanosec=stamp_nanosec,
+                                source=inference_source,
+                                vote_updated=vote_updated,
+                                raw_class=raw_class,
+                                final_action=signal,
+                                inspection=inspection,
+                                plan=plan,
+                                detector_inference_ms=(
+                                    detector_inference_ms
+                                ),
                             )
                         )
                     if (
@@ -1181,6 +1336,8 @@ class TrafficShortcutPolicyNode(Node):
                             )
                         generation = self._mission_generation
                 self._emit_operator_logs(operator_messages)
+                if signal_debug_snapshot is not None:
+                    self._publish_signal_debug(signal_debug_snapshot)
                 if plan.publish_stop:
                     if shadow_work is not None:
                         self._infer_and_store_base_shadow(

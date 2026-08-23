@@ -74,6 +74,10 @@ setup(
                 'traffic_light_viewer = '
                 'xycar_ai_drive.traffic_light_viewer:main'
             ),
+            (
+                'traffic_shortcut_monitor = '
+                'xycar_ai_drive.traffic_shortcut_monitor:main'
+            ),
         ],
     },
 )

@@ -522,6 +522,13 @@ detector와 3-class CNN 전체를 포함한다. detector ONNX SHA-256은
   출력한다. `signal_status_log_hz`로 heartbeat만 조정하며 READY, STOP 확정·해제와
   LEFT/shortcut event는 즉시 별도 출력한다. 이 diagnostic 실패는 motion 판정을
   변경하지 않는다.
+- 구독자가 있을 때만 `/traffic_shortcut/signal_debug`에 원본 camera timestamp와
+  frame sequence, YOLO bbox/confidence, padded crop 좌표, CNN 3-class 확률,
+  fresh/cached source, vote·phase와 mission state를 versioned JSON으로 발행한다.
+  이미지나 tensor를 복제하지 않으며 진단 직렬화·발행 오류는 motion 판단을
+  변경하지 않는다. `/traffic_shortcut/prediction`은 선택 policy의
+  `[angle,speed,inference_ms,is_shortcut]`, `/xycar_motor`는 실제 발행한
+  `[angle,speed]` 명령이다.
 - managed camera 또는 gamepad process가 종료되면 전체 mission launch를 종료한다.
   Jetson wrapper는 종료 시 launch process group leader가 이미 사라졌더라도 남은
   policy를 process group 단위로 정리하고 CUDA container를 내린다. 이전
@@ -571,6 +578,49 @@ cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source inst
 바퀴 지지/안전 공간, 전원 차단, A release와 `Ctrl+C`, 경쟁 publisher 부재를
 확인한다. 성공한 좌회전을 다시 실행하려면 node를 재시작한다. 오프라인 성공은
 실차 주행 적합성을 보장하지 않는다.
+
+### 실시간 주행·신호등 통합 모니터
+
+`use_monitor_gui:=true`는 주행 launch와 같은 Jetson host에 passive
+`traffic_shortcut_monitor`를 필수 sibling으로 시작한다. GUI는 policy가 이미 계산한
+`/traffic_shortcut/signal_debug`를 구독하므로 YOLO/CNN, Base/shortcut ONNX나 policy
+IPC를 다시 실행하지 않으며 ROS publisher도 만들지 않는다. camera panel은 진단에
+실린 원본 ROS timestamp를 최근 30 frame buffer와 exact match한 경우에만 bbox와
+crop을 표시한다. 해당 frame이 없거나 timestamp가 0이면 최신 frame에는 bbox를
+겹치지 않고 `FRAME MATCH UNAVAILABLE`을 표시한다.
+
+오른쪽에는 STOP/STRAIGHT/LEFT 확률, width gate, fresh/cached source, vote·phase와
+mission state를 표시한다. 하단 vector는 파란 점선으로 model prediction, 녹색
+실선으로 실제 `/xycar_motor` 발행 명령을 함께 그린다. angle `-100/0/+100`은 각각
+화면의 왼쪽/전방/오른쪽 시각 각도 `-60/0/+60°`, 화살표 길이는 bundle Base cap
+`35` 대비 speed 비율이다. 이는 바퀴나 조향 센서의 실측 telemetry가 아니라 model
+출력과 motor topic 명령이다.
+
+GUI는 기본 OFF라 기존 headless 명령은 바뀌지 않는다. GUI를 켜려면 Jetson local
+GNOME/RDP 또는 X11 전달로 유효한 `DISPLAY`가 있는 terminal에서 다음처럼 실행한다.
+창 닫기, Q/Esc 또는 GUI callback 예외는 inner launch 전체를 종료해 policy stop
+burst와 wrapper cleanup을 실행한다. 표시용 camera/signal/prediction/motor topic이
+stale이면 빨간 경고만 표시하며 실제 motion fail-close는 기존 policy의
+camera/IPC/graph 검사에 맡긴다.
+
+```bash
+cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-initial-wait-all5-stop-once-left-direct-search3-classify1-vote-yolo3-45sessions-20260823 use_camera:=true use_gamepad:=true allow_motion:=true use_monitor_gui:=true
+```
+
+이 옵션도 실제 camera와 motor publisher를 여는 같은 주행 launch이므로 매 실행 직전
+실차 승인을 받아야 한다. monitor만 별도 실행하면 그 process 종료가 이미 실행 중인
+다른 launch를 내릴 수 없으므로, 주행 중 필수 정지 연동에는 반드시 위 통합 옵션을
+사용한다.
+
+이미 실행 중인 topic을 read-only로 확인하는 개발 진단에는 monitor만 직접 실행할 수
+있다. 이 명령은 camera나 motor를 시작하지 않고 publisher도 만들지 않지만, 창을
+닫아도 별도 mission launch는 종료하지 않는다.
+
+```bash
+ros2 run xycar_ai_drive traffic_shortcut_monitor --ros-args \
+  --params-file /home/xytron/xycar_ws_mgw/install/xycar_ai_drive/share/xycar_ai_drive/config/traffic_shortcut_policy.yaml \
+  -p bundle_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-initial-wait-all5-stop-once-left-direct-search3-classify1-vote-yolo3-45sessions-20260823
+```
 
 ### 수동 신호등 예측 GUI
 

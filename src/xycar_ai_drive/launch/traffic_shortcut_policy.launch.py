@@ -34,6 +34,7 @@ def generate_launch_description():
         'initial_stop_arm_button_index'
     )
     signal_status_log_hz = LaunchConfiguration('signal_status_log_hz')
+    use_monitor_gui = LaunchConfiguration('use_monitor_gui')
 
     return LaunchDescription(
         [
@@ -73,6 +74,10 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 'signal_status_log_hz',
                 default_value='2.0',
+            ),
+            DeclareLaunchArgument(
+                'use_monitor_gui',
+                default_value='false',
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -142,6 +147,27 @@ def generate_launch_description():
                 ],
                 on_exit=Shutdown(
                     reason='traffic shortcut policy exited; stopping sensors'
+                ),
+            ),
+            Node(
+                package='xycar_ai_drive',
+                executable='traffic_shortcut_monitor',
+                name='traffic_shortcut_monitor',
+                namespace='/',
+                output='screen',
+                condition=IfCondition(use_monitor_gui),
+                parameters=[
+                    params_file,
+                    {
+                        'bundle_dir': PathJoinSubstitution(
+                            [bundle_root, bundle_id]
+                        ),
+                    },
+                ],
+                on_exit=Shutdown(
+                    reason=(
+                        'traffic shortcut monitor exited; stopping mission'
+                    )
                 ),
             ),
         ]

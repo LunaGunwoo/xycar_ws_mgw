@@ -1,7 +1,9 @@
 # Copyright 2026 Gunwoo Moon
 # Licensed under the Apache License, Version 2.0
 
-from collections import deque
+from collections import OrderedDict, deque
+from dataclasses import replace
+import math
 import threading
 from pathlib import Path
 from types import MethodType, SimpleNamespace
@@ -15,6 +17,7 @@ from xycar_ai_drive.traffic_light_detector import (
     ImageBounds,
     InitialStopPhase,
     InitialStopSignalLatch,
+    InitialStopSignalLatchSnapshot,
     InitialWaitSignalLatch,
     LetterboxTransform,
     LampAction,
@@ -72,6 +75,23 @@ from xycar_ai_drive.traffic_shortcut_policy_node import (
     TrafficShortcutPolicyNode,
     YoloMissingReleaseCounter,
     format_signal_status,
+)
+from xycar_ai_drive.traffic_shortcut_diagnostics import (
+    SIGNAL_DEBUG_SCHEMA_VERSION,
+    SignalDebugBbox,
+    SignalDebugContractError,
+    SignalDebugCrop,
+    SignalDebugSnapshot,
+    decode_signal_debug,
+    encode_signal_debug,
+)
+from xycar_ai_drive.traffic_shortcut_monitor import (
+    MonitorFrame,
+    TrafficShortcutMonitorNode,
+    drive_vector_endpoint,
+    frame_stamp_key,
+    monitor_crop_panel,
+    monitor_frame_panel,
 )
 from xycar_ai_drive.control import DriveCommand
 
@@ -740,6 +760,171 @@ def test_viewer_overlay_accepts_fractional_letterbox_coordinates():
     assert np.count_nonzero(frame) == 0
 
 
+def _debug_snapshot(**overrides):
+    values = {
+        'schema_version': SIGNAL_DEBUG_SCHEMA_VERSION,
+        'bundle_id': 'traffic-bundle',
+        'frame_sequence': 12,
+        'stamp_sec': 42,
+        'stamp_nanosec': 123,
+        'source': 'YOLO_CNN',
+        'vote_updated': True,
+        'raw_class': 'LEFT',
+        'final_action': 'UNKNOWN',
+        'class_labels': ('STOP', 'STRAIGHT', 'LEFT'),
+        'probabilities': (0.02, 0.08, 0.90),
+        'bbox': SignalDebugBbox(
+            x=200.0,
+            y=200.0,
+            width=60.0,
+            height=30.0,
+            confidence=0.88,
+        ),
+        'crop': SignalDebugCrop(x1=190, y1=190, x2=270, y2=240),
+        'width_gate_accepted': True,
+        'candidate': 'LEFT',
+        'candidate_reads': 3,
+        'required_reads': 5,
+        'phase': 'WAIT_FOR_SIGNAL',
+        'mission_state': 'RED_STOP',
+        'detector_inference_ms': 12.5,
+    }
+    values.update(overrides)
+    return SignalDebugSnapshot(**values)
+
+
+def test_signal_debug_json_round_trip_and_source_contracts():
+    snapshot = _debug_snapshot()
+
+    encoded = encode_signal_debug(snapshot)
+
+    assert decode_signal_debug(encoded) == snapshot
+    assert '\n' not in encoded
+    no_box = _debug_snapshot(
+        source='YOLO_NO_BOX',
+        raw_class='UNKNOWN',
+        probabilities=None,
+        bbox=None,
+        crop=None,
+        width_gate_accepted=False,
+        candidate='UNKNOWN',
+        candidate_reads=0,
+        required_reads=0,
+    )
+    assert decode_signal_debug(encode_signal_debug(no_box)) == no_box
+    with pytest.raises(
+        SignalDebugContractError,
+        match='must not contain classification geometry',
+    ):
+        encode_signal_debug(replace(snapshot, source='YOLO_NO_BOX'))
+    cached = replace(snapshot, source='CACHED_CNN', vote_updated=False)
+    assert decode_signal_debug(encode_signal_debug(cached)) == cached
+    with pytest.raises(SignalDebugContractError, match='finite'):
+        encode_signal_debug(
+            replace(snapshot, detector_inference_ms=float('nan'))
+        )
+
+
+def test_monitor_matches_exact_stamp_and_never_overlays_another_frame():
+    signal = _debug_snapshot()
+    exact_image = np.zeros((300, 400, 3), dtype=np.uint8)
+    latest_image = np.zeros((300, 400, 3), dtype=np.uint8)
+    exact = MonitorFrame(
+        stamp_key=signal.stamp_key,
+        image=exact_image,
+        received_monotonic=1.0,
+    )
+    latest = MonitorFrame(
+        stamp_key=(43, 456),
+        image=latest_image,
+        received_monotonic=1.1,
+    )
+    node = SimpleNamespace(
+        _lock=threading.RLock(),
+        _signal=signal,
+        _signal_received_monotonic=1.2,
+        _frames=OrderedDict([(signal.stamp_key, exact)]),
+        _latest_frame=latest,
+        _prediction=None,
+        _actual=None,
+        _enabled=True,
+        _enabled_received_monotonic=1.2,
+        _camera_error=None,
+        _signal_error=None,
+        _control_error=None,
+    )
+
+    matched = TrafficShortcutMonitorNode.snapshot(node)
+    exact_overlay = monitor_frame_panel(
+        matched.matched_frame.image,
+        signal,
+        exact_match=True,
+    )
+    unmatched_overlay = monitor_frame_panel(
+        latest_image,
+        signal,
+        exact_match=False,
+    )
+
+    assert matched.matched_frame is exact
+    assert np.count_nonzero(exact_overlay[200, 200]) > 0
+    assert np.count_nonzero(unmatched_overlay[200, 200]) == 0
+    assert monitor_crop_panel(
+        exact_image,
+        signal,
+        exact_match=True,
+    ).shape == (50, 80, 3)
+    assert frame_stamp_key(42, 123) == (42, 123)
+    assert frame_stamp_key(0, 0) is None
+    node._frames.clear()
+    assert TrafficShortcutMonitorNode.snapshot(node).matched_frame is None
+
+
+def test_drive_vector_uses_normalized_angle_and_speed_magnitude():
+    origin = (100.0, 100.0)
+    straight = drive_vector_endpoint(
+        0.0,
+        35.0,
+        origin=origin,
+        maximum_length=100.0,
+        speed_scale=35.0,
+    )
+    left = drive_vector_endpoint(
+        -100.0,
+        35.0,
+        origin=origin,
+        maximum_length=100.0,
+        speed_scale=35.0,
+    )
+    right = drive_vector_endpoint(
+        100.0,
+        35.0,
+        origin=origin,
+        maximum_length=100.0,
+        speed_scale=35.0,
+    )
+    half_speed = drive_vector_endpoint(
+        0.0,
+        17.5,
+        origin=origin,
+        maximum_length=100.0,
+        speed_scale=35.0,
+    )
+
+    assert straight == pytest.approx((100.0, 0.0))
+    assert left[0] < origin[0] < right[0]
+    assert math.dist(origin, left) == pytest.approx(100.0)
+    assert math.dist(origin, right) == pytest.approx(100.0)
+    assert math.dist(origin, half_speed) == pytest.approx(50.0)
+    assert drive_vector_endpoint(
+        50.0,
+        0.0,
+        origin=origin,
+        maximum_length=100.0,
+        speed_scale=35.0,
+    ) == pytest.approx(origin)
+
+
 def test_lamp_width_gate_five_votes_priority_and_latch_clearing():
     latch = TrafficLampLatch()
     red = _reading((255, 10, 220, 230), width=45)
@@ -1317,6 +1502,101 @@ def test_initial_wait_terminal_events_ignore_cached_vote_updates():
     assert not any(message.startswith('READY') for message in final)
 
 
+def test_policy_signal_debug_snapshot_contains_runtime_vote_and_geometry():
+    latch_snapshot = InitialStopSignalLatchSnapshot(
+        candidate=SignalClass.LEFT,
+        candidate_reads=2,
+        required_reads=5,
+        stop_latched=False,
+        phase=InitialStopPhase.WAIT_FOR_SIGNAL,
+        raw_class=SignalClass.LEFT,
+        stop_ignored=False,
+    )
+    node = SimpleNamespace(
+        _lamp_latch=SimpleNamespace(snapshot=latch_snapshot),
+        bundle=SimpleNamespace(
+            artifact_id='traffic-bundle',
+            detector=SimpleNamespace(
+                classifier_classes=('STOP', 'STRAIGHT', 'LEFT'),
+                bbox_width_min=40,
+                bbox_width_max=225,
+            ),
+        ),
+    )
+    inspection = SignalInspection(
+        reading=SignalReading(
+            signal_class=SignalClass.LEFT,
+            probability=0.9,
+            bbox_width=60.0,
+            confidence=0.8,
+        ),
+        bbox=DetectionBox(10.5, 20.5, 60.0, 30.0, 0.8),
+        crop_bounds=ImageBounds(5, 15, 80, 60),
+        probabilities=(0.02, 0.08, 0.90),
+    )
+
+    snapshot = (
+        TrafficShortcutPolicyNode._make_signal_debug_snapshot_locked(
+            node,
+            frame_sequence=9,
+            stamp_sec=7,
+            stamp_nanosec=8,
+            source='CACHED_CNN',
+            vote_updated=False,
+            raw_class=SignalClass.LEFT,
+            final_action=LampAction.UNKNOWN,
+            inspection=inspection,
+            plan=SimpleNamespace(state=MissionState.RED_STOP),
+            detector_inference_ms=4.5,
+        )
+    )
+
+    assert snapshot.stamp_key == (7, 8)
+    assert snapshot.phase == InitialStopPhase.WAIT_FOR_SIGNAL.value
+    assert snapshot.candidate_reads == 2
+    assert snapshot.required_reads == 5
+    assert snapshot.bbox == SignalDebugBbox(10.5, 20.5, 60.0, 30.0, 0.8)
+    assert snapshot.crop == SignalDebugCrop(5, 15, 80, 60)
+    assert decode_signal_debug(encode_signal_debug(snapshot)) == snapshot
+
+
+def test_signal_debug_publish_is_subscriber_gated_and_motion_isolated():
+    class Publisher:
+        def __init__(self, subscriptions, *, fail=False):
+            self.subscriptions = subscriptions
+            self.fail = fail
+            self.messages = []
+
+        def get_subscription_count(self):
+            return self.subscriptions
+
+        def publish(self, message):
+            if self.fail:
+                raise RuntimeError('diagnostic transport failed')
+            self.messages.append(message)
+
+    class BrokenLogger:
+        def warning(self, *args, **kwargs):
+            raise RuntimeError('logger failed')
+
+    no_subscriber = Publisher(0)
+    node = SimpleNamespace(
+        signal_debug_publisher=no_subscriber,
+        get_logger=lambda: BrokenLogger(),
+    )
+    TrafficShortcutPolicyNode._publish_signal_debug(node, object())
+    assert no_subscriber.messages == []
+
+    publisher = Publisher(1)
+    node.signal_debug_publisher = publisher
+    snapshot = _debug_snapshot()
+    TrafficShortcutPolicyNode._publish_signal_debug(node, snapshot)
+    assert decode_signal_debug(publisher.messages[0].data) == snapshot
+
+    node.signal_debug_publisher = Publisher(1, fail=True)
+    TrafficShortcutPolicyNode._publish_signal_debug(node, snapshot)
+
+
 def test_fsm_base_transition_exact_eight_seconds_and_one_shot():
     fsm = TrafficShortcutFsm(shortcut_duration_sec=8.0)
     assert fsm.state == MissionState.OFF
@@ -1524,6 +1804,11 @@ def test_traffic_shortcut_launch_ties_gamepad_to_hold_gate():
     assert 'use_gamepad,' in launch_text
     assert "'initial_stop_arm_button_index'" in launch_text
     assert "'signal_status_log_hz'" in launch_text
+    assert "'use_monitor_gui'" in launch_text
+    assert "default_value='false'" in launch_text
+    assert "executable='traffic_shortcut_monitor'" in launch_text
+    assert 'IfCondition(use_monitor_gui)' in launch_text
+    assert 'traffic shortcut monitor exited; stopping mission' in launch_text
     assert 'traffic shortcut gamepad exited; stopping mission' in launch_text
 
     jetson_launch_text = (
@@ -1533,6 +1818,7 @@ def test_traffic_shortcut_launch_ties_gamepad_to_hold_gate():
     ).read_text(encoding='utf-8')
     assert "'initial_stop_arm_button_index:='" in jetson_launch_text
     assert "'signal_status_log_hz:='" in jetson_launch_text
+    assert "'use_monitor_gui:='" in jetson_launch_text
 
     camera_launch_text = (
         Path(__file__).parents[3]
@@ -1585,6 +1871,37 @@ def test_traffic_light_viewer_launch_has_no_motion_endpoints():
     assert 'ExecuteProcess' not in launch_text
     assert '.create_publisher(' not in viewer_text
     assert 'UnixSocketPolicyClient' not in viewer_text
+
+
+def test_traffic_shortcut_monitor_is_passive_and_has_no_inference_runtime():
+    package_root = Path(__file__).parents[1]
+    monitor_text = (
+        package_root
+        / 'xycar_ai_drive'
+        / 'traffic_shortcut_monitor.py'
+    ).read_text(encoding='utf-8')
+    policy_text = (
+        package_root
+        / 'xycar_ai_drive'
+        / 'traffic_shortcut_policy_node.py'
+    ).read_text(encoding='utf-8')
+    setup_text = (package_root / 'setup.py').read_text(encoding='utf-8')
+    config_text = (
+        package_root / 'config' / 'traffic_shortcut_policy.yaml'
+    ).read_text(encoding='utf-8')
+
+    assert '.create_publisher(' not in monitor_text
+    assert 'create_onnx_detector' not in monitor_text
+    assert 'TrafficClassifierDetector' not in monitor_text
+    assert 'UnixSocketPolicyClient' not in monitor_text
+    assert 'create_subscription(' in monitor_text
+    assert '/xycar_motor' in monitor_text
+    assert '/traffic_shortcut/signal_debug' in monitor_text
+    assert 'traffic_shortcut_monitor:main' in setup_text
+    assert 'frame_buffer_size: 30' in config_text
+    assert 'signal_debug_topic: /traffic_shortcut/signal_debug' in config_text
+    assert 'self.signal_debug_publisher = self.create_publisher(' in policy_text
+    assert 'get_subscription_count() < 1' in policy_text
 
 
 @pytest.mark.parametrize(

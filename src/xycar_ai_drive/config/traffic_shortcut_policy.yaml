@@ -14,6 +14,7 @@ traffic_shortcut_policy:
     allowed_motor_relay_nodes: ['/ros_bridge']
     prediction_topic: /traffic_shortcut/prediction
     enabled_topic: /traffic_shortcut/enabled
+    signal_debug_topic: /traffic_shortcut/signal_debug
 
     a_button_index: 0
     initial_stop_arm_button_index: 4
@@ -32,3 +33,17 @@ traffic_shortcut_policy:
     base_socket_path: /run/user/1000/xycar-ai/traffic-base.sock
     shortcut_socket_path: /run/user/1000/xycar-ai/traffic-shortcut.sock
     inference_rpc_timeout_sec: 0.20
+
+traffic_shortcut_monitor:
+  ros__parameters:
+    camera_topic: /image_raw
+    signal_debug_topic: /traffic_shortcut/signal_debug
+    prediction_topic: /traffic_shortcut/prediction
+    motor_topic: /xycar_motor
+    enabled_topic: /traffic_shortcut/enabled
+
+    camera_stale_sec: 1.0
+    signal_stale_sec: 1.0
+    prediction_stale_sec: 0.5
+    motor_stale_sec: 0.5
+    frame_buffer_size: 30

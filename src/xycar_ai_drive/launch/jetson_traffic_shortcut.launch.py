@@ -22,6 +22,7 @@ def generate_launch_description():
         'initial_stop_arm_button_index'
     )
     signal_status_log_hz = LaunchConfiguration('signal_status_log_hz')
+    use_monitor_gui = LaunchConfiguration('use_monitor_gui')
     wrapper = (
         '/home/xytron/.local/lib/xycar-ai-gpu/'
         'run_gpu_traffic_shortcut.sh'
@@ -50,6 +51,10 @@ def generate_launch_description():
                 'signal_status_log_hz',
                 default_value='2.0',
             ),
+            DeclareLaunchArgument(
+                'use_monitor_gui',
+                default_value='false',
+            ),
             SetEnvironmentVariable('TRAFFIC_SHORTCUT_BUNDLE_ID', bundle_id),
             SetEnvironmentVariable('ARTIFACT_ROOT', bundle_root),
             ExecuteProcess(
@@ -65,6 +70,7 @@ def generate_launch_description():
                         initial_stop_arm_button_index,
                     ],
                     ['signal_status_log_hz:=', signal_status_log_hz],
+                    ['use_monitor_gui:=', use_monitor_gui],
                 ],
                 output='screen',
                 emulate_tty=True,
