@@ -16,7 +16,9 @@ traffic_shortcut_policy:
     enabled_topic: /traffic_shortcut/enabled
 
     a_button_index: 0
+    initial_stop_arm_button_index: 4
     a_release_grace_sec: 0.12
+    signal_status_log_hz: 2.0
     allow_motion: true
 
     publish_rate_hz: 20.0

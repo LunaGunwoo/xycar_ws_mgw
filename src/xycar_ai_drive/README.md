@@ -471,7 +471,7 @@ launch의 camera와 gamepad를 종료하고 CUDA container를 정리한다.
 ## 신호등 기반 Base/ResNet18 통합 runtime
 
 `traffic_shortcut_policy` 하나가 `/image_raw`와 `/joy`를 구독하고 최종
-`/xycar_motor`를 독점 발행한다. 현재 bundle schema v13은 schema v6 speed-35
+`/xycar_motor`를 독점 발행한다. 현재 bundle schema v14는 schema v6 speed-35
 nice_ada_very_fast Base와 schema v7 `nice-shortcut` ResNet18, 사람 보정 GT로
 재학습한 YOLO11s
 detector와 3-class CNN 전체를 포함한다. detector ONNX SHA-256은
@@ -487,19 +487,20 @@ detector와 3-class CNN 전체를 포함한다. detector ONNX SHA-256은
   416×128 RGB에 resize하고 ImageNet normalization한 뒤 CNN에 넣는다. raw class는
   `STOP`, `STRAIGHT`, `LEFT`이며 softmax 최고 확률이 `0.50` 미만이면 `UNKNOWN`이다.
 - YOLO 검출 뒤 중간 frame에서는 직전 bbox를 현재 frame crop에 재사용해 CNN만
-  매 frame 실행한다. 동일 `STOP/LEFT/STRAIGHT`는 처리 완료된 분류 15회
-  연속이어야 확정된다. camera 30 Hz와 실제 주행 vote rate는 같지 않다. `STOP`은 latch하고,
-  확정된 같은 `LEFT` 또는
-  `STRAIGHT` 15회만 STOP latch를 해제한다. `UNKNOWN`은 후보
-  vote를 초기화하지만 이미 확정된 STOP latch는 해제하지 않는다. 다음 scheduled
-  YOLO가 box를 놓치면 bbox cache를 즉시 지우고 재검출 전까지 CNN 판정을 멈춘다.
+  매 frame 실행한다. Gamepad의 A 활성 edge에서 LB index `4`가 함께 눌린 경우에만
+  첫 STOP을 arm하며, 접근 중 STOP 15회에서 정지한다. 정지 뒤 `STRAIGHT/LEFT`를
+  합쳐 3회 연속이면 class 종류와 무관하게 Base 직진으로 해제한다. `UNKNOWN`과
+  YOLO no-box는 해제 count를 초기화하고 정지를 유지한다. 이후 STOP은 후보에서
+  무시하고 같은 LEFT 15회만 shortcut을 시작한다. camera 30 Hz와 실제 주행 vote
+  rate는 같지 않다. scheduled YOLO miss는 bbox cache를 즉시 지우고 재검출 전까지
+  CNN 판정을 멈추며 schema v14에는 no-box 자동 해제가 없다.
 - left frame에서는 한 제어 주기 STOP, 다음 fresh frame부터 speed `23` ResNet18을
   사용한다. 동시에 Base는 진입 전 history에서 시작한 self-AR shadow prediction을
   매 fresh frame 계속 갱신하지만 motor에는 발행하지 않는다. 첫 실제 shortcut
   명령부터 8초에 최신 0.25초 이내 shadow command를 즉시 발행해 STOP 없이 Base로
-  복귀한다. 성공은 process당 한 번이고 red 취소는 shadow와 시도를 폐기하되 성공을
-  소비하지 않는다.
-- 실제 실행 history와 미발행 Base shadow history는 분리한다. schema v13 Base와
+  복귀한다. 성공은 process당 한 번이며 initial phase가 끝난 뒤 STOP은 shortcut과
+  shadow를 취소하지 않는다.
+- 실제 실행 history와 미발행 Base shadow history는 분리한다. schema v14 Base와
   shadow에는 cap `35`가
   적용된 Base prediction만 compact token으로 추가하고, handoff 성공 때만 활성
   history로 승격한다. 최초 history는 `(0,35)×4`, token `[50,85]×4`다. 두 policy는
@@ -509,11 +510,16 @@ detector와 3-class CNN 전체를 포함한다. detector ONNX SHA-256은
   artifact의 서로 다른 normalization을 적용해 shortcut과 Base를 차례로 추론한다.
   따라서 Base self-AR를 계속 갱신하면서도 실제 선택 policy decision을 함께 반환한다.
 - `use_gamepad:=true`에서는 OFF로 시작하고 A hold/release grace `0.12s` 계약을
-  유지한다. 빨간불 정지 중에도 A를 계속 누르고 있어야 15회 확정된 다음 신호에서
-  자동 재출발한다. `use_gamepad:=false`에서는 A-hold/Joy stale 검사를 쓰지 않고,
-  camera와 motor subscriber가 준비되면 자동으로 ON이 되어 `Ctrl+C` 또는 fault까지
-  계속 주행한다. camera/IPC stale, ONNX shape·NaN/Inf, 경쟁 publisher와 motor
-  subscriber 소실은 어느 mode에서나 FAULT와 `[0,0]`이다.
+  유지한다. `LB+A`는 첫 STOP을 arm하고 A만 누르면 STOP을 처음부터 무시한다.
+  LB는 A 활성 순간에만 sample하며 이후 놓아도 arm은 유지된다. `use_gamepad:=false`
+  에서는 시작부터 정지한 채 신호를 찾고 첫 유효 CNN class에서 `READY`를 한 번
+  출력한 뒤 non-STOP 3회에 자동 Base 출발한다. camera/IPC stale, ONNX shape·NaN/Inf,
+  경쟁 publisher와 motor subscriber 소실은 어느 mode에서나 FAULT와 `[0,0]`이다.
+- 주행 terminal은 raw class가 바뀌면 즉시, 동일하면 기본 2 Hz로
+  `SIGNAL raw=... cnn=... yolo=... source=... phase=... vote=... stop=...`을
+  출력한다. `signal_status_log_hz`로 heartbeat만 조정하며 READY, STOP 확정·해제와
+  LEFT/shortcut event는 즉시 별도 출력한다. 이 diagnostic 실패는 motion 판정을
+  변경하지 않는다.
 - managed camera 또는 gamepad process가 종료되면 전체 mission launch를 종료한다.
   Jetson wrapper는 종료 시 launch process group leader가 이미 사라졌더라도 남은
   policy를 process group 단위로 정리하고 CUDA container를 내린다. 이전
@@ -533,7 +539,7 @@ CUDA→CPU를 exact 검사한다. bundle checksum, 두 socket과 synthetic ONNX 
 action accuracy가 `439/477 (92.03%)`에서 `476/477 (99.79%)`로 상승했지만,
 dataset manifest가 `known_scene_leakage: true`, `development_only: true`이므로 신규
 주행 session의 일반화 성능으로 해석하지 않는다. 실차 운행 검증 전 후보 상태다.
-기존 schema v12 speed-35 stop10-go30, schema v11 speed-35 stop30-go30, schema v10 speed-25 bundle, schema v9
+기존 schema v13 speed-35 stop15-go15, schema v12 speed-35 stop10-go30, schema v11 speed-35 stop30-go30, schema v10 speed-25 bundle, schema v9
 stop10-go15, schema v8
 stop3-go15 search3/classify1 bundle,
 schema v6 votes2 bundle,
@@ -544,13 +550,17 @@ schema v1 종료 STOP bundle과
 schema v2 red-3 bundle은 rollback용으로 삭제하거나 덮어쓰지 않는다.
 
 ```bash
-cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-stop15-go15-search3-classify1-yolo-miss30-release-45sessions-20260823 use_camera:=true use_gamepad:=true allow_motion:=true
+cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-initial-stop15-nonstop3-left15-stop-once-search3-classify1-45sessions-20260823 use_camera:=true use_gamepad:=true allow_motion:=true
 ```
 
-대회 연속 주행은 Gamepad를 시작하지 않고 다음처럼 실행한다.
+첫 빨강을 처리하려면 LB를 누른 채 A를 누르고, STOP을 처음부터 무시하려면 A만
+누른다. A는 주행 내내 유지하며 LB는 활성화 뒤 놓아도 된다.
+
+대회 연속 주행은 Gamepad를 시작하지 않고 정지 상태에서 신호등을 찾은 뒤
+`READY`/non-STOP3으로 자동 출발한다.
 
 ```bash
-cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-stop15-go15-search3-classify1-yolo-miss30-release-45sessions-20260823 use_camera:=true use_gamepad:=false allow_motion:=true
+cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-initial-stop15-nonstop3-left15-stop-once-search3-classify1-45sessions-20260823 use_camera:=true use_gamepad:=false allow_motion:=true
 ```
 
 이 launch는 실제 camera와 motor publisher를 열 수 있으므로 매번 직전 승인을 받고
@@ -560,12 +570,12 @@ cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source inst
 
 ### 수동 신호등 예측 GUI
 
-`traffic_light_viewer`는 schema v4..v13 bundle에서 신호등 YOLO와 CNN classifier만
+`traffic_light_viewer`는 schema v4..v14 bundle에서 신호등 YOLO와 CNN classifier만
 load한다. Base·shortcut 정책 container와 socket을 시작하지 않고 Joy를 구독하거나
 ROS topic을 publish하지 않는다. 따라서 `/xycar_motor` endpoint와 motion gate가
 없다. GUI에는 3 frame마다 갱신한 YOLO bbox, 중간 frame의 cached-bbox CNN mode,
 padding crop,
-bundle에 선언된 raw class 확률, bbox 폭 gate, action별 vote, stop latch와 최종
+bundle에 선언된 raw class 확률, bbox 폭 gate, STOP15/non-STOP3/LEFT15 phase와 최종
 `UNKNOWN/RED/LEFT/STRAIGHT`를 함께 표시한다. `Reset vote / stop latch`는 현재
 진단 session을 초기화하며 frame이나 결과를 저장하지 않는다.
 
@@ -582,7 +592,7 @@ export ROS_NAMESPACE=xycar
 export ROS_LOCALHOST_ONLY=1
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 ros2 launch xycar_ai_drive traffic_light_viewer.launch.py \
-  bundle_id:=traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-stop15-go15-search3-classify1-yolo-miss30-release-45sessions-20260823 \
+  bundle_id:=traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-initial-stop15-nonstop3-left15-stop-once-search3-classify1-45sessions-20260823 \
   use_camera:=true
 ```
 
@@ -592,7 +602,7 @@ ONNX Runtime `1.24.0`, CUDA→CPU provider 순서와 bundle checksum을 검사�
 
 ```bash
 ros2 launch xycar_ai_drive traffic_light_viewer.launch.py \
-  bundle_id:=traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-stop15-go15-search3-classify1-yolo-miss30-release-45sessions-20260823 \
+  bundle_id:=traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-initial-stop15-nonstop3-left15-stop-once-search3-classify1-45sessions-20260823 \
   use_camera:=false
 ```
 
@@ -602,7 +612,7 @@ launch 없이 기존 `/image_raw`만 구독할 때는 bundle directory를 직접
 
 ```bash
 ros2 run xycar_ai_drive traffic_light_viewer --ros-args \
-  -p bundle_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-stop15-go15-search3-classify1-yolo-miss30-release-45sessions-20260823 \
+  -p bundle_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-initial-stop15-nonstop3-left15-stop-once-search3-classify1-45sessions-20260823 \
   -p camera_topic:=/image_raw
 ```
 
@@ -614,18 +624,18 @@ camera 또는 motor publisher를 열 수 있으므로 정상 wrapper와 같은 �
 
 ```bash
 ros2 run xycar_ai_drive traffic_shortcut_gpu_server -- \
-  --bundle-dir /artifacts/traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-stop15-go15-search3-classify1-yolo-miss30-release-45sessions-20260823 \
+  --bundle-dir /artifacts/traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-initial-stop15-nonstop3-left15-stop-once-search3-classify1-45sessions-20260823 \
   --base-socket-path /run/user/1000/xycar-ai/traffic-base.sock \
   --shortcut-socket-path /run/user/1000/xycar-ai/traffic-shortcut.sock \
   --device cuda
 
 ros2 launch xycar_ai_drive traffic_shortcut_policy.launch.py \
-  bundle_id:=traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-stop15-go15-search3-classify1-yolo-miss30-release-45sessions-20260823 \
+  bundle_id:=traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-initial-stop15-nonstop3-left15-stop-once-search3-classify1-45sessions-20260823 \
   use_camera:=true use_gamepad:=true allow_motion:=true
 
 ros2 run xycar_ai_drive traffic_shortcut_policy --ros-args \
   --params-file /home/xytron/xycar_ws_mgw/install/xycar_ai_drive/share/xycar_ai_drive/config/traffic_shortcut_policy.yaml \
-  -p bundle_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-stop15-go15-search3-classify1-yolo-miss30-release-45sessions-20260823
+  -p bundle_dir:=/home/xytron/xycar_ws_mgw/artifacts/models/traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-initial-stop15-nonstop3-left15-stop-once-search3-classify1-45sessions-20260823
 ```
 
 ## 대회 signal + shortcut 통합 runtime

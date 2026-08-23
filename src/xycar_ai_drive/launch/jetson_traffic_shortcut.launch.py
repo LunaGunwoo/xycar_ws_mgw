@@ -18,6 +18,10 @@ def generate_launch_description():
     allow_motion = LaunchConfiguration('allow_motion')
     device_id = LaunchConfiguration('device_id')
     rpc_timeout = LaunchConfiguration('inference_rpc_timeout_sec')
+    initial_stop_arm_button_index = LaunchConfiguration(
+        'initial_stop_arm_button_index'
+    )
+    signal_status_log_hz = LaunchConfiguration('signal_status_log_hz')
     wrapper = (
         '/home/xytron/.local/lib/xycar-ai-gpu/'
         'run_gpu_traffic_shortcut.sh'
@@ -38,6 +42,14 @@ def generate_launch_description():
                 'inference_rpc_timeout_sec',
                 default_value='0.20',
             ),
+            DeclareLaunchArgument(
+                'initial_stop_arm_button_index',
+                default_value='4',
+            ),
+            DeclareLaunchArgument(
+                'signal_status_log_hz',
+                default_value='2.0',
+            ),
             SetEnvironmentVariable('TRAFFIC_SHORTCUT_BUNDLE_ID', bundle_id),
             SetEnvironmentVariable('ARTIFACT_ROOT', bundle_root),
             ExecuteProcess(
@@ -48,6 +60,11 @@ def generate_launch_description():
                     ['allow_motion:=', allow_motion],
                     ['device_id:=', device_id],
                     ['inference_rpc_timeout_sec:=', rpc_timeout],
+                    [
+                        'initial_stop_arm_button_index:=',
+                        initial_stop_arm_button_index,
+                    ],
+                    ['signal_status_log_hz:=', signal_status_log_hz],
                 ],
                 output='screen',
                 emulate_tty=True,

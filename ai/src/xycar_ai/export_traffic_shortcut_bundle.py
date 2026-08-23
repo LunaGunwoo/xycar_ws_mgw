@@ -91,6 +91,12 @@ SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID = (
     "tl40to225-stop15-go15-search3-classify1-yolo-miss30-release-"
     "45sessions-20260823"
 )
+SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID = (
+    "traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-"
+    "shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-"
+    "tl40to225-initial-stop15-nonstop3-left15-stop-once-search3-"
+    "classify1-45sessions-20260823"
+)
 BUNDLE_CONTRACTS = {
     LEGACY_BUNDLE_ID: (1, (3, 1, 1), SHORTCUT_ID),
     SHADOW_BUNDLE_ID: (2, (3, 1, 1), SHORTCUT_ID),
@@ -139,6 +145,11 @@ BUNDLE_CONTRACTS = {
     ),
     SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID: (
         13,
+        (15, 15, 15),
+        EXPANDED_SHORTCUT_ID,
+    ),
+    SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID: (
+        14,
         (15, 15, 15),
         EXPANDED_SHORTCUT_ID,
     ),
@@ -225,9 +236,9 @@ def build_traffic_shortcut_bundle(
         shortcut_artifact_id,
     ) = bundle_contract
     base_artifact_id = (
-        SPEED35_BASE_ID if schema_version in {11, 12, 13} else BASE_ID
+        SPEED35_BASE_ID if schema_version in {11, 12, 13, 14} else BASE_ID
     )
-    base_speed_cap = 35.0 if schema_version in {11, 12, 13} else 25.0
+    base_speed_cap = 35.0 if schema_version in {11, 12, 13, 14} else 25.0
     base_artifact = _verify_policy_artifact(
         base_artifact,
         expected_id=base_artifact_id,
@@ -246,12 +257,12 @@ def build_traffic_shortcut_bundle(
         raise TrafficBundleBuildError(f"traffic ONNX is missing: {traffic_model}")
     expected_traffic_sha256 = (
         HUMAN_BBOX_TRAFFIC_SHA256
-        if schema_version in {6, 7, 8, 9, 10, 11, 12, 13}
+        if schema_version in {6, 7, 8, 9, 10, 11, 12, 13, 14}
         else TRAFFIC_SHA256
     )
     expected_classifier_sha256 = (
         HUMAN_BBOX_CLASSIFIER_SHA256
-        if schema_version in {6, 7, 8, 9, 10, 11, 12, 13}
+        if schema_version in {6, 7, 8, 9, 10, 11, 12, 13, 14}
         else CLASSIFIER_SHA256
     )
     if _sha256_file(traffic_model) != expected_traffic_sha256:
@@ -266,7 +277,7 @@ def build_traffic_shortcut_bundle(
         )
     elif traffic_classifier is not None:
         raise TrafficBundleBuildError(
-            "traffic classifier is only valid for schema v4..v12"
+            "traffic classifier is only valid for schema v4..v14"
         )
 
     base_manifest = _load_mapping(base_artifact / "manifest.yaml")
@@ -319,7 +330,7 @@ def build_traffic_shortcut_bundle(
                 "traffic_light_onnx": {
                     "read_only_path": (
                         str(traffic_model)
-                        if schema_version in {6, 7, 8, 9, 10, 11, 12, 13}
+                        if schema_version in {6, 7, 8, 9, 10, 11, 12, 13, 14}
                         else "/home/xytron/traffic_light.onnx"
                     ),
                     "sha256": expected_traffic_sha256,
@@ -327,7 +338,7 @@ def build_traffic_shortcut_bundle(
                 "tl_cls_onnx": {
                     "read_only_path": (
                         str(traffic_classifier)
-                        if schema_version in {6, 7, 8, 9, 10, 11, 12, 13}
+                        if schema_version in {6, 7, 8, 9, 10, 11, 12, 13, 14}
                         and traffic_classifier is not None
                         else "/home/xytron/tl_cls.onnx"
                     ),
@@ -335,7 +346,7 @@ def build_traffic_shortcut_bundle(
                 },
             },
         }
-        if schema_version in {6, 7, 8, 9, 10, 11, 12, 13}:
+        if schema_version in {6, 7, 8, 9, 10, 11, 12, 13, 14}:
             provenance["human_corrected_two_stage"] = {
                 "detector_checkpoint_sha256": (
                     HUMAN_BBOX_TRAFFIC_CHECKPOINT_SHA256
@@ -411,29 +422,62 @@ def _bundle_manifest(
     traffic_classifier: Path | None,
 ) -> dict[str, object]:
     base_artifact_id = (
-        SPEED35_BASE_ID if schema_version in {11, 12, 13} else BASE_ID
+        SPEED35_BASE_ID if schema_version in {11, 12, 13, 14} else BASE_ID
     )
-    base_speed_cap = 35.0 if schema_version in {11, 12, 13} else 25.0
+    base_speed_cap = 35.0 if schema_version in {11, 12, 13, 14} else 25.0
+    one_shot_initial_stop = schema_version == 14
     mission = {
-        "states": [
-            "OFF",
-            "BASE",
-            "RED_STOP",
-            "SWITCH_TO_SHORTCUT",
-            "SHORTCUT",
-            "SWITCH_TO_BASE",
-            "FAULT",
-        ],
-        "action_priority": ["STOP", "LEFT", "STRAIGHT"],
+        "states": (
+            [
+                "OFF",
+                "WAIT_FOR_SIGNAL",
+                "BASE",
+                "INITIAL_STOP",
+                "SWITCH_TO_SHORTCUT",
+                "SHORTCUT",
+                "SWITCH_TO_BASE",
+                "FAULT",
+            ]
+            if one_shot_initial_stop
+            else [
+                "OFF",
+                "BASE",
+                "RED_STOP",
+                "SWITCH_TO_SHORTCUT",
+                "SHORTCUT",
+                "SWITCH_TO_BASE",
+                "FAULT",
+            ]
+        ),
+        "action_priority": (
+            ["INITIAL_STOP", "LEFT", "STRAIGHT"]
+            if one_shot_initial_stop
+            else ["STOP", "LEFT", "STRAIGHT"]
+        ),
         "a_hold_release_grace_sec": 0.12,
         "shortcut_duration_sec": 8.0,
         "successful_shortcut_once": True,
-        "red_cancels_shortcut": True,
+        "red_cancels_shortcut": not one_shot_initial_stop,
         "red_cancel_consumes_success": False,
         "base_speed_cap": base_speed_cap,
         "shortcut_speed": 23.0,
     }
-    if schema_version >= 5:
+    if one_shot_initial_stop:
+        mission["initial_stop"] = {
+            "gamepad_activation": "lb_held_on_a_enable",
+            "headless_activation": "wait_for_first_valid_signal",
+            "stop_consecutive_reads": 15,
+            "clear_classes": ["STRAIGHT", "LEFT"],
+            "clear_consecutive_reads": 3,
+            "clear_different_class_behavior": "continue_candidate",
+            "unknown_or_missing_behavior": (
+                "reset_clear_candidate_retain_stop"
+            ),
+            "post_clear_action": "BASE",
+            "post_clear_stop_behavior": "ignore",
+            "ready_behavior": "log_once_on_first_valid_class",
+        }
+    if 5 <= schema_version <= 13:
         mission["red_stop_yolo_missing_release_frames"] = 30
     if schema_version == 1:
         mission["transition_stop_control_cycles"] = 1
@@ -452,7 +496,11 @@ def _bundle_manifest(
             "motor_publish_during_shortcut": False,
             "stale_timeout_sec": 0.25,
             "failure_behavior": "fault_stop",
-            "red_behavior": "discard",
+            "red_behavior": (
+                "ignore_after_initial_stop"
+                if one_shot_initial_stop
+                else "discard"
+            ),
         }
     manifest = {
         "schema_version": schema_version,
@@ -481,7 +529,7 @@ def _bundle_manifest(
                 "file": "signal/traffic_light.onnx",
                 "sha256": (
                     HUMAN_BBOX_TRAFFIC_SHA256
-                    if schema_version in {6, 7, 8, 9, 10, 11, 12, 13}
+                    if schema_version in {6, 7, 8, 9, 10, 11, 12, 13, 14}
                     else TRAFFIC_SHA256
                 ),
                 "input": {
@@ -524,7 +572,7 @@ def _bundle_manifest(
     }
     if schema_version >= 4:
         assert traffic_classifier is not None
-        if schema_version in {6, 7, 8, 9, 10, 11, 12, 13}:
+        if schema_version in {6, 7, 8, 9, 10, 11, 12, 13, 14}:
             classifier_sha256 = HUMAN_BBOX_CLASSIFIER_SHA256
             classifier_height = 128
             classifier_width = 416
@@ -563,13 +611,13 @@ def _bundle_manifest(
             "confidence_threshold": 0.25,
             "bbox_width_px": (
                 [40, 225]
-                if schema_version in {6, 7, 8, 9, 10, 11, 12, 13}
+                if schema_version in {6, 7, 8, 9, 10, 11, 12, 13, 14}
                 else [45, 200]
             ),
             "inference_every_n_frames": 3,
             "preprocessing": (
                 "letterbox_640_center_pad114_bgr_to_rgb_float32_nchw_div255"
-                if schema_version in {6, 7, 8, 9, 10, 11, 12, 13}
+                if schema_version in {6, 7, 8, 9, 10, 11, 12, 13, 14}
                 else "resize_640_bgr_to_rgb_float32_nchw_div255"
             ),
             "selection": "maximum_confidence_box",
@@ -586,10 +634,10 @@ def _bundle_manifest(
                 "decision": classifier_decision,
             },
         }
-        if schema_version in {6, 7, 8, 9, 10, 11, 12, 13}:
+        if schema_version in {6, 7, 8, 9, 10, 11, 12, 13, 14}:
             manifest["detector"]["max_detections"] = 1
             manifest["detector"]["classifier"]["minimum_probability"] = 0.5
-        if schema_version in {8, 9, 10, 11, 12, 13}:
+        if schema_version in {8, 9, 10, 11, 12, 13, 14}:
             manifest["detector"][
                 "classification_every_n_frames_after_detection"
             ] = 1
@@ -635,6 +683,21 @@ def _classifier_signal_vote_contract(
     schema_version: int,
 ) -> dict[str, object]:
     stop_reads, left_reads, straight_reads = consecutive_reads_by_action
+    if schema_version == 14:
+        return {
+            "raw_classes": ["STOP", "STRAIGHT", "LEFT"],
+            "consecutive_reads_by_raw_class": {
+                "STOP": stop_reads,
+                "STRAIGHT": straight_reads,
+                "LEFT": left_reads,
+            },
+            "unknown_behavior": "reset_candidate",
+            "different_raw_class_behavior": "restart_candidate_at_one",
+            "stop_classes": ["STOP"],
+            "stop_vote_behavior": "only_while_initial_stop_armed",
+            "post_initial_stop_behavior": "ignore_stop",
+            "navigation_actions": ["LEFT", "STRAIGHT"],
+        }
     if schema_version in {7, 8, 9, 10, 11, 12, 13}:
         return {
             "raw_classes": ["STOP", "STRAIGHT", "LEFT"],
@@ -814,12 +877,12 @@ def _verify_built_bundle(
         raise TrafficBundleBuildError("built bundle identity mismatch")
     expected_traffic_sha256 = (
         HUMAN_BBOX_TRAFFIC_SHA256
-        if expected_schema in {6, 7, 8, 9, 10, 11, 12, 13}
+        if expected_schema in {6, 7, 8, 9, 10, 11, 12, 13, 14}
         else TRAFFIC_SHA256
     )
     expected_classifier_sha256 = (
         HUMAN_BBOX_CLASSIFIER_SHA256
-        if expected_schema in {6, 7, 8, 9, 10, 11, 12, 13}
+        if expected_schema in {6, 7, 8, 9, 10, 11, 12, 13, 14}
         else CLASSIFIER_SHA256
     )
     if (
@@ -861,7 +924,7 @@ def _verify_built_bundle(
             "built bundle classifier signal vote mismatch"
         )
     if (
-        expected_schema >= 5
+        5 <= expected_schema <= 13
         and _required_mapping(manifest, "mission", "bundle").get(
             "red_stop_yolo_missing_release_frames"
         )
@@ -869,6 +932,33 @@ def _verify_built_bundle(
     ):
         raise TrafficBundleBuildError(
             "built bundle YOLO missing-release contract mismatch"
+        )
+    if (
+        expected_schema == 14
+        and "red_stop_yolo_missing_release_frames"
+        in _required_mapping(manifest, "mission", "bundle")
+    ):
+        raise TrafficBundleBuildError(
+            "schema v14 must not use YOLO missing-release"
+        )
+    if expected_schema == 14 and _required_mapping(
+        _required_mapping(manifest, "mission", "bundle"),
+        "initial_stop",
+        "mission",
+    ) != {
+        "gamepad_activation": "lb_held_on_a_enable",
+        "headless_activation": "wait_for_first_valid_signal",
+        "stop_consecutive_reads": 15,
+        "clear_classes": ["STRAIGHT", "LEFT"],
+        "clear_consecutive_reads": 3,
+        "clear_different_class_behavior": "continue_candidate",
+        "unknown_or_missing_behavior": "reset_clear_candidate_retain_stop",
+        "post_clear_action": "BASE",
+        "post_clear_stop_behavior": "ignore",
+        "ready_behavior": "log_once_on_first_valid_class",
+    }:
+        raise TrafficBundleBuildError(
+            "built bundle initial STOP contract mismatch"
         )
     if _required_mapping(manifest, "mission", "bundle").get(
         "base_speed_cap"

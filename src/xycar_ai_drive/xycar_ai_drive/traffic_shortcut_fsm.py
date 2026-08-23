@@ -11,8 +11,10 @@ from xycar_ai_drive.traffic_light_detector import LampAction
 
 class MissionState(str, Enum):
     OFF = 'OFF'
+    WAIT_FOR_SIGNAL = 'WAIT_FOR_SIGNAL'
     BASE = 'BASE'
     RED_STOP = 'RED_STOP'
+    INITIAL_STOP = 'INITIAL_STOP'
     SWITCH_TO_SHORTCUT = 'SWITCH_TO_SHORTCUT'
     SHORTCUT = 'SHORTCUT'
     SWITCH_TO_BASE = 'SWITCH_TO_BASE'
@@ -41,6 +43,7 @@ class TrafficShortcutFsm:
         *,
         shortcut_duration_sec: float = 8.0,
         seamless_base_handoff: bool = False,
+        one_shot_initial_stop: bool = False,
     ) -> None:
         if (
             not math.isfinite(shortcut_duration_sec)
@@ -49,12 +52,34 @@ class TrafficShortcutFsm:
             raise ValueError('shortcut_duration_sec must be finite and positive')
         self.shortcut_duration_sec = float(shortcut_duration_sec)
         self.seamless_base_handoff = bool(seamless_base_handoff)
+        self.one_shot_initial_stop = bool(one_shot_initial_stop)
         self.state = MissionState.OFF
         self.shortcut_completed = False
         self.shortcut_started_monotonic: float | None = None
+        self.initial_stop_armed = False
+        self.initial_stop_consumed = False
 
-    def enable(self) -> None:
-        self.state = MissionState.BASE
+    def enable(
+        self,
+        *,
+        initial_stop_armed: bool = False,
+        wait_for_signal: bool = False,
+    ) -> None:
+        if not self.one_shot_initial_stop and (
+            initial_stop_armed or wait_for_signal
+        ):
+            raise ValueError(
+                'initial STOP options require one-shot mission mode'
+            )
+        if wait_for_signal and not initial_stop_armed:
+            raise ValueError('signal wait requires initial STOP arm')
+        self.initial_stop_armed = bool(initial_stop_armed)
+        self.initial_stop_consumed = not initial_stop_armed
+        self.state = (
+            MissionState.WAIT_FOR_SIGNAL
+            if wait_for_signal
+            else MissionState.BASE
+        )
         self.shortcut_started_monotonic = None
 
     def disable(self) -> None:
@@ -74,6 +99,8 @@ class TrafficShortcutFsm:
         self._validate_now(now_monotonic)
         if self.state in {MissionState.OFF, MissionState.FAULT}:
             return self._stop_plan()
+        if self.one_shot_initial_stop:
+            return self._on_one_shot_frame(signal)
         if signal == LampAction.RED:
             self.shortcut_started_monotonic = None
             self.state = MissionState.RED_STOP
@@ -106,6 +133,48 @@ class TrafficShortcutFsm:
             return self._policy_plan(PolicyChoice.BASE)
 
         raise RuntimeError(f'unhandled mission state: {self.state}')
+
+    def _on_one_shot_frame(self, signal: LampAction) -> FramePlan:
+        if self.state in {
+            MissionState.WAIT_FOR_SIGNAL,
+            MissionState.INITIAL_STOP,
+        }:
+            if signal not in {LampAction.LEFT, LampAction.STRAIGHT}:
+                return self._stop_plan()
+            self.initial_stop_armed = False
+            self.initial_stop_consumed = True
+            self.state = MissionState.BASE
+            return self._policy_plan(PolicyChoice.BASE)
+
+        if self.state == MissionState.BASE:
+            if (
+                signal == LampAction.RED
+                and self.initial_stop_armed
+                and not self.initial_stop_consumed
+            ):
+                self.state = MissionState.INITIAL_STOP
+                return self._stop_plan()
+            if (
+                signal == LampAction.LEFT
+                and not self.initial_stop_armed
+                and not self.shortcut_completed
+            ):
+                self.state = MissionState.SWITCH_TO_SHORTCUT
+                return self._stop_plan()
+            return self._policy_plan(PolicyChoice.BASE)
+
+        if self.state == MissionState.SWITCH_TO_SHORTCUT:
+            self.state = MissionState.SHORTCUT
+            return self._policy_plan(PolicyChoice.SHORTCUT)
+
+        if self.state == MissionState.SHORTCUT:
+            return self._policy_plan(PolicyChoice.SHORTCUT)
+
+        if self.state == MissionState.SWITCH_TO_BASE:
+            self.state = MissionState.BASE
+            return self._policy_plan(PolicyChoice.BASE)
+
+        raise RuntimeError(f'unhandled one-shot mission state: {self.state}')
 
     def on_shortcut_command_published(self, *, now_monotonic: float) -> None:
         self._validate_now(now_monotonic)

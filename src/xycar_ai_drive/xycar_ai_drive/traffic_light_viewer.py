@@ -22,6 +22,8 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 
 from xycar_ai_drive.traffic_light_detector import (
+    InitialStopSignalLatch,
+    InitialStopSignalLatchSnapshot,
     LampAction,
     SignalClass,
     SignalInspection,
@@ -52,7 +54,9 @@ class TrafficLightViewerResult:
     inspection: SignalInspection | None
     width_gate_accepted: bool
     final_action: LampAction
-    latch_snapshot: TrafficSignalLatchSnapshot
+    latch_snapshot: (
+        TrafficSignalLatchSnapshot | InitialStopSignalLatchSnapshot
+    )
     inference_kind: str = 'YOLO+CNN'
     error: str | None = None
 
@@ -116,19 +120,42 @@ class TrafficLightViewerNode(Node):
                 .reuse_detected_bbox_between_yolo_frames
             ),
         )
-        self._latch = TrafficSignalLatch(
-            bbox_width_min=self.bundle.detector.bbox_width_min,
-            bbox_width_max=self.bundle.detector.bbox_width_max,
-            red_consecutive_reads=(
-                self.bundle.detector.red_consecutive_reads
-            ),
-            left_consecutive_reads=(
-                self.bundle.detector.left_consecutive_reads
-            ),
-            straight_consecutive_reads=(
-                self.bundle.detector.straight_consecutive_reads
-            ),
-        )
+        if self.bundle.schema_version == 14:
+            clear_reads = self.bundle.initial_stop_clear_consecutive_reads
+            if clear_reads is None:
+                raise ValueError('schema v14 initial STOP clear reads missing')
+            self._latch = InitialStopSignalLatch(
+                bbox_width_min=self.bundle.detector.bbox_width_min,
+                bbox_width_max=self.bundle.detector.bbox_width_max,
+                stop_consecutive_reads=(
+                    self.bundle.detector.red_consecutive_reads
+                ),
+                clear_consecutive_reads=clear_reads,
+                left_consecutive_reads=(
+                    self.bundle.detector.left_consecutive_reads
+                ),
+                straight_consecutive_reads=(
+                    self.bundle.detector.straight_consecutive_reads
+                ),
+            )
+            self._latch.reset(
+                initial_stop_armed=True,
+                wait_for_signal=True,
+            )
+        else:
+            self._latch = TrafficSignalLatch(
+                bbox_width_min=self.bundle.detector.bbox_width_min,
+                bbox_width_max=self.bundle.detector.bbox_width_max,
+                red_consecutive_reads=(
+                    self.bundle.detector.red_consecutive_reads
+                ),
+                left_consecutive_reads=(
+                    self.bundle.detector.left_consecutive_reads
+                ),
+                straight_consecutive_reads=(
+                    self.bundle.detector.straight_consecutive_reads
+                ),
+            )
         self._bridge = CvBridge()
         self._lock = threading.RLock()
         self._frame_condition = threading.Condition(self._lock)
@@ -156,6 +183,11 @@ class TrafficLightViewerNode(Node):
             'Passive traffic-light viewer started with no ROS publishers, '
             'Joy subscription, policy server, or motor endpoint.'
         )
+        clear_contract = (
+            f',clear:{self.bundle.initial_stop_clear_consecutive_reads}'
+            if self.bundle.schema_version == 14
+            else ''
+        )
         self.get_logger().info(
             f'bundle={self.bundle.artifact_id}, camera={self.camera_topic}, '
             f'classes={"/".join(value.value for value in self.class_labels)}, '
@@ -167,15 +199,16 @@ class TrafficLightViewerNode(Node):
             f'votes=stop:{self.bundle.detector.red_consecutive_reads},'
             f'left:{self.bundle.detector.left_consecutive_reads},'
             f'straight:{self.bundle.detector.straight_consecutive_reads}'
+            f'{clear_contract}'
         )
 
     def _validate_bundle_contract(self) -> None:
         detector = self.bundle.detector
         if self.bundle.schema_version not in {
-            4, 5, 6, 7, 8, 9, 10, 11, 12, 13
+            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14
         }:
             raise ValueError(
-                'traffic viewer supports classifier bundle schema 4..13'
+                'traffic viewer supports classifier bundle schema 4..14'
             )
         if detector.mode != 'yolo_cnn_classifier':
             raise ValueError(
@@ -183,12 +216,14 @@ class TrafficLightViewerNode(Node):
             )
         expected_width = (
             (40, 225)
-            if self.bundle.schema_version in {6, 7, 8, 9, 10, 11, 12, 13}
+            if self.bundle.schema_version in {
+                6, 7, 8, 9, 10, 11, 12, 13, 14
+            }
             else (45, 200)
         )
         expected_votes = (
             (15, 15, 15)
-            if self.bundle.schema_version == 13
+            if self.bundle.schema_version in {13, 14}
             else (10, 30, 30)
             if self.bundle.schema_version == 12
             else (30, 30, 30)
@@ -215,7 +250,7 @@ class TrafficLightViewerNode(Node):
             )
         expected_classification_every = (
             1
-            if self.bundle.schema_version in {8, 9, 10, 11, 12, 13}
+            if self.bundle.schema_version in {8, 9, 10, 11, 12, 13, 14}
             else 3
         )
         expected_reuse_detected_bbox = self.bundle.schema_version in {
@@ -225,6 +260,7 @@ class TrafficLightViewerNode(Node):
             11,
             12,
             13,
+            14,
         }
         if (
             detector.classification_every_n_frames_after_detection
@@ -393,7 +429,13 @@ class TrafficLightViewerNode(Node):
     def reset_vote(self) -> None:
         with self._frame_condition:
             self._latch_generation += 1
-            self._latch.reset()
+            if isinstance(self._latch, InitialStopSignalLatch):
+                self._latch.reset(
+                    initial_stop_armed=True,
+                    wait_for_signal=True,
+                )
+            else:
+                self._latch.reset()
             self._signal_cadence.reset(
                 frame_sequence=self._frame_sequence,
             )
@@ -403,7 +445,7 @@ class TrafficLightViewerNode(Node):
                     final_action=LampAction.UNKNOWN,
                     latch_snapshot=self._latch.snapshot,
                 )
-        self.get_logger().info('Traffic signal vote and stop latch reset')
+        self.get_logger().info('Traffic signal vote and initial-stop phase reset')
 
     def shutdown(self) -> None:
         with self._frame_condition:
@@ -521,7 +563,7 @@ class TrafficLightViewerApplication:
         ).pack(anchor=tk.W, fill=tk.X, pady=(8, 12))
         ttk.Button(
             controls,
-            text='Reset vote / stop latch',
+            text='Reset vote / initial-stop phase',
             command=self._reset_vote,
         ).pack(fill=tk.X, pady=4)
         ttk.Button(controls, text='Quit', command=self.close).pack(
@@ -636,10 +678,21 @@ class TrafficLightViewerApplication:
         )
         self._detail_text.set(
             f'raw class: {raw_class.value}\n'
-            f'candidate: {snapshot.candidate.value} | '
+            + (
+                f'phase: {snapshot.phase.value}\n'
+                if isinstance(snapshot, InitialStopSignalLatchSnapshot)
+                else ''
+            )
+            + f'candidate: {snapshot.candidate.value} | '
             f'vote: {snapshot.candidate_reads}/{snapshot.required_reads}\n'
             f'stop latch: {"ON" if snapshot.stop_latched else "OFF"}\n'
-            f'{bbox_text}\n'
+            + (
+                'schema v14: armed STOP 15 | non-STOP clear 3 | '
+                'navigation LEFT 15 | post-clear STOP ignored\n'
+                if self.node.bundle.schema_version == 14
+                else ''
+            )
+            + f'{bbox_text}\n'
             f'width gate: {self.node.bundle.detector.bbox_width_min}..'
             f'{self.node.bundle.detector.bbox_width_max}px\n'
             f'frame: {result.frame_sequence} (every '

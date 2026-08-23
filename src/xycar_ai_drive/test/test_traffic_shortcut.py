@@ -13,6 +13,8 @@ from xycar_ai_drive.artifact import ArtifactContractError
 from xycar_ai_drive.traffic_light_detector import (
     DetectionBox,
     ImageBounds,
+    InitialStopPhase,
+    InitialStopSignalLatch,
     LetterboxTransform,
     LampAction,
     LampReading,
@@ -52,6 +54,7 @@ from xycar_ai_drive.traffic_shortcut_artifact import (
     EXPECTED_SPEED35_BASE_ARTIFACT_ID,
     EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    EXPECTED_SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID,
     EXPECTED_SHORTCUT_ARTIFACT_ID,
@@ -62,8 +65,10 @@ from xycar_ai_drive.traffic_shortcut_artifact import (
 )
 from xycar_ai_drive.traffic_shortcut_policy_node import (
     MissionDecision,
+    SignalStatusLogGate,
     TrafficShortcutPolicyNode,
     YoloMissingReleaseCounter,
+    format_signal_status,
 )
 from xycar_ai_drive.control import DriveCommand
 
@@ -488,6 +493,96 @@ def test_action_classifier_stop15_go15_resumes_without_drive_gate_reset():
     assert resumed.policy == PolicyChoice.BASE
 
 
+def test_initial_stop_once_latch_clears_on_three_mixed_non_stop_reads():
+    latch = InitialStopSignalLatch(
+        bbox_width_min=40,
+        bbox_width_max=225,
+        stop_consecutive_reads=15,
+        clear_consecutive_reads=3,
+        left_consecutive_reads=15,
+        straight_consecutive_reads=15,
+    )
+    stop = _signal(SignalClass.STOP)
+    left = _signal(SignalClass.LEFT)
+    straight = _signal(SignalClass.STRAIGHT)
+    latch.reset(initial_stop_armed=True)
+
+    for step in range(14):
+        assert latch.observe(stop) == LampAction.UNKNOWN
+        assert latch.snapshot.phase == InitialStopPhase.ARMED
+        assert latch.snapshot.candidate_reads == step + 1
+    assert latch.observe(stop) == LampAction.RED
+    assert latch.snapshot.phase == InitialStopPhase.STOPPED
+
+    assert latch.observe(left) == LampAction.RED
+    assert latch.snapshot.candidate_reads == 1
+    assert latch.observe(straight) == LampAction.RED
+    assert latch.snapshot.candidate_reads == 2
+    assert latch.observe(None) == LampAction.RED
+    assert latch.snapshot.candidate_reads == 0
+    assert latch.observe(straight) == LampAction.RED
+    assert latch.observe(left) == LampAction.RED
+    assert latch.observe(straight) == LampAction.STRAIGHT
+    assert latch.snapshot.phase == InitialStopPhase.NAVIGATION
+
+    assert latch.observe(stop) == LampAction.UNKNOWN
+    assert latch.snapshot.stop_ignored
+    for _ in range(14):
+        assert latch.observe(left) == LampAction.UNKNOWN
+    assert latch.observe(left) == LampAction.LEFT
+
+    latch.reset(initial_stop_armed=True, wait_for_signal=True)
+    assert latch.snapshot.phase == InitialStopPhase.WAIT_FOR_SIGNAL
+    assert latch.observe(stop) == LampAction.RED
+    assert latch.observe(straight) == LampAction.RED
+    assert latch.observe(left) == LampAction.RED
+    assert latch.observe(straight) == LampAction.STRAIGHT
+    assert latch.snapshot.phase == InitialStopPhase.NAVIGATION
+
+
+def test_initial_stop_once_fsm_arms_waits_and_ignores_later_red():
+    fsm = TrafficShortcutFsm(one_shot_initial_stop=True)
+    fsm.enable(initial_stop_armed=True)
+    assert fsm.on_frame(
+        LampAction.UNKNOWN,
+        now_monotonic=0.0,
+    ).policy == PolicyChoice.BASE
+    stopped = fsm.on_frame(LampAction.RED, now_monotonic=0.1)
+    assert stopped.state == MissionState.INITIAL_STOP
+    assert stopped.publish_stop
+    resumed = fsm.on_frame(LampAction.STRAIGHT, now_monotonic=0.2)
+    assert resumed.state == MissionState.BASE
+    assert resumed.policy == PolicyChoice.BASE
+    assert fsm.initial_stop_consumed
+    assert fsm.on_frame(
+        LampAction.RED,
+        now_monotonic=0.3,
+    ).policy == PolicyChoice.BASE
+
+    fsm.disable()
+    fsm.enable(initial_stop_armed=True, wait_for_signal=True)
+    assert fsm.state == MissionState.WAIT_FOR_SIGNAL
+    assert fsm.on_frame(
+        LampAction.RED,
+        now_monotonic=0.4,
+    ).publish_stop
+    assert fsm.on_frame(
+        LampAction.LEFT,
+        now_monotonic=0.5,
+    ).policy == PolicyChoice.BASE
+
+    fsm.disable()
+    fsm.enable()
+    assert fsm.on_frame(
+        LampAction.RED,
+        now_monotonic=0.6,
+    ).policy == PolicyChoice.BASE
+    assert fsm.on_frame(
+        LampAction.LEFT,
+        now_monotonic=0.7,
+    ).state == MissionState.SWITCH_TO_SHORTCUT
+
+
 def test_classifier_detector_rejects_bad_logits_and_empty_crop():
     yolo = _FakeOnnxSession(
         _output_with_candidates((320.0, 240.0, 100.0, 40.0, 0.9))
@@ -873,6 +968,39 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
             EXPECTED_SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
         ),
     ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    initial_stop_once_vote = {
+        'raw_classes': ['STOP', 'STRAIGHT', 'LEFT'],
+        'consecutive_reads_by_raw_class': {
+            'STOP': 15,
+            'STRAIGHT': 15,
+            'LEFT': 15,
+        },
+        'unknown_behavior': 'reset_candidate',
+        'different_raw_class_behavior': 'restart_candidate_at_one',
+        'stop_classes': ['STOP'],
+        'stop_vote_behavior': 'only_while_initial_stop_armed',
+        'post_initial_stop_behavior': 'ignore_stop',
+        'navigation_actions': ['LEFT', 'STRAIGHT'],
+    }
+    assert _load_signal_vote_contract(
+        {'signal_vote': initial_stop_once_vote},
+        schema_version=14,
+        artifact_id=(
+            EXPECTED_SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == (15, 15, 15)
+    assert _expected_shortcut_artifact_id(
+        schema_version=14,
+        artifact_id=(
+            EXPECTED_SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert _expected_base_artifact_id(
+        schema_version=14,
+        artifact_id=(
+            EXPECTED_SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
     with pytest.raises(ArtifactContractError, match='signal vote'):
         _load_signal_vote_contract(
             {
@@ -922,7 +1050,6 @@ def test_yolo_missing_release_requires_ten_scheduled_misses():
         yolo_box_found=True,
     ) is False
     assert counter.missing_frames == 0
-
     for frame_span in (4, 4, 4, 4, 4, 4, 4):
         assert not counter.observe(
             red_stop_active=True,
@@ -961,6 +1088,28 @@ def test_yolo_missing_release_requires_ten_scheduled_misses():
         yolo_box_found=False,
     )
     assert counter.missing_frames == 0
+
+
+def test_signal_status_log_changes_immediately_and_heartbeats_at_two_hz():
+    gate = SignalStatusLogGate(rate_hz=2.0)
+    assert gate.should_emit(SignalClass.STOP, now_monotonic=1.0)
+    assert not gate.should_emit(SignalClass.STOP, now_monotonic=1.49)
+    assert gate.should_emit(SignalClass.STOP, now_monotonic=1.5)
+    assert gate.should_emit(SignalClass.LEFT, now_monotonic=1.51)
+
+    line = format_signal_status(
+        reading=_signal(SignalClass.LEFT),
+        raw_class=SignalClass.LEFT,
+        source='CACHED_CNN',
+        phase='NAVIGATION',
+        candidate_reads=7,
+        required_reads=15,
+        stop_status='IGNORED',
+    )
+    assert line == (
+        'SIGNAL raw=LEFT cnn=90.0% yolo=90.0% source=CACHED_CNN '
+        'phase=NAVIGATION vote=7/15 stop=IGNORED'
+    )
 
 
 def test_fsm_base_transition_exact_eight_seconds_and_one_shot():
@@ -1168,7 +1317,17 @@ def test_traffic_shortcut_launch_ties_gamepad_to_hold_gate():
 
     assert "'require_gamepad_hold': ParameterValue(" in launch_text
     assert 'use_gamepad,' in launch_text
+    assert "'initial_stop_arm_button_index'" in launch_text
+    assert "'signal_status_log_hz'" in launch_text
     assert 'traffic shortcut gamepad exited; stopping mission' in launch_text
+
+    jetson_launch_text = (
+        Path(__file__).parents[1]
+        / 'launch'
+        / 'jetson_traffic_shortcut.launch.py'
+    ).read_text(encoding='utf-8')
+    assert "'initial_stop_arm_button_index:='" in jetson_launch_text
+    assert "'signal_status_log_hz:='" in jetson_launch_text
 
     camera_launch_text = (
         Path(__file__).parents[3]

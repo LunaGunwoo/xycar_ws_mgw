@@ -30,6 +30,10 @@ def generate_launch_description():
     base_socket_path = LaunchConfiguration('base_socket_path')
     shortcut_socket_path = LaunchConfiguration('shortcut_socket_path')
     rpc_timeout = LaunchConfiguration('inference_rpc_timeout_sec')
+    initial_stop_arm_button_index = LaunchConfiguration(
+        'initial_stop_arm_button_index'
+    )
+    signal_status_log_hz = LaunchConfiguration('signal_status_log_hz')
 
     return LaunchDescription(
         [
@@ -61,6 +65,14 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 'inference_rpc_timeout_sec',
                 default_value='0.20',
+            ),
+            DeclareLaunchArgument(
+                'initial_stop_arm_button_index',
+                default_value='4',
+            ),
+            DeclareLaunchArgument(
+                'signal_status_log_hz',
+                default_value='2.0',
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -116,6 +128,14 @@ def generate_launch_description():
                         'shortcut_socket_path': shortcut_socket_path,
                         'inference_rpc_timeout_sec': ParameterValue(
                             rpc_timeout,
+                            value_type=float,
+                        ),
+                        'initial_stop_arm_button_index': ParameterValue(
+                            initial_stop_arm_button_index,
+                            value_type=int,
+                        ),
+                        'signal_status_log_hz': ParameterValue(
+                            signal_status_log_hz,
                             value_type=float,
                         ),
                     },

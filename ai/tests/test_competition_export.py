@@ -33,6 +33,7 @@ from xycar_ai.export_traffic_shortcut_bundle import (
     SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     _bundle_manifest,
 )
 from xycar_ai.steering_contract import steering_contract_mapping
@@ -349,3 +350,38 @@ def test_human_bbox_traffic_bundle_manifests_preserve_models_and_version_votes(
     assert speed35_stop15_go15_adaptive['components']['base'][
         'artifact_id'
     ] == SPEED35_BASE_ID
+
+    initial_stop_once = _bundle_manifest(
+        artifact_id=(
+            SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+        schema_version=14,
+        consecutive_signal_reads_by_action=(15, 15, 15),
+        base_artifact=base,
+        shortcut_artifact=shortcut,
+        shortcut_artifact_id=EXPANDED_SHORTCUT_ID,
+        traffic_classifier=tmp_path / 'classifier.onnx',
+    )
+
+    assert initial_stop_once['detector'] == adaptive_detector
+    assert initial_stop_once['signal_vote'] == {
+        'raw_classes': ['STOP', 'STRAIGHT', 'LEFT'],
+        'consecutive_reads_by_raw_class': {
+            'STOP': 15,
+            'STRAIGHT': 15,
+            'LEFT': 15,
+        },
+        'unknown_behavior': 'reset_candidate',
+        'different_raw_class_behavior': 'restart_candidate_at_one',
+        'stop_classes': ['STOP'],
+        'stop_vote_behavior': 'only_while_initial_stop_armed',
+        'post_initial_stop_behavior': 'ignore_stop',
+        'navigation_actions': ['LEFT', 'STRAIGHT'],
+    }
+    assert initial_stop_once['mission']['initial_stop'][
+        'clear_consecutive_reads'
+    ] == 3
+    assert initial_stop_once['mission']['red_cancels_shortcut'] is False
+    assert 'red_stop_yolo_missing_release_frames' not in (
+        initial_stop_once['mission']
+    )

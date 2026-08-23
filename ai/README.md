@@ -1032,7 +1032,7 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 신호등 통합 runtime에는 두 policy artifact 전체와 검증된 ONNX를 atomic bundle로
 묶는다. builder는 Base schema v6/compact external history, shortcut schema v7/fixed
 speed `23`, 224 square warp, steering 계약과 ONNX SHA-256을 확인하고 기존 bundle을
-덮어쓰지 않는다. 현재 bundle schema v13은 speed-35 Base의 output/cap `35`, initial
+덮어쓰지 않는다. 현재 bundle schema v14는 speed-35 Base의 output/cap `35`, initial
 history `(0,35)×4`, token `[50,85]×4`를 exact 검사한다. 신호등 경로는 사람 보정
 GT로 재학습한 YOLO11s의
 640 centered letterbox 결과 중 최고 confidence box 하나를 선택하고 bbox 폭
@@ -1040,21 +1040,22 @@ GT로 재학습한 YOLO11s의
 416×128로 바꿔 3-class `STOP/STRAIGHT/LEFT` CNN을 실행한다. classifier softmax
 확률 `0.50` 미만은 `UNKNOWN`이다. YOLO는 매 3 camera frame에 box를 탐색·갱신하고,
 검출 뒤의 중간 frame은 직전 bbox를 현재 frame에 적용해 CNN만 매 frame 실행한다.
-동일 `STOP/LEFT/STRAIGHT` 15회가 확정 기준이며 STOP latch도 같은 go class
-15회까지 유지한다. STOP vote는 처리 완료된 분류 횟수이며 camera 30 Hz와
-같지 않다. 다음 scheduled YOLO가 box를 놓치면 bbox cache를 즉시 지우고
-재검출 전까지 CNN 판정을 중단한다.
-8초 Base self-AR shadow handoff와 schema v1-v12 rollback bundle은 그대로 보존한다.
+Gamepad에서 arm한 첫 STOP만 15회에서 정지하고 `STRAIGHT/LEFT`를 합쳐 3회 연속
+분류하면 Base 직진으로 해제한다. 이후 STOP은 무시하며 LEFT 15회가 shortcut
+확정 기준이다. vote는 처리 완료된 분류 횟수이며 camera 30 Hz와 같지 않다. 다음
+scheduled YOLO가 box를 놓치면 bbox cache를 즉시 지우고 재검출 전까지 CNN 판정을
+중단하며 no-box로 정지를 해제하지 않는다. 8초 Base self-AR shadow handoff와
+schema v1-v13 rollback bundle은 그대로 보존한다.
 
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
-SOURCE_BUNDLE=artifacts/models/traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-stop10-go30-search3-classify1-yolo-miss30-release-45sessions-20260823
+SOURCE_BUNDLE=artifacts/models/traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-stop15-go15-search3-classify1-yolo-miss30-release-45sessions-20260823
 /home/xytron/.local/bin/uv run --locked xycar-build-traffic-shortcut-bundle \
   --base-artifact "${SOURCE_BUNDLE}/policies/front-cam-policy-vit-small-ar4-v2-nice-ada-very-fast-joint-regression-sequence-init35-window5-speed35-20260823" \
   --shortcut-artifact "${SOURCE_BUNDLE}/policies/nice-shortcut-resnet18-squarewarp-speed23-45sessions-20260821" \
   --traffic-model "${SOURCE_BUNDLE}/signal/traffic_light.onnx" \
   --traffic-classifier "${SOURCE_BUNDLE}/signal/tl_cls.onnx" \
-  --artifact-id traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-stop15-go15-search3-classify1-yolo-miss30-release-45sessions-20260823 \
+  --artifact-id traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-initial-stop15-nonstop3-left15-stop-once-search3-classify1-45sessions-20260823 \
   --output-root artifacts/models
 ```
 

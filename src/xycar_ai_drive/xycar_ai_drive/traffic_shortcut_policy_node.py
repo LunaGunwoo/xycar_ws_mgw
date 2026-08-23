@@ -36,7 +36,12 @@ from xycar_ai_drive.front_cam_policy_node import (
 )
 from xycar_ai_drive.policy_ipc import UnixSocketPolicyClient
 from xycar_ai_drive.traffic_light_detector import (
+    InitialStopPhase,
+    InitialStopSignalLatch,
+    InitialStopSignalLatchSnapshot,
     LampAction,
+    SignalClass,
+    SignalReading,
     TrafficClassifierCadence,
     TrafficLampLatch,
     TrafficSignalLatch,
@@ -120,6 +125,64 @@ class YoloMissingReleaseCounter:
         return True
 
 
+class SignalStatusLogGate:
+    """Emit immediately on raw-class changes and otherwise at a fixed rate."""
+
+    def __init__(self, *, rate_hz: float) -> None:
+        if not math.isfinite(rate_hz) or rate_hz <= 0.0:
+            raise ValueError('signal status log rate must be finite and positive')
+        self._period_sec = 1.0 / float(rate_hz)
+        self.reset()
+
+    def reset(self) -> None:
+        self._last_raw_class: SignalClass | None = None
+        self._last_emit_monotonic: float | None = None
+
+    def should_emit(
+        self,
+        raw_class: SignalClass,
+        *,
+        now_monotonic: float,
+    ) -> bool:
+        if not math.isfinite(now_monotonic):
+            raise ValueError('signal log timestamp must be finite')
+        changed = raw_class != self._last_raw_class
+        due = (
+            self._last_emit_monotonic is None
+            or now_monotonic - self._last_emit_monotonic
+            >= self._period_sec
+        )
+        if not changed and not due:
+            return False
+        self._last_raw_class = raw_class
+        self._last_emit_monotonic = now_monotonic
+        return True
+
+
+def format_signal_status(
+    *,
+    reading: SignalReading | None,
+    raw_class: SignalClass,
+    source: str,
+    phase: str,
+    candidate_reads: int,
+    required_reads: int,
+    stop_status: str,
+) -> str:
+    """Format one stable, operator-facing traffic classification line."""
+    cnn = 'n/a' if reading is None else f'{reading.probability * 100.0:.1f}%'
+    yolo = 'n/a' if reading is None else f'{reading.confidence * 100.0:.1f}%'
+    vote = (
+        '-'
+        if required_reads < 1
+        else f'{candidate_reads}/{required_reads}'
+    )
+    return (
+        f'SIGNAL raw={raw_class.value} cnn={cnn} yolo={yolo} '
+        f'source={source} phase={phase} vote={vote} stop={stop_status}'
+    )
+
+
 class TrafficShortcutPolicyNode(Node):
     """Detect signals, call one selected policy and own the motor topic."""
 
@@ -147,8 +210,27 @@ class TrafficShortcutPolicyNode(Node):
         self._fsm = TrafficShortcutFsm(
             shortcut_duration_sec=self.bundle.shortcut_duration_sec,
             seamless_base_handoff=self.bundle.base_shadow_enabled,
+            one_shot_initial_stop=self.bundle.initial_stop_one_shot,
         )
-        if self.bundle.detector.mode == 'yolo_cnn_classifier':
+        if self.bundle.schema_version == 14:
+            clear_reads = self.bundle.initial_stop_clear_consecutive_reads
+            if clear_reads is None:
+                raise ValueError('schema v14 initial STOP clear reads missing')
+            self._lamp_latch = InitialStopSignalLatch(
+                bbox_width_min=self.bundle.detector.bbox_width_min,
+                bbox_width_max=self.bundle.detector.bbox_width_max,
+                stop_consecutive_reads=(
+                    self.bundle.detector.red_consecutive_reads
+                ),
+                clear_consecutive_reads=clear_reads,
+                left_consecutive_reads=(
+                    self.bundle.detector.left_consecutive_reads
+                ),
+                straight_consecutive_reads=(
+                    self.bundle.detector.straight_consecutive_reads
+                ),
+            )
+        elif self.bundle.detector.mode == 'yolo_cnn_classifier':
             self._lamp_latch = TrafficSignalLatch(
                 bbox_width_min=self.bundle.detector.bbox_width_min,
                 bbox_width_max=self.bundle.detector.bbox_width_max,
@@ -236,6 +318,12 @@ class TrafficShortcutPolicyNode(Node):
         self._transition_stop_pending = False
         self._mission_generation = 0
         self._last_signal = LampAction.UNKNOWN
+        self._ready_logged = False
+        self._stop_ignored_logged = False
+        self._shortcut_started_logged = False
+        self._signal_log_gate = SignalStatusLogGate(
+            rate_hz=self.signal_status_log_hz,
+        )
         self._shutdown_started = False
         self._worker_stop = False
 
@@ -280,10 +368,14 @@ class TrafficShortcutPolicyNode(Node):
             self._on_control_timer,
         )
         self._refresh_graph(time.monotonic())
-        self.get_logger().warning(
-            'Traffic shortcut policy started OFF. Hold A to drive; release A '
-            'to stop. Red always has priority.'
+        startup_message = (
+            'Traffic shortcut policy started OFF. Hold LB+A to arm the first '
+            'STOP, or hold A alone to ignore STOP; release A to stop.'
+            if self.bundle.schema_version == 14
+            else 'Traffic shortcut policy started OFF. Hold A to drive; '
+            'release A to stop. Red always has priority.'
         )
+        self.get_logger().warning(startup_message)
         self.get_logger().info(
             f'bundle={self.bundle.artifact_id}, base_cap='
             f'{self.bundle.base_speed_cap:g}, shortcut_speed='
@@ -305,7 +397,9 @@ class TrafficShortcutPolicyNode(Node):
         )
         self.declare_parameter('enabled_topic', '/traffic_shortcut/enabled')
         self.declare_parameter('a_button_index', 0)
+        self.declare_parameter('initial_stop_arm_button_index', 4)
         self.declare_parameter('a_release_grace_sec', 0.12)
+        self.declare_parameter('signal_status_log_hz', 2.0)
         self.declare_parameter('require_gamepad_hold', True)
         self.declare_parameter('allow_motion', True)
         self.declare_parameter('publish_rate_hz', 20.0)
@@ -339,8 +433,14 @@ class TrafficShortcutPolicyNode(Node):
         )
         self.enabled_topic = str(self.get_parameter('enabled_topic').value)
         self.a_button_index = int(self.get_parameter('a_button_index').value)
+        self.initial_stop_arm_button_index = int(
+            self.get_parameter('initial_stop_arm_button_index').value
+        )
         self.a_release_grace_sec = float(
             self.get_parameter('a_release_grace_sec').value
+        )
+        self.signal_status_log_hz = float(
+            self.get_parameter('signal_status_log_hz').value
         )
         self.require_gamepad_hold = bool(
             self.get_parameter('require_gamepad_hold').value
@@ -392,8 +492,10 @@ class TrafficShortcutPolicyNode(Node):
                 raise ValueError(f'{label} must not be empty')
         if self.base_socket_path == self.shortcut_socket_path:
             raise ValueError('base and shortcut sockets must differ')
-        if self.a_button_index < 0:
-            raise ValueError('a_button_index must be non-negative')
+        if self.a_button_index < 0 or self.initial_stop_arm_button_index < 0:
+            raise ValueError('gamepad button indexes must be non-negative')
+        if self.a_button_index == self.initial_stop_arm_button_index:
+            raise ValueError('A and initial STOP arm buttons must differ')
         for node in self.allowed_motor_relay_nodes:
             if not node.startswith('/') or node.endswith('/'):
                 raise ValueError(
@@ -401,6 +503,7 @@ class TrafficShortcutPolicyNode(Node):
                 )
         for label, value in (
             ('a_release_grace_sec', self.a_release_grace_sec),
+            ('signal_status_log_hz', self.signal_status_log_hz),
             ('publish_rate_hz', self.publish_rate_hz),
             ('joy_timeout_sec', self.joy_timeout_sec),
             ('camera_timeout_sec', self.camera_timeout_sec),
@@ -423,12 +526,14 @@ class TrafficShortcutPolicyNode(Node):
         detector = self.bundle.detector
         expected_width = (
             (40, 225)
-            if self.bundle.schema_version in {6, 7, 8, 9, 10, 11, 12, 13}
+            if self.bundle.schema_version in {
+                6, 7, 8, 9, 10, 11, 12, 13, 14
+            }
             else (45, 200)
         )
         expected_votes = (
             (15, 15, 15)
-            if self.bundle.schema_version == 13
+            if self.bundle.schema_version in {13, 14}
             else (10, 30, 30)
             if self.bundle.schema_version == 12
             else (30, 30, 30)
@@ -457,7 +562,7 @@ class TrafficShortcutPolicyNode(Node):
             raise ValueError('traffic detector width/votes/every contract mismatch')
         expected_classification_every = (
             1
-            if self.bundle.schema_version in {8, 9, 10, 11, 12, 13}
+            if self.bundle.schema_version in {8, 9, 10, 11, 12, 13, 14}
             else 3
         )
         expected_reuse_detected_bbox = self.bundle.schema_version in {
@@ -467,6 +572,7 @@ class TrafficShortcutPolicyNode(Node):
             11,
             12,
             13,
+            14,
         }
         if (
             detector.classification_every_n_frames_after_detection
@@ -476,7 +582,7 @@ class TrafficShortcutPolicyNode(Node):
         ):
             raise ValueError('traffic classifier cadence contract mismatch')
         expected_yolo_missing_release_frames = (
-            30 if self.bundle.schema_version >= 5 else None
+            30 if 5 <= self.bundle.schema_version <= 13 else None
         )
         if (
             self.bundle.red_stop_yolo_missing_release_frames
@@ -484,7 +590,9 @@ class TrafficShortcutPolicyNode(Node):
         ):
             raise ValueError('traffic YOLO missing-release contract mismatch')
         expected_base_speed_cap = (
-            35.0 if self.bundle.schema_version in {11, 12, 13} else 25.0
+            35.0
+            if self.bundle.schema_version in {11, 12, 13, 14}
+            else 25.0
         )
         if self.bundle.base_speed_cap != expected_base_speed_cap:
             raise ValueError(
@@ -492,6 +600,19 @@ class TrafficShortcutPolicyNode(Node):
             )
         if self.bundle.base_speed_cap > self.bundle.base.speed_output_max:
             raise ValueError('bundle Base speed cap exceeds policy maximum')
+        if self.bundle.schema_version == 14:
+            if (
+                not self.bundle.initial_stop_one_shot
+                or self.bundle.initial_stop_clear_consecutive_reads != 3
+                or not self.bundle.headless_wait_for_first_signal
+            ):
+                raise ValueError('schema v14 initial STOP contract mismatch')
+        elif (
+            self.bundle.initial_stop_one_shot
+            or self.bundle.initial_stop_clear_consecutive_reads is not None
+            or self.bundle.headless_wait_for_first_signal
+        ):
+            raise ValueError('legacy bundle has schema v14 STOP behavior')
         if (
             self.bundle.shortcut_speed != 23.0
             or self.bundle.shortcut.fixed_speed != 23.0
@@ -559,22 +680,34 @@ class TrafficShortcutPolicyNode(Node):
         if not self.require_gamepad_hold:
             return
         now = time.monotonic()
-        if len(message.buttons) <= self.a_button_index:
+        required_button_index = (
+            max(self.a_button_index, self.initial_stop_arm_button_index)
+            if self.bundle.schema_version == 14
+            else self.a_button_index
+        )
+        if len(message.buttons) <= required_button_index:
             with self._lock:
                 self._joy_valid = False
                 self._last_joy_monotonic = None
-            self._force_fault('Joy button array is too short for A')
+            self._force_fault('Joy button array is too short for A/LB')
             return
         pressed = bool(message.buttons[self.a_button_index])
+        initial_stop_armed = (
+            self.bundle.schema_version == 14
+            and bool(message.buttons[self.initial_stop_arm_button_index])
+        )
         with self._lock:
             self._joy_valid = True
             self._last_joy_monotonic = now
             action = self._observe_drive_gate_locked(
                 pressed=pressed,
                 now=now,
+                initial_stop_armed=initial_stop_armed,
             )
         if action == ToggleAction.ENABLED:
             self.get_logger().warning('Traffic shortcut motion enabled by A hold.')
+            if initial_stop_armed:
+                self._safe_log_warning('INITIAL_STOP_ARMED source=LB+A')
         elif action == ToggleAction.DISABLED:
             self._publish_stop()
             self._publish_enabled(False)
@@ -592,6 +725,8 @@ class TrafficShortcutPolicyNode(Node):
         *,
         pressed: bool,
         now: float,
+        initial_stop_armed: bool = False,
+        wait_for_signal: bool = False,
     ) -> ToggleAction:
         action = self._drive_gate.observe(
             pressed=pressed,
@@ -607,13 +742,29 @@ class TrafficShortcutPolicyNode(Node):
                 self._fsm.fault()
                 self._stop_reason = f'policy reset failed: {exc}'
                 return ToggleAction.REJECTED
-            self._fsm.enable()
-            self._lamp_latch.reset()
+            if self.bundle.schema_version == 14:
+                if not isinstance(self._lamp_latch, InitialStopSignalLatch):
+                    raise RuntimeError('schema v14 latch is missing')
+                self._fsm.enable(
+                    initial_stop_armed=initial_stop_armed,
+                    wait_for_signal=wait_for_signal,
+                )
+                self._lamp_latch.reset(
+                    initial_stop_armed=initial_stop_armed,
+                    wait_for_signal=wait_for_signal,
+                )
+            else:
+                self._fsm.enable()
+                self._lamp_latch.reset()
             self._reset_yolo_missing_release_locked()
             self._signal_cadence.reset(
                 frame_sequence=self._frame_sequence,
             )
             self._last_signal = LampAction.UNKNOWN
+            self._ready_logged = False
+            self._stop_ignored_logged = False
+            self._shortcut_started_logged = False
+            self._signal_log_gate.reset()
             self._history = self._initial_external_history()
             self._discard_base_shadow_locked()
             self._decision = None
@@ -627,6 +778,10 @@ class TrafficShortcutPolicyNode(Node):
             self._publish_enabled(True)
         elif action == ToggleAction.DISABLED:
             self._fsm.disable()
+            self._ready_logged = False
+            self._stop_ignored_logged = False
+            self._shortcut_started_logged = False
+            self._signal_log_gate.reset()
             self._reset_yolo_missing_release_locked()
             self._signal_cadence.reset(
                 frame_sequence=self._frame_sequence,
@@ -642,6 +797,103 @@ class TrafficShortcutPolicyNode(Node):
     def _reset_yolo_missing_release_locked(self) -> None:
         if self._yolo_missing_release is not None:
             self._yolo_missing_release.reset()
+
+    def _schema14_signal_logs_locked(
+        self,
+        *,
+        previous: InitialStopSignalLatchSnapshot,
+        reading: SignalReading | None,
+        source: str,
+        signal: LampAction,
+        plan,
+        now_monotonic: float,
+    ) -> list[str]:
+        if not isinstance(self._lamp_latch, InitialStopSignalLatch):
+            return []
+        current = self._lamp_latch.snapshot
+        raw = current.raw_class
+        messages: list[str] = []
+        if (
+            previous.phase == InitialStopPhase.WAIT_FOR_SIGNAL
+            and raw != SignalClass.UNKNOWN
+            and not self._ready_logged
+        ):
+            self._ready_logged = True
+            messages.append(
+                f'READY raw={raw.value} source={source} '
+                'waiting_for_non_stop=3'
+            )
+        stopped_phases = {
+            InitialStopPhase.WAIT_FOR_SIGNAL,
+            InitialStopPhase.STOPPED,
+        }
+        if (
+            previous.phase == InitialStopPhase.ARMED
+            and current.phase == InitialStopPhase.STOPPED
+        ):
+            messages.append('STOP_CONFIRMED vote=15/15')
+        if previous.phase in stopped_phases:
+            if current.phase == InitialStopPhase.NAVIGATION:
+                messages.extend(
+                    [
+                        'NON_STOP_CLEAR 3/3',
+                        'GO_BASE stop=IGNORED',
+                    ]
+                )
+            elif (
+                current.candidate_reads > 0
+                and raw in {SignalClass.STRAIGHT, SignalClass.LEFT}
+            ):
+                messages.append(
+                    'NON_STOP_CLEAR '
+                    f'{current.candidate_reads}/{current.required_reads}'
+                )
+        if current.stop_ignored:
+            if not self._stop_ignored_logged:
+                self._stop_ignored_logged = True
+                messages.append('STOP_IGNORED phase=NAVIGATION')
+        else:
+            self._stop_ignored_logged = False
+        if (
+            signal == LampAction.LEFT
+            and plan.state == MissionState.SWITCH_TO_SHORTCUT
+        ):
+            messages.append('LEFT_CONFIRMED vote=15/15')
+        if self._signal_log_gate.should_emit(
+            raw,
+            now_monotonic=now_monotonic,
+        ):
+            stop_status = {
+                InitialStopPhase.ARMED: 'ARMED',
+                InitialStopPhase.WAIT_FOR_SIGNAL: 'LATCHED',
+                InitialStopPhase.STOPPED: 'LATCHED',
+                InitialStopPhase.NAVIGATION: 'IGNORED',
+            }[current.phase]
+            messages.append(
+                format_signal_status(
+                    reading=reading,
+                    raw_class=raw,
+                    source=source,
+                    phase=current.phase.value,
+                    candidate_reads=current.candidate_reads,
+                    required_reads=current.required_reads,
+                    stop_status=stop_status,
+                )
+            )
+        return messages
+
+    def _emit_operator_logs(self, messages: Sequence[str]) -> None:
+        for message in messages:
+            try:
+                self.get_logger().info(message)
+            except Exception:  # noqa: BLE001 - diagnostics must not affect motion
+                continue
+
+    def _safe_log_warning(self, message: str) -> None:
+        try:
+            self.get_logger().warning(message)
+        except Exception:  # noqa: BLE001 - diagnostics must not affect motion
+            pass
 
     def _on_camera(self, message: Image) -> None:
         try:
@@ -700,6 +952,8 @@ class TrafficShortcutPolicyNode(Node):
                 reading_observed = False
                 reading = None
                 detected_box = None
+                inference_source = 'NO_INFERENCE'
+                operator_messages: list[str] = []
                 detector_observed = inference_plan.run_detector
                 if inference_plan.run_detector:
                     bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
@@ -708,6 +962,9 @@ class TrafficShortcutPolicyNode(Node):
                         if inspection is not None:
                             reading = inspection.reading
                             detected_box = inspection.bbox
+                            inference_source = 'YOLO_CNN'
+                        else:
+                            inference_source = 'YOLO_NO_BOX'
                     else:
                         reading = self._detector.read_lamp(bgr)
                     reading_observed = True
@@ -718,6 +975,7 @@ class TrafficShortcutPolicyNode(Node):
                         inference_plan.classification_box,
                     )
                     reading = inspection.reading
+                    inference_source = 'CACHED_CNN'
                     reading_observed = True
                 with self._lock:
                     if generation != self._mission_generation:
@@ -731,6 +989,15 @@ class TrafficShortcutPolicyNode(Node):
                         self._signal_cadence.observe_classification(
                             frame_sequence=sequence,
                         )
+                    previous_initial_snapshot = (
+                        self._lamp_latch.snapshot
+                        if reading_observed
+                        and isinstance(
+                            self._lamp_latch,
+                            InitialStopSignalLatch,
+                        )
+                        else None
+                    )
                     if reading_observed:
                         signal = self._lamp_latch.observe(reading)
                     if self._yolo_missing_release is not None:
@@ -769,6 +1036,24 @@ class TrafficShortcutPolicyNode(Node):
                         signal,
                         now_monotonic=time.monotonic(),
                     )
+                    if previous_initial_snapshot is not None:
+                        operator_messages.extend(
+                            self._schema14_signal_logs_locked(
+                                previous=previous_initial_snapshot,
+                                reading=reading,
+                                source=inference_source,
+                                signal=signal,
+                                plan=plan,
+                                now_monotonic=time.monotonic(),
+                            )
+                        )
+                    if (
+                        self.bundle.schema_version == 14
+                        and plan.state == MissionState.SHORTCUT
+                        and not self._shortcut_started_logged
+                    ):
+                        self._shortcut_started_logged = True
+                        operator_messages.append('SHORTCUT_STARTED duration=8.0s')
                     if plan.state != MissionState.RED_STOP:
                         self._reset_yolo_missing_release_locked()
                     if plan.publish_stop:
@@ -798,6 +1083,7 @@ class TrafficShortcutPolicyNode(Node):
                                 self._base_shadow_snapshot_locked()
                             )
                         generation = self._mission_generation
+                self._emit_operator_logs(operator_messages)
                 if plan.publish_stop:
                     if shadow_work is not None:
                         self._infer_and_store_base_shadow(
@@ -1013,6 +1299,8 @@ class TrafficShortcutPolicyNode(Node):
                 auto_action = self._observe_drive_gate_locked(
                     pressed=True,
                     now=now,
+                    initial_stop_armed=(self.bundle.schema_version == 14),
+                    wait_for_signal=(self.bundle.schema_version == 14),
                 )
             reason = None
             if self._drive_gate.enabled:
@@ -1067,9 +1355,13 @@ class TrafficShortcutPolicyNode(Node):
                     self._stop_reason = None
                     return
         if auto_action == ToggleAction.ENABLED:
-            self.get_logger().warning(
-                'Traffic shortcut motion enabled without Gamepad hold.'
+            message = (
+                'Traffic shortcut headless signal search started; motor '
+                'remains stopped until READY and 3 non-STOP classifications.'
+                if self.bundle.schema_version == 14
+                else 'Traffic shortcut motion enabled without Gamepad hold.'
             )
+            self.get_logger().warning(message)
         elif auto_action == ToggleAction.REJECTED:
             self._force_fault(
                 self._stop_reason
