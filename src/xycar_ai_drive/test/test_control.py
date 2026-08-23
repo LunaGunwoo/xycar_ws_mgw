@@ -78,6 +78,19 @@ def test_regression_decode_and_speed_cap_are_applied_in_command_units():
     capped = cap_command_speed(command, 25.0)
     assert capped == DriveCommand(-25.0, 25.0)
     assert command_history_token_ids(capped) == (38, 75)
+    fast = decode_regression_outputs(0.0, 34.75, speed_max=35.0)
+    assert fast == DriveCommand(0.0, 34.75)
+    fast_capped = cap_command_speed(
+        fast,
+        35.0,
+        maximum_speed=35.0,
+    )
+    assert command_history_token_ids(
+        fast_capped,
+        speed_max=35.0,
+    ) == (50, 85)
+    with pytest.raises(ValueError, match=r'\[0, 30\]'):
+        decode_regression_outputs(0.0, 30.1)
     with pytest.raises(ValueError, match='angle_driver'):
         decode_regression_outputs(50.1, 20.0)
     with pytest.raises(ValueError, match='finite'):
@@ -979,18 +992,28 @@ def test_schema_v5_runtime_uses_compact_initial_and_external_tokens(
         runtime.infer(frame, [[101, 50]] * 4)
 
 
-def test_schema_v6_runtime_decodes_regression_and_fails_closed(tmp_path):
+@pytest.mark.parametrize(
+    ('speed_output_max', 'initial_speed', 'predicted_speed'),
+    [(30.0, 25, 24.25), (35.0, 35, 34.25)],
+)
+def test_schema_v6_runtime_decodes_regression_and_fails_closed(
+    tmp_path,
+    speed_output_max,
+    initial_speed,
+    predicted_speed,
+):
     torch = pytest.importorskip('torch')
 
     class RegressionPolicy(torch.nn.Module):
         def forward(self, images, history_token_ids):
             signal = history_token_ids[:, :1, :1].to(images.dtype) * 0
-            return signal - 12.5, signal + 24.25
+            return signal - 12.5, signal + predicted_speed
 
     artifact = tmp_path / 'fixture-regression-ar-policy'
     artifact.mkdir()
     sample_image = torch.zeros(1, 3, 4, 4)
-    sample_history = torch.tensor([[[50, 75]] * 4], dtype=torch.long)
+    initial_ids = [50, 50 + initial_speed]
+    sample_history = torch.tensor([[initial_ids] * 4], dtype=torch.long)
     torch.jit.trace(
         RegressionPolicy(),
         (sample_image, sample_history),
@@ -1034,7 +1057,7 @@ def test_schema_v6_runtime_decodes_regression_and_fails_closed(tmp_path):
                         'name': 'speed',
                         'dtype': 'float32',
                         'unit': 'motor_speed',
-                        'range': [0.0, 30.0],
+                        'range': [0.0, speed_output_max],
                     },
                 ],
             },
@@ -1054,17 +1077,20 @@ def test_schema_v6_runtime_decodes_regression_and_fails_closed(tmp_path):
                 'range': [-50.0, 50.0],
                 'runtime_normalized_mapping': 'angle_driver * 2',
             },
-            'speed': {'unit': 'motor_speed', 'range': [0.0, 30.0]},
+            'speed': {
+                'unit': 'motor_speed',
+                'range': [0.0, speed_output_max],
+            },
         },
         'history': {
             'frames': 4,
             'pair_order': ['angle_token_id', 'speed_token_id'],
             'time_order': 'oldest_to_newest',
             'initialization': 'canonical_initial_command',
-            'initial_command': [0, 25],
-            'initial_token_ids': [50, 75],
+            'initial_command': [0, initial_speed],
+            'initial_token_ids': initial_ids,
             'actual_angle_token_range': [0, 100],
-            'actual_speed_token_range': [50, 80],
+            'actual_speed_token_range': [50, 50 + int(speed_output_max)],
             'update': 'externally_executed_commands',
         },
         'steering_contract': steering_contract_mapping(),
@@ -1077,14 +1103,18 @@ def test_schema_v6_runtime_decodes_regression_and_fails_closed(tmp_path):
 
     contract = load_policy_artifact(artifact)
     assert contract.prediction_mode == 'continuous_regression'
+    assert contract.speed_output_max == speed_output_max
+    assert contract.history is not None
+    assert contract.history.speed_output_max == int(speed_output_max)
+    assert contract.history.valid_pair([50, 50 + int(speed_output_max)])
     runtime = TorchScriptPolicy(
         artifact_dir=str(artifact),
         torch_num_threads=1,
         warmup_count=0,
     )
     frame = np.zeros((4, 4, 3), dtype=np.uint8)
-    result = runtime.infer(frame, [[50, 75]] * 4)
-    assert result.command == DriveCommand(-25.0, 24.25)
+    result = runtime.infer(frame, [initial_ids] * 4)
+    assert result.command == DriveCommand(-25.0, predicted_speed)
 
     class OutOfRangePolicy:
         def __call__(self, *_args):
@@ -1092,7 +1122,18 @@ def test_schema_v6_runtime_decodes_regression_and_fails_closed(tmp_path):
 
     runtime._model = OutOfRangePolicy()
     with pytest.raises(PolicyRuntimeError, match=r'\[-50, 50\]'):
-        runtime.infer(frame, [[50, 75]] * 4)
+        runtime.infer(frame, [initial_ids] * 4)
+
+    class OutOfRangeSpeedPolicy:
+        def __call__(self, *_args):
+            return (
+                torch.tensor([[0.0]]),
+                torch.tensor([[speed_output_max + 0.25]]),
+            )
+
+    runtime._model = OutOfRangeSpeedPolicy()
+    with pytest.raises(PolicyRuntimeError, match='regression speed'):
+        runtime.infer(frame, [initial_ids] * 4)
 
 
 def test_schema_v7_runtime_uses_angle_only_and_fixed_speed(tmp_path):

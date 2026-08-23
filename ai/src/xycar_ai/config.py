@@ -13,6 +13,8 @@ from xycar_ai.compact_control import (
     COMPACT_CONTROL_ENCODING,
     CONTROL_ENCODINGS,
     LEGACY_CONTROL_ENCODING,
+    NUMERIC_TOKEN_MAX,
+    SPEED_MAX,
 )
 from xycar_ai.steering_contract import validate_required_contract_name
 
@@ -43,6 +45,7 @@ class ModelConfig:
     history_initial_speed: int = 25
     history_update: str = "predicted_argmax"
     prediction_mode: str = "categorical"
+    speed_output_max: float = float(SPEED_MAX)
 
 
 @dataclass(frozen=True)
@@ -216,6 +219,7 @@ def load_train_config(path: str | Path) -> TrainConfig:
             "history_initial_speed",
             "history_update",
             "prediction_mode",
+            "speed_output_max",
         },
     )
     _expect_data_keys(data_payload, schema_version=schema_version)
@@ -327,6 +331,11 @@ def load_train_config(path: str | Path) -> TrainConfig:
                 _string(model_payload, "prediction_mode")
                 if "prediction_mode" in model_payload
                 else "categorical"
+            ),
+            speed_output_max=(
+                _number(model_payload, "speed_output_max")
+                if "speed_output_max" in model_payload
+                else float(SPEED_MAX)
             ),
         ),
         data=DataConfig(
@@ -560,6 +569,22 @@ def _validate(config: TrainConfig) -> None:
         raise ValueError("unsupported model.architecture")
     if config.model.prediction_mode not in PREDICTION_MODES:
         raise ValueError("unsupported model.prediction_mode")
+    if (
+        not math.isfinite(config.model.speed_output_max)
+        or not config.model.speed_output_max.is_integer()
+        or not 0 < config.model.speed_output_max <= NUMERIC_TOKEN_MAX
+    ):
+        raise ValueError(
+            "model.speed_output_max must be a whole number in "
+            f"[1, {NUMERIC_TOKEN_MAX}]"
+        )
+    if (
+        config.model.prediction_mode != "continuous_regression"
+        and config.model.speed_output_max != SPEED_MAX
+    ):
+        raise ValueError(
+            f"categorical models require model.speed_output_max={SPEED_MAX}"
+        )
     if config.model.control_encoding not in CONTROL_ENCODINGS:
         raise ValueError("unsupported model.control_encoding")
     if config.model.history_update not in HISTORY_UPDATE_MODES:
@@ -596,9 +621,14 @@ def _validate(config: TrainConfig) -> None:
             raise ValueError("compact AR control requires externally executed history")
         if (
             config.model.control_encoding == COMPACT_CONTROL_ENCODING
-            and not 0 <= config.model.history_initial_speed <= 30
+            and not 0
+            <= config.model.history_initial_speed
+            <= config.model.speed_output_max
         ):
-            raise ValueError("compact AR initial history speed must be in [0, 30]")
+            raise ValueError(
+                "compact AR initial history speed must be in "
+                f"[0, {config.model.speed_output_max:g}]"
+            )
         if (
             config.model.prediction_mode == "continuous_regression"
             and config.model.control_encoding != COMPACT_CONTROL_ENCODING
@@ -852,7 +882,9 @@ def _validate(config: TrainConfig) -> None:
                 "fixed-speed sequence rollout requires canonical initial history"
             )
         maximum_speed = (
-            30 if config.model.control_encoding == COMPACT_CONTROL_ENCODING else 100
+            config.model.speed_output_max
+            if config.model.control_encoding == COMPACT_CONTROL_ENCODING
+            else 100
         )
         if not 0 <= training.sequence_rollout_fixed_speed <= maximum_speed:
             raise ValueError(

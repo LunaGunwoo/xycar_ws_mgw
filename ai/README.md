@@ -552,9 +552,20 @@ validation/test angle과 모든 speed target은 원본 연속값이다. 모델 �
 AR4 실행 history를 유지하고 출력만 driver angle `-50..50`과 speed `0..30`의
 float scalar로 바꾼다.
 
+연속 회귀 학습 config의 선택적 `model.speed_output_max`는 기본값 `30`을 유지한다.
+더 높은 speed label을 학습할 때만 compact numeric vocabulary 범위 안의 정수 상한을
+명시하며, speed activation·loss 정규화·self-rollout clamp와 실제 command history
+token 범위가 같은 값에서 파생된다. 서로 다른 상한의 checkpoint는 `--resume`할 수
+없지만 기존 checkpoint를 `--initialize-from`으로 model-weight-only 초기화하는 것은
+허용한다. schema v6 exporter와 차량 runtime은 manifest의 speed output range를
+같은 maximum으로 검증하고 history speed token 상한을 `50 + maximum`으로 파생한다.
+maximum은 양의 정수 `1..50`이며 launch `speed_cap`은 해당 artifact maximum을
+넘을 수 없다. categorical/schema v5, 기존 speed-30 checkpoint와 guided
+curriculum의 hard ceiling `30` 계약은 변경하지 않는다.
+
 두 회귀 head는 각각 `LayerNorm → Linear(128) → GELU → Dropout(0.3) → Linear(1)`이며
-angle은 `tanh × 50`, speed는 `sigmoid × 30`으로 범위를 제한한다. 학습 loss와
-checkpoint 선택식은 다음과 같다.
+angle은 `tanh × 50`, speed는 `sigmoid × model.speed_output_max`로 범위를 제한한다.
+기본 상한은 30이다. 학습 loss와 checkpoint 선택식은 다음과 같다.
 
 ```text
 loss = SmoothL1(angle_driver / 50, target_driver / 50; beta=0.1)
@@ -984,7 +995,9 @@ schema v5를 생성한다. angle-only checkpoint는 고정 speed dataset과 hist
 검증한 뒤 angle logits는 보존하고 speed logits의 argmax만 고정 class로 만든다.
 연속 회귀 compact AR checkpoint는 driver angle과 speed scalar가 각각 `[1,1]`인
 schema v6를 생성하고 단위, 범위, runtime `angle_driver × 2` 변환과 canonical
-`[50,75]×4` history를 manifest에 기록한다. schema v7은 좌회전 전용 ResNet18의
+history를 manifest에 기록한다. speed maximum은 checkpoint의
+`model.speed_output_max`에서 가져오며 기본 30과 양의 정수 `1..50`을 지원한다.
+예를 들어 initial command `(0,35)×4`는 `[50,85]×4`가 된다. schema v7은 좌회전 전용 ResNet18의
 정사각형 road-warp image와 `speed/25`를 tuple input으로 받고 angle `[1,1]`만
 출력한다. manifest 고정 speed와 실제 launch `speed_cap`은 반드시 같아야 한다.
 v1/v2/v3/v5/v6 runtime 호환은 유지한다.

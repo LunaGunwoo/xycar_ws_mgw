@@ -113,6 +113,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             initial_pair = executed_command_to_history_tokens(
                 config.model.history_initial_angle,
                 config.model.history_initial_speed,
+                speed_max=config.model.speed_output_max,
             )
         else:
             initial_pair = (
@@ -133,6 +134,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 config.model.history_initial_angle,
                 config.model.history_initial_speed,
             ),
+            compact_speed_max=config.model.speed_output_max,
         )
     elif (
         config.model.architecture == AR_CONTROL_TOKEN_ARCHITECTURE
@@ -197,6 +199,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         control_token_type_embedding=config.model.control_token_type_embedding,
         control_encoding=config.model.control_encoding,
         prediction_mode=config.model.prediction_mode,
+        speed_output_max=config.model.speed_output_max,
     ).to(device)
     initialization = initialize_model_weights(
         model=model,
@@ -804,6 +807,7 @@ def _build_regression_label_contract(config: TrainConfig) -> dict[str, object]:
     initial_pair = executed_command_to_history_tokens(
         config.model.history_initial_angle,
         config.model.history_initial_speed,
+        speed_max=config.model.speed_output_max,
     )
     sequence_rollout = config.training.sequence_length > 0
     history_contract: dict[str, object] = {
@@ -819,7 +823,10 @@ def _build_regression_label_contract(config: TrainConfig) -> dict[str, object]:
         ],
         "initial_token_ids": list(initial_pair),
         "actual_angle_token_range": [0, 100],
-        "actual_speed_token_range": [50, 80],
+        "actual_speed_token_range": [
+            50,
+            int(config.model.speed_output_max) + 50,
+        ],
         "update": "externally_executed_commands",
         "known_train_label_leakage": False,
     }
@@ -829,7 +836,7 @@ def _build_regression_label_contract(config: TrainConfig) -> dict[str, object]:
                 "train_source": "self_predicted_regression_sequence_rollout",
                 "train_prediction_execution": {
                     "angle_driver_clamp": [-50.0, 50.0],
-                    "speed_clamp": [0.0, 30.0],
+                    "speed_clamp": [0.0, config.model.speed_output_max],
                     "angle_history_token_mapping": "round(angle_driver) + 50",
                     "speed_history_token_mapping": "round(speed) + 50",
                     "gradient": "clamp_round_detach_before_history_update",
@@ -875,8 +882,8 @@ def _build_regression_label_contract(config: TrainConfig) -> dict[str, object]:
         "speed": {
             "dtype": "float32",
             "unit": "motor_speed",
-            "range": [0.0, 30.0],
-            "activation": "sigmoid_times_30",
+            "range": [0.0, config.model.speed_output_max],
+            "activation": f"sigmoid_times_{config.model.speed_output_max:g}",
         },
         "train_angle_target": {
             "method": "centered_mean",
@@ -909,7 +916,7 @@ def build_training_objective_contract(config: TrainConfig) -> dict[str, object]:
                 "mode": "joint_angle_speed_regression",
                 "loss": "smooth_l1_normalized",
                 "angle_normalization": 50.0,
-                "speed_normalization": 30.0,
+                "speed_normalization": config.model.speed_output_max,
                 "angle_beta": config.loss.angle_regression_beta,
                 "speed_beta": config.loss.speed_regression_beta,
             }
@@ -1126,6 +1133,7 @@ def run_rollout_evaluation(
             executed_command_to_history_tokens(
                 config.model.history_initial_angle,
                 config.model.history_initial_speed,
+                speed_max=config.model.speed_output_max,
             )
             if config.training.history_training_source == "canonical_initial_command"
             else unknown_history_pair()
@@ -1188,6 +1196,7 @@ def run_rollout_evaluation(
                     outputs,
                     control_encoding=config.model.control_encoding,
                     fixed_speed=config.training.sequence_rollout_fixed_speed,
+                    speed_max=config.model.speed_output_max,
                 )
                 history = torch.cat(
                     (history[:, 1:], predicted_pair.unsqueeze(1)),
@@ -1208,6 +1217,7 @@ def predicted_executed_class_pair(
     *,
     control_encoding: str = LEGACY_CONTROL_ENCODING,
     fixed_speed: int | None = None,
+    speed_max: float = 30.0,
 ) -> torch.Tensor:
     """Decode the class pair that the no-reverse runtime can publish."""
     if "angle_driver" in outputs or "speed" in outputs:
@@ -1222,7 +1232,7 @@ def predicted_executed_class_pair(
         return torch.stack(
             (
                 angle_driver.clamp(-50.0, 50.0).round().long() + 50,
-                speed.clamp(0.0, 30.0).round().long() + 50,
+                speed.clamp(0.0, speed_max).round().long() + 50,
             ),
             dim=1,
         ).detach()
@@ -1284,6 +1294,7 @@ def rollout_predicted_histories(
                         LEGACY_CONTROL_ENCODING,
                     ),
                     fixed_speed=fixed_speed,
+                    speed_max=getattr(model, "speed_output_max", 30.0),
                 )
                 updated = torch.cat(
                     (history[:, 1:], predicted_pair.unsqueeze(1)), dim=1
@@ -1324,6 +1335,7 @@ def run_sequence_rollout_epoch(
                 executed_command_to_history_tokens(
                     config.model.history_initial_angle,
                     config.model.history_initial_speed,
+                    speed_max=config.model.speed_output_max,
                 )
                 if config.training.history_training_source
                 == "canonical_initial_command"
@@ -1494,8 +1506,8 @@ def compute_policy_losses(
             angle_target / 100.0,
         )
         speed_loss = speed_criterion(
-            speed_prediction / 30.0,
-            speed_target / 30.0,
+            speed_prediction / config.model.speed_output_max,
+            speed_target / config.model.speed_output_max,
         )
         emd_loss = angle_loss.new_zeros(())
         total_loss = angle_loss + config.loss.speed_loss_weight * speed_loss
@@ -1839,6 +1851,11 @@ def initialize_model_weights(
             else None
         ),
     }
+    source_speed_output_max = (
+        float(checkpoint_model.get("speed_output_max", 30.0))
+        if isinstance(checkpoint_model, dict)
+        else None
+    )
     shared_categorical_to_regression = (
         actual["prediction_mode"] == CATEGORICAL_PREDICTION_MODE
         and expected["prediction_mode"] == CONTINUOUS_REGRESSION_PREDICTION_MODE
@@ -1912,6 +1929,8 @@ def initialize_model_weights(
         "source_epoch": int(payload.get("epoch", 0)),
         "source_prediction_mode": actual["prediction_mode"],
         "target_prediction_mode": expected["prediction_mode"],
+        "source_speed_output_max": source_speed_output_max,
+        "target_speed_output_max": config.model.speed_output_max,
     }
 
 
@@ -2006,6 +2025,7 @@ def validate_resume_payload(
         "history_initial_angle": config.model.history_initial_angle,
         "history_initial_speed": config.model.history_initial_speed,
         "prediction_mode": config.model.prediction_mode,
+        "speed_output_max": config.model.speed_output_max,
     }
     checkpoint_model_contract = {
         "architecture": (
@@ -2040,6 +2060,11 @@ def validate_resume_payload(
         ),
         "prediction_mode": (
             checkpoint_model.get("prediction_mode", CATEGORICAL_PREDICTION_MODE)
+            if isinstance(checkpoint_model, dict)
+            else None
+        ),
+        "speed_output_max": (
+            checkpoint_model.get("speed_output_max", 30.0)
             if isinstance(checkpoint_model, dict)
             else None
         ),
@@ -2136,11 +2161,21 @@ def atomic_torch_save(payload: dict[str, object], path: Path) -> None:
 
 
 def collect_source_state(project_root: Path) -> dict[str, object]:
-    uv_lock = project_root / "uv.lock"
+    source_root = next(
+        (
+            candidate
+            for candidate in (project_root, *project_root.parents)
+            if (candidate / "uv.lock").is_file()
+            and (candidate / "src" / "xycar_ai").is_dir()
+        ),
+        project_root,
+    )
+    uv_lock = source_root / "uv.lock"
     state: dict[str, object] = {
         "uv_lock_sha256": sha256_file(uv_lock) if uv_lock.is_file() else "unknown",
     }
-    git_root = project_root.parent
+    git_root = source_root.parent
+    source_pathspec = source_root.name
     try:
         commit = subprocess.run(
             ["git", "-C", str(git_root), "rev-parse", "HEAD"],
@@ -2150,7 +2185,15 @@ def collect_source_state(project_root: Path) -> dict[str, object]:
         ).stdout.strip()
         dirty = bool(
             subprocess.run(
-                ["git", "-C", str(git_root), "status", "--porcelain", "--", "ai/"],
+                [
+                    "git",
+                    "-C",
+                    str(git_root),
+                    "status",
+                    "--porcelain",
+                    "--",
+                    source_pathspec,
+                ],
                 check=True,
                 capture_output=True,
                 text=True,

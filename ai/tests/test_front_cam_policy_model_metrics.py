@@ -164,6 +164,24 @@ def test_compact_ar_continuous_regression_outputs_scalar_ranges():
     assert model.angle_regression_head[3].p == pytest.approx(0.3)
 
 
+def test_compact_ar_continuous_regression_supports_speed_35():
+    model = AutoregressiveControlTokenViTPolicy(
+        model_name="vit_tiny_patch16_224.augreg_in21k_ft_in1k",
+        pretrained=False,
+        image_size=32,
+        history_frames=4,
+        control_encoding=COMPACT_CONTROL_ENCODING,
+        prediction_mode=CONTINUOUS_REGRESSION_PREDICTION_MODE,
+        speed_output_max=35.0,
+    ).eval()
+    history = torch.tensor([[[50, 85]] * 4], dtype=torch.long)
+    with torch.no_grad():
+        outputs = model(torch.zeros(1, 3, 32, 32), history)
+
+    assert model.speed_output_max == 35.0
+    assert bool(((0.0 <= outputs["speed"]) & (outputs["speed"] <= 35.0)).all())
+
+
 def test_regression_metrics_use_driver_and_normalized_angle_units():
     accumulator = RegressionMetricAccumulator("test")
     accumulator.update(

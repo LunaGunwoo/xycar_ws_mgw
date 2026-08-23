@@ -79,10 +79,14 @@ def speed_class_id_to_history_token(class_id: int) -> int:
 def executed_command_to_history_tokens(
     normalized_angle: float,
     speed: float,
+    *,
+    speed_max: float = SPEED_MAX,
 ) -> tuple[int, int]:
+    maximum = _compact_speed_max(speed_max)
+    speed_class_id = round(max(SPEED_MIN, min(maximum, _finite(speed, "speed"))))
     return (
         angle_target_class_id(normalized_angle),
-        speed_class_id_to_history_token(speed_target_class_id(speed)),
+        speed_class_id + NUMERIC_TOKEN_OFFSET,
     )
 
 
@@ -97,7 +101,12 @@ def flip_angle_history_token(token_id: int) -> int:
     return ANGLE_OUTPUT_CLASSES - 1 - token_id
 
 
-def validate_history_token_pair(angle_token_id: int, speed_token_id: int) -> None:
+def validate_history_token_pair(
+    angle_token_id: int,
+    speed_token_id: int,
+    *,
+    speed_max: float = SPEED_MAX,
+) -> None:
     if angle_token_id != UNKNOWN_ANGLE_TOKEN_ID:
         _validate_int_range(
             angle_token_id,
@@ -106,12 +115,23 @@ def validate_history_token_pair(angle_token_id: int, speed_token_id: int) -> Non
             "angle history token id",
         )
     if speed_token_id != UNKNOWN_SPEED_TOKEN_ID:
+        maximum = _compact_speed_max(speed_max)
         _validate_int_range(
             speed_token_id,
             NUMERIC_TOKEN_OFFSET + SPEED_MIN,
-            NUMERIC_TOKEN_OFFSET + SPEED_MAX,
+            NUMERIC_TOKEN_OFFSET + maximum,
             "speed history token id",
         )
+
+
+def _compact_speed_max(value: float) -> int:
+    maximum = _finite(value, "compact speed maximum")
+    if not maximum.is_integer() or not SPEED_MIN < maximum <= NUMERIC_TOKEN_MAX:
+        raise ValueError(
+            f"compact speed maximum must be a whole number in "
+            f"[{SPEED_MIN + 1},{NUMERIC_TOKEN_MAX}]"
+        )
+    return int(maximum)
 
 
 def _finite(value: int | float, label: str) -> float:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import math
 
 import timm
 import torch
@@ -133,6 +134,7 @@ class AutoregressiveControlTokenViTPolicy(nn.Module):
         use_control_type_embedding: bool = False,
         control_encoding: str = LEGACY_CONTROL_ENCODING,
         prediction_mode: str = CATEGORICAL_PREDICTION_MODE,
+        speed_output_max: float = 30.0,
     ) -> None:
         super().__init__()
         if history_frames != 4:
@@ -145,6 +147,7 @@ class AutoregressiveControlTokenViTPolicy(nn.Module):
         self.use_control_type_embedding = bool(use_control_type_embedding)
         self.control_encoding = control_encoding
         self.prediction_mode = prediction_mode
+        self.speed_output_max = float(speed_output_max)
         if control_encoding not in {
             LEGACY_CONTROL_ENCODING,
             COMPACT_CONTROL_ENCODING,
@@ -160,6 +163,19 @@ class AutoregressiveControlTokenViTPolicy(nn.Module):
             and control_encoding != COMPACT_CONTROL_ENCODING
         ):
             raise ValueError("continuous regression requires compact control encoding")
+        if (
+            not math.isfinite(self.speed_output_max)
+            or not self.speed_output_max.is_integer()
+            or not 0.0 < self.speed_output_max <= 50.0
+        ):
+            raise ValueError(
+                "speed_output_max must be a whole number in [1, 50]"
+            )
+        if (
+            prediction_mode != CONTINUOUS_REGRESSION_PREDICTION_MODE
+            and self.speed_output_max != 30.0
+        ):
+            raise ValueError("categorical models require speed_output_max=30")
 
         backbone = timm.create_model(
             model_name,
@@ -241,7 +257,7 @@ class AutoregressiveControlTokenViTPolicy(nn.Module):
             ) * 50.0
             speed = torch.sigmoid(
                 self.speed_regression_head(query_features[:, 1])
-            ) * 30.0
+            ) * self.speed_output_max
             return {
                 "angle_driver": angle_driver,
                 "speed": speed,
@@ -296,7 +312,13 @@ class AutoregressiveControlTokenViTPolicy(nn.Module):
                 (NUMERIC_TOKEN_OFFSET <= speed_ids)
                 & (
                     speed_ids
-                    < NUMERIC_TOKEN_OFFSET + SPEED_OUTPUT_CLASSES
+                    < NUMERIC_TOKEN_OFFSET
+                    + (
+                        int(self.speed_output_max) + 1
+                        if self.prediction_mode
+                        == CONTINUOUS_REGRESSION_PREDICTION_MODE
+                        else SPEED_OUTPUT_CLASSES
+                    )
                 )
             ) | (speed_ids == UNKNOWN_SPEED_TOKEN_ID)
             if not bool(valid_angle.all()) or not bool(valid_speed.all()):
@@ -350,6 +372,7 @@ def build_policy_model(
     control_token_type_embedding: bool = False,
     control_encoding: str = LEGACY_CONTROL_ENCODING,
     prediction_mode: str = CATEGORICAL_PREDICTION_MODE,
+    speed_output_max: float = 30.0,
 ) -> TaskTokenViTPolicy | AutoregressiveControlTokenViTPolicy:
     if architecture == TASK_TOKEN_ARCHITECTURE:
         return TaskTokenViTPolicy(
@@ -366,6 +389,7 @@ def build_policy_model(
             use_control_type_embedding=control_token_type_embedding,
             control_encoding=control_encoding,
             prediction_mode=prediction_mode,
+            speed_output_max=speed_output_max,
         )
     raise ValueError(f"unsupported policy architecture: {architecture}")
 

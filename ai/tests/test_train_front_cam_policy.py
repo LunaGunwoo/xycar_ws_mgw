@@ -23,11 +23,25 @@ from xycar_ai.train_front_cam_policy import (
     main,
     rollout_predicted_histories,
     compute_policy_losses,
+    collect_source_state,
     source_weighted_metric,
     validation_selection_score,
     validate_incremental_initialization,
     validate_resume_payload,
 )
+
+
+def test_collect_source_state_finds_ai_root_above_workflow_config(tmp_path: Path):
+    ai_root = tmp_path / "ai"
+    workflow_root = ai_root / "artifacts" / "workflows"
+    (ai_root / "src" / "xycar_ai").mkdir(parents=True)
+    workflow_root.mkdir(parents=True)
+    (ai_root / "uv.lock").write_text("locked\n", encoding="utf-8")
+
+    state = collect_source_state(workflow_root)
+
+    assert state["uv_lock_sha256"] != "unknown"
+    assert state["dirty"] is True
 
 
 class _DeterministicRolloutPolicy(torch.nn.Module):
@@ -109,6 +123,16 @@ def test_regression_rollout_rounds_and_detaches_both_history_values():
     assert pair.tolist() == [[0, 50], [55, 80]]
     assert not pair.requires_grad
 
+    speed_35_pair = predicted_executed_class_pair(
+        {
+            "angle_driver": torch.tensor([[0.0]]),
+            "speed": torch.tensor([[35.6]]),
+        },
+        control_encoding="driver_compact_v2",
+        speed_max=35.0,
+    )
+    assert speed_35_pair.tolist() == [[50, 85]]
+
 
 def test_regression_config_and_normalized_smooth_l1_loss(tmp_path: Path):
     config_path = _write_config(
@@ -122,8 +146,9 @@ def test_regression_config_and_normalized_smooth_l1_loss(tmp_path: Path):
         {
             "control_encoding": "driver_compact_v2",
             "history_update": "externally_executed_commands",
-            "history_initial_speed": 25,
+            "history_initial_speed": 35,
             "prediction_mode": "continuous_regression",
+            "speed_output_max": 35.0,
         }
     )
     payload["training"].update(
@@ -140,35 +165,43 @@ def test_regression_config_and_normalized_smooth_l1_loss(tmp_path: Path):
             "speed_class_weighting": "none",
             "emd_loss_weight": 0.0,
             "angle_regression_beta": 0.1,
-            "speed_regression_beta": 1.0 / 30.0,
+            "speed_regression_beta": 1.0 / 35.0,
         }
     )
     config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     config = load_train_config(config_path)
     angle_criterion = torch.nn.SmoothL1Loss(beta=0.1)
-    speed_criterion = torch.nn.SmoothL1Loss(beta=1.0 / 30.0)
+    speed_criterion = torch.nn.SmoothL1Loss(beta=1.0 / 35.0)
     outputs = {
         "angle_driver": torch.tensor([[25.0]]),
-        "speed": torch.tensor([[24.0]]),
+        "speed": torch.tensor([[34.0]]),
     }
     total, angle, speed, emd = compute_policy_losses(
         outputs=outputs,
-        batch={"angle_raw": torch.tensor([0.0]), "speed_raw": torch.tensor([25.0])},
+        batch={"angle_raw": torch.tensor([0.0]), "speed_raw": torch.tensor([35.0])},
         config=config,
         angle_criterion=angle_criterion,
         speed_criterion=speed_criterion,
     )
 
     assert angle == pytest.approx(0.45)
-    assert speed.item() == pytest.approx(1.0 / 60.0, rel=1e-5)
-    assert total.item() == pytest.approx(0.45 + 0.5 / 60.0, rel=1e-5)
+    assert speed.item() == pytest.approx(1.0 / 70.0, rel=1e-5)
+    assert total.item() == pytest.approx(0.45 + 0.5 / 70.0, rel=1e-5)
     assert emd.item() == 0.0
     contract = build_label_contract(config)
     assert contract["output_shapes"] == {"angle_driver": [1, 1], "speed": [1, 1]}
-    assert contract["history"]["initial_token_ids"] == [50, 75]
+    assert contract["history"]["initial_token_ids"] == [50, 85]
+    assert contract["history"]["actual_speed_token_range"] == [50, 85]
+    assert contract["speed"] == {
+        "dtype": "float32",
+        "unit": "motor_speed",
+        "range": [0.0, 35.0],
+        "activation": "sigmoid_times_35",
+    }
     assert build_training_objective_contract(config)["mode"] == (
         "joint_angle_speed_regression"
     )
+    assert build_training_objective_contract(config)["speed_normalization"] == 35.0
 
 
 def test_ab_configs_only_change_flip_and_run_name():
@@ -234,6 +267,8 @@ def test_initialize_from_loads_model_weights_only(tmp_path: Path):
     assert metadata is not None
     assert metadata["mode"] == "model_weights_only"
     assert metadata["source_epoch"] == 7
+    assert metadata["source_speed_output_max"] == 30.0
+    assert metadata["target_speed_output_max"] == 30.0
     assert len(metadata["checkpoint_sha256"]) == 64
 
 
@@ -244,6 +279,7 @@ def test_small_config_uses_minimum_speed_and_flip():
     )
 
     assert config.model.name == "vit_small_patch16_224.augreg_in21k_ft_in1k"
+    assert config.model.speed_output_max == 30.0
     assert config.data.max_forward_speed is None
     assert config.data.min_forward_speed == 20.0
     assert config.augmentation.horizontal_flip_probability == 0.5
@@ -684,6 +720,17 @@ def test_small_warp_config_embeds_preprocessing_contract():
             expected_label_contract=changed_label_contract,
         )
 
+    changed_checkpoint = copy.deepcopy(checkpoint)
+    changed_checkpoint["config"]["model"]["speed_output_max"] = 35.0
+    with pytest.raises(ValueError, match="model history settings differ"):
+        validate_resume_payload(
+            changed_checkpoint,
+            config=config,
+            expected_split=split,
+            expected_preprocessing=contract,
+            expected_label_contract=label_contract,
+        )
+
 
 def test_ar_probe_configs_only_change_type_embedding_and_run_name():
     project_root = Path(__file__).parents[1]
@@ -982,6 +1029,42 @@ def test_compact_history_rejects_speed_outside_output_range(
     config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
     with pytest.raises(ValueError, match=r"speed must be in \[0, 30\]"):
+        load_train_config(config_path)
+
+
+@pytest.mark.parametrize("speed_output_max", [0, 35.5, 51])
+def test_regression_rejects_invalid_speed_output_max(
+    tmp_path: Path,
+    speed_output_max: float,
+):
+    config_path = _write_config(
+        tmp_path,
+        tmp_path / "config" / "split.yaml",
+        epochs=1,
+        autoregressive=True,
+    )
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["model"].update(
+        {
+            "history_update": "externally_executed_commands",
+            "control_encoding": "driver_compact_v2",
+            "prediction_mode": "continuous_regression",
+            "speed_output_max": speed_output_max,
+        }
+    )
+    payload["training"]["history_training_source"] = "canonical_initial_command"
+    payload["loss"].update(
+        {
+            "angle_label_smoothing": 0.0,
+            "speed_label_smoothing": 0.0,
+            "angle_class_weighting": "none",
+            "speed_class_weighting": "none",
+            "emd_loss_weight": 0.0,
+        }
+    )
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="whole number"):
         load_train_config(config_path)
 
 

@@ -38,10 +38,12 @@ adapter가 `×0.5`로 변환한 driver command `-50..50`만
   cap을 적용하지 않아 label 계약의 최대 `100`까지 전달한다. schema v5 angle은
   `(class_id - 50) ÷ 0.5`로 normalized 명령을 복원하고 speed는 class `0..30`을
   그대로 사용한다.
-- schema v6는 float scalar `angle_driver [-50,50]`, `speed [0,30]`을 받고 angle을
-  `×2`하여 normalized motor 명령으로 바꾼다. shape, NaN/Inf 또는 범위 위반은
-  fail-closed다. 모든 schema의 예측 speed에는 launch `speed_cap` 기본값 `30`을
-  motor publish 전에 적용하며, external AR history에도 이 capped 실제 명령만 넣는다.
+- schema v6는 float scalar `angle_driver [-50,50]`과 manifest가 선언한
+  `speed [0,maximum]`을 받고 angle을 `×2`하여 normalized motor 명령으로 바꾼다.
+  maximum은 양의 정수 `1..50`이며 기존 artifact의 기본값은 `30`이다. shape,
+  NaN/Inf 또는 범위 위반은 fail-closed다. launch `speed_cap` 기본값은 `30`이고
+  해당 artifact maximum을 넘을 수 없다. external AR history에도 이 capped 실제
+  명령만 넣는다.
 - schema v7은 정사각형 road warp RGB `[1,3,224,224]`와 명시 속도 `[1,1]`을
   받아 normalized angle `[1,1]`만 출력한다. manifest의 고정 속도를 `25`로 나눠
   model input에 넣고 angle은 `×100`한다. 실제 `speed_cap`이 고정 속도와 다르면
@@ -88,10 +90,12 @@ mapping을 검증하고 실제 발행 history만 받는다. canonical 명령은 
 Angle-only schema v5 artifact는 tuple shape를 바꾸지 않고 speed logits를 검증된
 dataset 고정 class로 강제하며, manifest의 `training_objective.speed_output_trained`와
 `speed_output`에 미학습 head와 실제 고정 출력을 함께 기록한다.
-schema v6는 같은 compact history input과 canonical `(0,25)×4` 초기화를 사용하고,
-tuple output을 driver angle `[1,1]`, speed `[1,1]` float scalar로 바꾼다. manifest의
-단위·범위·`angle_driver × 2` mapping을 검사하고 범위를 벗어난 runtime 출력은
-발행하지 않는다.
+schema v6는 같은 compact history input과 manifest의 canonical 초기 명령을
+사용하고, tuple output을 driver angle `[1,1]`, speed `[1,1]` float scalar로
+바꾼다. manifest의 단위·범위·`angle_driver × 2` mapping을 검사하고 speed output
+maximum과 history token 상한이 일치하지 않거나 runtime 출력이 범위를 벗어나면
+발행하지 않는다. 기존 `(0,25)×4`/`[50,75]×4`, speed maximum 30 artifact와
+`(0,35)×4`/`[50,85]×4`, speed maximum 35 artifact를 모두 지원한다.
 schema v7은 ResNet18 `image + speed/25 → angle` 전용 계약이다. 기존 normalized
 road-warp와 ImageNet 정규화를 사용하며 speed를 예측하거나 AR history를 만들지
 않는다. angle tensor shape, finite 값과 `[-1,1]` 범위를 검사한 뒤 `×100`으로
@@ -452,6 +456,12 @@ artifact
 cap은 prediction debug topic이 아니라 실제 motor publish와 external history에
 적용된다. schema v5 분류 artifact는 삭제하지 않지만 명시적 rollback에만 사용하고,
 정상 운용에서 회귀형과 자동 교대하거나 CPU로 fallback하지 않는다.
+
+speed-35 미세학습 candidate는 schema v6 artifact
+`front-cam-policy-vit-small-ar4-v2-nice-ada-very-fast-joint-regression-sequence-init35-window5-speed35-20260823`
+이다. 이 artifact는 speed `[0,35]`와 initial history `(0,35)×4`를 선언하므로
+`speed_cap:=35.0`까지 허용한다. offline held-out 결과와 배포 checksum은 실차
+승격을 의미하지 않으며, 실행은 매번 별도 실차 승인을 받은 제한 검증으로 시작한다.
 
 wrapper는 camera를 열기 전에 host NumPy 1.x, OpenCV와 `cv_bridge` import를
 검사한다. user site-packages의 NumPy 2.x가 ROS Humble ABI를 가리면 즉시 종료하며

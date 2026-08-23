@@ -185,9 +185,7 @@ def export_checkpoint(
         data_config=data_config,
         report_path=promotion_report_path,
     )
-    model_config = _mapping(
-        checkpoint_config, "model", "checkpoint.config"
-    )
+    model_config = _mapping(checkpoint_config, "model", "checkpoint.config")
     model_name = _string(model_config, "name", "checkpoint.config.model")
     architecture = str(model_config.get("architecture", "task_tokens"))
     control_encoding = str(
@@ -196,6 +194,18 @@ def export_checkpoint(
     prediction_mode = str(
         model_config.get("prediction_mode", CATEGORICAL_PREDICTION_MODE)
     )
+    speed_output_max_value = model_config.get("speed_output_max", 30.0)
+    if (
+        isinstance(speed_output_max_value, bool)
+        or not isinstance(speed_output_max_value, (int, float))
+        or not math.isfinite(float(speed_output_max_value))
+        or not float(speed_output_max_value).is_integer()
+        or not 0.0 < float(speed_output_max_value) <= 50.0
+    ):
+        raise PolicyExportError(
+            "checkpoint.config.model.speed_output_max must be a whole number in [1, 50]"
+        )
+    speed_output_max = float(speed_output_max_value)
     if prediction_mode not in {
         CATEGORICAL_PREDICTION_MODE,
         CONTINUOUS_REGRESSION_PREDICTION_MODE,
@@ -206,23 +216,23 @@ def export_checkpoint(
         or control_encoding != COMPACT_CONTROL_ENCODING
     ):
         raise PolicyExportError("continuous regression requires compact AR control")
+    if prediction_mode != CONTINUOUS_REGRESSION_PREDICTION_MODE and (
+        speed_output_max != 30.0
+    ):
+        raise PolicyExportError("categorical artifacts require speed_output_max=30")
     schema_version = (
         REGRESSION_AR_ARTIFACT_SCHEMA_VERSION
         if architecture == AR_CONTROL_TOKEN_ARCHITECTURE
         and control_encoding == COMPACT_CONTROL_ENCODING
         and prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE
-        else
-        COMPACT_AR_ARTIFACT_SCHEMA_VERSION
+        else COMPACT_AR_ARTIFACT_SCHEMA_VERSION
         if architecture == AR_CONTROL_TOKEN_ARCHITECTURE
         and control_encoding == COMPACT_CONTROL_ENCODING
         else AR_ARTIFACT_SCHEMA_VERSION
         if architecture == AR_CONTROL_TOKEN_ARCHITECTURE
         else LEGACY_ARTIFACT_SCHEMA_VERSION
     )
-    if (
-        require_schema_version is not None
-        and schema_version != require_schema_version
-    ):
+    if require_schema_version is not None and schema_version != require_schema_version:
         raise PolicyExportError(
             "checkpoint would export artifact schema_version "
             f"{schema_version}, required {require_schema_version}"
@@ -243,14 +253,28 @@ def export_checkpoint(
         label_contract=label_contract,
         architecture=architecture,
         control_encoding=control_encoding,
+        speed_output_max=speed_output_max,
     )
     if prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE:
+        regression_speed = _mapping(
+            label_contract,
+            "speed",
+            "checkpoint.label_contract",
+        )
+        regression_history = _mapping(
+            label_contract,
+            "history",
+            "checkpoint.label_contract",
+        )
         if (
             label_contract.get("prediction_mode")
             != CONTINUOUS_REGRESSION_PREDICTION_MODE
             or training_objective is None
             or training_objective.get("mode") != "joint_angle_speed_regression"
             or training_objective.get("speed_output_trained") is not True
+            or regression_speed.get("range") != [0.0, speed_output_max]
+            or regression_history.get("actual_speed_token_range")
+            != [50, 50 + int(speed_output_max)]
         ):
             raise PolicyExportError(
                 "regression checkpoint label and training objective contracts differ"
@@ -277,6 +301,7 @@ def export_checkpoint(
             policy_arguments["control_encoding"] = control_encoding
         if prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE:
             policy_arguments["prediction_mode"] = prediction_mode
+            policy_arguments["speed_output_max"] = speed_output_max
         policy = AutoregressiveControlTokenViTPolicy(
             **policy_arguments,
         )
@@ -306,7 +331,8 @@ def export_checkpoint(
             ).eval()
         if control_encoding == COMPACT_CONTROL_ENCODING:
             initial_angle, initial_speed, _ = _compact_history_initialization(
-                label_contract
+                label_contract,
+                speed_output_max=speed_output_max,
             )
             expected_shapes = (
                 ((1, 1), (1, 1))
@@ -335,8 +361,16 @@ def export_checkpoint(
         traced_outputs = traced(*sample_inputs)
     _validate_outputs(eager_outputs, expected_shapes=expected_shapes)
     _validate_outputs(traced_outputs, expected_shapes=expected_shapes)
-    _validate_regression_outputs(eager_outputs, prediction_mode=prediction_mode)
-    _validate_regression_outputs(traced_outputs, prediction_mode=prediction_mode)
+    _validate_regression_outputs(
+        eager_outputs,
+        prediction_mode=prediction_mode,
+        speed_output_max=speed_output_max,
+    )
+    _validate_regression_outputs(
+        traced_outputs,
+        prediction_mode=prediction_mode,
+        speed_output_max=speed_output_max,
+    )
     _validate_fixed_speed_output(eager_outputs, fixed_speed_class_id)
     _validate_fixed_speed_output(traced_outputs, fixed_speed_class_id)
     for eager, exported in zip(eager_outputs, traced_outputs, strict=True):
@@ -358,6 +392,7 @@ def export_checkpoint(
         _validate_regression_outputs(
             reloaded_outputs,
             prediction_mode=prediction_mode,
+            speed_output_max=speed_output_max,
         )
         _validate_fixed_speed_output(reloaded_outputs, fixed_speed_class_id)
         for eager, exported in zip(eager_outputs, reloaded_outputs, strict=True):
@@ -460,8 +495,7 @@ def verify_artifact(
         and manifest.get("schema_version") != require_schema_version
     ):
         raise PolicyExportError(
-            "artifact schema_version differs from required "
-            f"{require_schema_version}"
+            f"artifact schema_version differs from required {require_schema_version}"
         )
     _validate_manifest_training_objective(manifest)
 
@@ -506,10 +540,9 @@ def _build_manifest(
         prediction_mode = str(
             model_config.get("prediction_mode", CATEGORICAL_PREDICTION_MODE)
         )
+        speed_output_max = float(model_config.get("speed_output_max", 30.0))
         compact = control_encoding == COMPACT_CONTROL_ENCODING
-        history_input_name = (
-            "history_token_ids" if compact else "history_class_ids"
-        )
+        history_input_name = "history_token_ids" if compact else "history_class_ids"
         model_input: dict[str, object] = {
             "kind": "tuple",
             "order": ["images", history_input_name],
@@ -525,7 +558,19 @@ def _build_manifest(
         }
         if compact:
             initial_angle, initial_speed, initialization = (
-                _compact_history_initialization(label_contract)
+                _compact_history_initialization(
+                    label_contract,
+                    speed_output_max=(
+                        speed_output_max
+                        if prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE
+                        else 30.0
+                    ),
+                )
+            )
+            history_speed_output_max = (
+                int(speed_output_max)
+                if prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE
+                else 30
             )
             history_contract = {
                 "frames": history_frames,
@@ -534,7 +579,10 @@ def _build_manifest(
                 "initialization": initialization,
                 "initial_token_ids": [initial_angle, initial_speed],
                 "actual_angle_token_range": [0, 100],
-                "actual_speed_token_range": [50, 80],
+                "actual_speed_token_range": [
+                    50,
+                    50 + history_speed_output_max,
+                ],
                 "update": "externally_executed_commands",
             }
             if initialization == "canonical_initial_command":
@@ -561,7 +609,7 @@ def _build_manifest(
                         "name": "speed",
                         "dtype": "float32",
                         "unit": "motor_speed",
-                        "range": [0.0, 30.0],
+                        "range": [0.0, speed_output_max],
                     },
                 ]
                 schema_version = REGRESSION_AR_ARTIFACT_SCHEMA_VERSION
@@ -659,6 +707,7 @@ def _training_objective_contract(
     label_contract: Mapping[str, Any],
     architecture: str,
     control_encoding: str,
+    speed_output_max: float,
 ) -> tuple[dict[str, object] | None, int | None]:
     raw_objective = checkpoint.get("training_objective")
     if raw_objective is None:
@@ -689,9 +738,7 @@ def _training_objective_contract(
     }
     if mode == "joint_angle_speed_regression":
         if raw_objective.get("loss") != "smooth_l1_normalized":
-            raise PolicyExportError(
-                "regression objective must use normalized SmoothL1"
-            )
+            raise PolicyExportError("regression objective must use normalized SmoothL1")
         angle_normalization = _finite_number(
             raw_objective,
             "angle_normalization",
@@ -714,9 +761,14 @@ def _training_objective_contract(
         )
         if (
             angle_normalization != 50.0
-            or speed_normalization != 30.0
+            or speed_normalization != speed_output_max
             or angle_beta <= 0.0
-            or speed_beta <= 0.0
+            or not math.isclose(
+                speed_beta,
+                1.0 / speed_output_max,
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
             or speed_loss_weight <= 0.0
             or not speed_output_trained
         ):
@@ -873,7 +925,9 @@ def _validated_promotion_report(
     if (status == "passed") != checks_passed:
         raise PolicyExportError("promotion report status disagrees with checks")
     if candidate.get("sha256") != checkpoint_sha256:
-        raise PolicyExportError("promotion report candidate hash differs from checkpoint")
+        raise PolicyExportError(
+            "promotion report candidate hash differs from checkpoint"
+        )
     parent = report.get("parent")
     if (
         not isinstance(parent, Mapping)
@@ -905,6 +959,8 @@ def _checkpoint_mapping(payload: object) -> Mapping[str, Any]:
 
 def _compact_history_initialization(
     label_contract: Mapping[str, Any],
+    *,
+    speed_output_max: float = 30.0,
 ) -> tuple[int, int, str]:
     history = _mapping(label_contract, "history", "checkpoint.label_contract")
     initialization = history.get("initialization")
@@ -917,9 +973,7 @@ def _compact_history_initialization(
             not isinstance(initial_command, list)
             or len(initial_command) != 2
             or any(isinstance(value, bool) for value in initial_command)
-            or not all(
-                isinstance(value, (int, float)) for value in initial_command
-            )
+            or not all(isinstance(value, (int, float)) for value in initial_command)
         ):
             raise PolicyExportError(
                 "compact canonical history initial_command must be numeric "
@@ -928,6 +982,7 @@ def _compact_history_initialization(
         expected = executed_command_to_history_tokens(
             float(initial_command[0]),
             float(initial_command[1]),
+            speed_max=speed_output_max,
         )
     else:
         raise PolicyExportError(
@@ -965,9 +1020,7 @@ def _integer(payload: Mapping[str, Any], key: str, context: str) -> int:
     return value
 
 
-def _finite_number(
-    payload: Mapping[str, Any], key: str, context: str
-) -> float:
+def _finite_number(payload: Mapping[str, Any], key: str, context: str) -> float:
     value = payload.get(key)
     if (
         isinstance(value, bool)
@@ -1006,14 +1059,17 @@ def _validate_regression_outputs(
     outputs: tuple[torch.Tensor, torch.Tensor],
     *,
     prediction_mode: str,
+    speed_output_max: float,
 ) -> None:
     if prediction_mode != CONTINUOUS_REGRESSION_PREDICTION_MODE:
         return
     angle_driver, speed = outputs
     if bool((angle_driver < -50.0).any()) or bool((angle_driver > 50.0).any()):
         raise PolicyExportError("regression angle output is outside [-50, 50]")
-    if bool((speed < 0.0).any()) or bool((speed > 30.0).any()):
-        raise PolicyExportError("regression speed output is outside [0, 30]")
+    if bool((speed < 0.0).any()) or bool((speed > speed_output_max).any()):
+        raise PolicyExportError(
+            f"regression speed output is outside [0, {speed_output_max:g}]"
+        )
 
 
 def _validate_fixed_speed_output(

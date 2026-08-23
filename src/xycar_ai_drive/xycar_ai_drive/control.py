@@ -12,6 +12,7 @@ COMPACT_ANGLE_CLASSES = 101
 COMPACT_SPEED_CLASSES = 31
 COMPACT_ANGLE_OFFSET = 50
 COMPACT_SPEED_TOKEN_OFFSET = 50
+COMPACT_NUMERIC_MAX = 50
 NORMALIZED_TO_DRIVER_SCALE = 0.5
 
 
@@ -191,46 +192,77 @@ def decode_compact_output_ids(
 def decode_regression_outputs(
     angle_driver: float,
     speed: float,
+    *,
+    speed_max: float = 30.0,
 ) -> DriveCommand:
     """Decode schema-v6 scalar outputs into normalized motor commands."""
+    maximum = _compact_speed_max(speed_max)
     if not all(math.isfinite(value) for value in (angle_driver, speed)):
         raise ValueError('regression outputs must be finite')
     if not -50.0 <= angle_driver <= 50.0:
         raise ValueError('regression angle_driver must be in [-50, 50]')
-    if not 0.0 <= speed <= 30.0:
-        raise ValueError('regression speed must be in [0, 30]')
+    if not 0.0 <= speed <= maximum:
+        raise ValueError(
+            f'regression speed must be in [0, {maximum:g}]'
+        )
     return DriveCommand(
         angle=float(angle_driver / NORMALIZED_TO_DRIVER_SCALE),
         speed=float(speed),
     )
 
 
-def cap_command_speed(command: DriveCommand, speed_cap: float) -> DriveCommand:
+def cap_command_speed(
+    command: DriveCommand,
+    speed_cap: float,
+    *,
+    maximum_speed: float = 30.0,
+) -> DriveCommand:
     """Apply a finite forward-speed ceiling before publish and AR history."""
+    maximum = _compact_speed_max(maximum_speed)
     if not all(
         math.isfinite(value) for value in (command.angle, command.speed, speed_cap)
     ):
         raise ValueError('command and speed_cap must be finite')
-    if not 0.0 <= speed_cap <= 30.0:
-        raise ValueError('speed_cap must be in [0, 30]')
+    if not 0.0 <= speed_cap <= maximum:
+        raise ValueError(f'speed_cap must be in [0, {maximum:g}]')
     return DriveCommand(
         angle=command.angle,
         speed=max(0.0, min(command.speed, speed_cap)),
     )
 
 
-def command_history_token_ids(command: DriveCommand) -> tuple[int, int]:
+def command_history_token_ids(
+    command: DriveCommand,
+    *,
+    speed_max: float = 30.0,
+) -> tuple[int, int]:
     """Quantize an actually published normalized command for schema v5."""
+    maximum = _compact_speed_max(speed_max)
     if not all(math.isfinite(value) for value in (command.angle, command.speed)):
         raise ValueError('executed command must contain finite values')
     driver_angle = round(
         max(-50.0, min(50.0, command.angle * NORMALIZED_TO_DRIVER_SCALE))
     )
-    speed = round(max(0.0, min(30.0, command.speed)))
+    speed = round(max(0.0, min(maximum, command.speed)))
     return (
         int(driver_angle) + COMPACT_ANGLE_OFFSET,
         int(speed) + COMPACT_SPEED_TOKEN_OFFSET,
     )
+
+
+def _compact_speed_max(value: float) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or not float(value).is_integer()
+        or not 0.0 < float(value) <= COMPACT_NUMERIC_MAX
+    ):
+        raise ValueError(
+            f'speed maximum must be a whole number in '
+            f'[1, {COMPACT_NUMERIC_MAX}]'
+        )
+    return float(value)
 
 
 def is_fresh(

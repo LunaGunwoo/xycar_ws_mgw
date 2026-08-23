@@ -47,9 +47,16 @@ class _TinyARPolicy(nn.Module):
         use_control_type_embedding: bool,
         control_encoding: str = "legacy_command_201",
         prediction_mode: str = "categorical",
+        speed_output_max: float = 30.0,
     ) -> None:
         super().__init__()
-        del model_name, pretrained, image_size, use_control_type_embedding
+        del (
+            model_name,
+            pretrained,
+            image_size,
+            use_control_type_embedding,
+            speed_output_max,
+        )
         self.history_frames = history_frames
         compact = control_encoding == "driver_compact_v2"
         self.prediction_mode = prediction_mode
@@ -91,9 +98,7 @@ def test_export_checkpoint_writes_verified_artifact(monkeypatch, tmp_path: Path)
             "best_score": 12.5,
             "config": {
                 "model": {"name": "tiny", "image_size": 16},
-                "data": {
-                    "required_steering_contract": "normalized_percent_v2"
-                },
+                "data": {"required_steering_contract": "normalized_percent_v2"},
             },
             "model_state": model.state_dict(),
             "preprocessing": {
@@ -191,9 +196,7 @@ def test_export_validation_rejects_unsafe_id_and_tampering(tmp_path: Path):
         verify_artifact(artifact)
 
 
-def test_guided_export_records_advisory_promotion_status(
-    monkeypatch, tmp_path: Path
-):
+def test_guided_export_records_advisory_promotion_status(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(export_module, "TaskTokenViTPolicy", _TinyPolicy)
     checkpoint_path = tmp_path / "guided-best.pt"
     model = _TinyPolicy(model_name="tiny", pretrained=False, image_size=16)
@@ -233,9 +236,7 @@ def test_guided_export_records_advisory_promotion_status(
     assert manifest_without_report["promotion"] == {
         "offline_gate": "not_evaluated",
         "generation": 1,
-        "candidate_checkpoint_sha256": export_module.sha256_file(
-            checkpoint_path
-        ),
+        "candidate_checkpoint_sha256": export_module.sha256_file(checkpoint_path),
     }
 
     report_path = tmp_path / "promotion_gate.json"
@@ -246,9 +247,7 @@ def test_guided_export_records_advisory_promotion_status(
                 "status": "failed",
                 "generation": 1,
                 "parent": {"sha256": "parent-hash"},
-                "candidate": {
-                    "sha256": export_module.sha256_file(checkpoint_path)
-                },
+                "candidate": {"sha256": export_module.sha256_file(checkpoint_path)},
                 "checks": {
                     "guided_angle_mae_improved": False,
                     "candidate_initialized_from_parent": True,
@@ -263,14 +262,10 @@ def test_guided_export_records_advisory_promotion_status(
         output_root=tmp_path / "models",
         promotion_report_path=report_path,
     )
-    failed_manifest = yaml.safe_load(
-        (failed_artifact / "manifest.yaml").read_text()
-    )
+    failed_manifest = yaml.safe_load((failed_artifact / "manifest.yaml").read_text())
     assert failed_manifest["promotion"]["offline_gate"] == "failed"
     assert failed_manifest["promotion"]["generation"] == 1
-    assert failed_manifest["promotion"]["parent_checkpoint_sha256"] == (
-        "parent-hash"
-    )
+    assert failed_manifest["promotion"]["parent_checkpoint_sha256"] == ("parent-hash")
     assert failed_manifest["promotion"]["failed_checks"] == [
         "guided_angle_mae_improved"
     ]
@@ -282,9 +277,7 @@ def test_guided_export_records_advisory_promotion_status(
                 "status": "passed",
                 "generation": 1,
                 "parent": {"sha256": "parent-hash"},
-                "candidate": {
-                    "sha256": export_module.sha256_file(checkpoint_path)
-                },
+                "candidate": {"sha256": export_module.sha256_file(checkpoint_path)},
                 "checks": {"all_required_checks": True},
             }
         ),
@@ -296,17 +289,13 @@ def test_guided_export_records_advisory_promotion_status(
         output_root=tmp_path / "models",
         promotion_report_path=report_path,
     )
-    passed_manifest = yaml.safe_load(
-        (passed_artifact / "manifest.yaml").read_text()
-    )
+    passed_manifest = yaml.safe_load((passed_artifact / "manifest.yaml").read_text())
     assert passed_manifest["promotion"]["offline_gate"] == "passed"
     assert passed_manifest["promotion"]["failed_checks"] == []
 
     mismatched_report = yaml.safe_load(report_path.read_text())
     mismatched_report["candidate"]["sha256"] = "wrong-hash"
-    report_path.write_text(
-        yaml.safe_dump(mismatched_report), encoding="utf-8"
-    )
+    report_path.write_text(yaml.safe_dump(mismatched_report), encoding="utf-8")
     with pytest.raises(PolicyExportError, match="candidate hash differs"):
         export_checkpoint(
             checkpoint_path=checkpoint_path,
@@ -347,9 +336,7 @@ def test_export_ar_checkpoint_writes_v3_external_history_contract(
                     "history_initial_angle": 0,
                     "history_initial_speed": 25,
                 },
-                "data": {
-                    "required_steering_contract": "normalized_percent_v2"
-                },
+                "data": {"required_steering_contract": "normalized_percent_v2"},
             },
             "model_state": model.state_dict(),
             "preprocessing": {
@@ -468,9 +455,7 @@ def test_export_compact_ar_checkpoint_writes_schema_v5(
                 "history_frames": 4,
                 "control_token_type_embedding": False,
             },
-            "data": {
-                "required_steering_contract": "normalized_percent_v2"
-            },
+            "data": {"required_steering_contract": "normalized_percent_v2"},
         },
         "model_state": model.state_dict(),
         "preprocessing": {
@@ -569,6 +554,7 @@ def test_export_regression_checkpoint_writes_schema_v6(
             "initialization": "canonical_initial_command",
             "initial_command": [0, 25],
             "initial_token_ids": [50, 75],
+            "actual_speed_token_range": [50, 80],
         },
     }
     torch.save(
@@ -586,9 +572,7 @@ def test_export_regression_checkpoint_writes_schema_v6(
                     "history_initial_angle": 0,
                     "history_initial_speed": 25,
                 },
-                "data": {
-                    "required_steering_contract": "normalized_percent_v2"
-                },
+                "data": {"required_steering_contract": "normalized_percent_v2"},
             },
             "model_state": model.state_dict(),
             "preprocessing": {
@@ -632,3 +616,39 @@ def test_export_regression_checkpoint_writes_schema_v6(
     )
     assert angle.item() == pytest.approx(0.0)
     assert speed.item() == pytest.approx(15.0)
+
+    speed_35_checkpoint = tmp_path / "regression-speed-35.pt"
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    payload["config"]["model"]["speed_output_max"] = 35.0
+    payload["config"]["model"]["history_initial_speed"] = 35
+    payload["label_contract"]["speed"]["range"] = [0.0, 35.0]
+    payload["label_contract"]["history"]["initial_command"] = [0, 35]
+    payload["label_contract"]["history"]["initial_token_ids"] = [50, 85]
+    payload["label_contract"]["history"]["actual_speed_token_range"] = [50, 85]
+    payload["training_objective"]["speed_normalization"] = 35.0
+    payload["training_objective"]["speed_beta"] = 1.0 / 35.0
+    torch.save(payload, speed_35_checkpoint)
+    speed_35_artifact = export_checkpoint(
+        checkpoint_path=speed_35_checkpoint,
+        artifact_id="regression-speed-35-policy",
+        output_root=tmp_path / "models",
+        require_schema_version=6,
+    )
+    speed_35_manifest = yaml.safe_load(
+        (speed_35_artifact / "manifest.yaml").read_text()
+    )
+    assert speed_35_manifest["model"]["output"]["values"][1]["range"] == [
+        0.0,
+        35.0,
+    ]
+    assert speed_35_manifest["history"]["initial_token_ids"] == [50, 85]
+    assert speed_35_manifest["history"]["actual_speed_token_range"] == [50, 85]
+    speed_35_model = torch.jit.load(
+        str(speed_35_artifact / "model.ts"),
+        map_location="cpu",
+    )
+    _, speed_35 = speed_35_model(
+        torch.zeros(1, 3, 16, 16),
+        torch.tensor([[[50, 85]] * 4], dtype=torch.long),
+    )
+    assert 0.0 <= speed_35.item() <= 35.0

@@ -15,6 +15,7 @@ from xycar_ai_drive.control import DriveCommand
 from xycar_ai_drive.front_cam_policy_node import (
     FrontCamPolicyNode,
     _is_paired_unnamed_relay,
+    _validate_artifact_speed_cap,
     _validate_fixed_speed_cap,
 )
 from xycar_ai_drive.steering_contract import NORMALIZED_STEERING_CONTRACT
@@ -116,6 +117,17 @@ def test_fixed_speed_artifact_requires_matching_speed_cap():
     _validate_fixed_speed_cap(artifact, 23.0)
     with pytest.raises(ValueError, match=r'fixed-speed.*\(23\)'):
         _validate_fixed_speed_cap(artifact, 22.0)
+
+
+def test_speed_cap_must_not_exceed_artifact_output_maximum():
+    speed_35 = SimpleNamespace(fixed_speed=None, speed_output_max=35.0)
+    _validate_artifact_speed_cap(speed_35, 35.0)
+    with pytest.raises(ValueError, match='artifact speed output maximum'):
+        _validate_artifact_speed_cap(speed_35, 35.1)
+
+    legacy = SimpleNamespace(fixed_speed=None, speed_output_max=30.0)
+    with pytest.raises(ValueError, match='artifact speed output maximum'):
+        _validate_artifact_speed_cap(legacy, 35.0)
 
 
 def _spin_for(harness, duration_sec, *, a=None, publish_camera=True):

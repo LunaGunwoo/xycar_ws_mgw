@@ -99,6 +99,24 @@ def _validate_fixed_speed_cap(
         )
 
 
+def _validate_artifact_speed_cap(
+    artifact: PolicyArtifact | object | None,
+    speed_cap: float,
+) -> None:
+    speed_output_max = getattr(artifact, 'speed_output_max', 30.0)
+    if (
+        isinstance(speed_output_max, bool)
+        or not isinstance(speed_output_max, (int, float))
+        or not np.isfinite(float(speed_output_max))
+        or not 0.0 <= speed_cap <= float(speed_output_max)
+    ):
+        raise ValueError(
+            'speed_cap must not exceed the artifact speed output maximum '
+            f'({speed_output_max!r})'
+        )
+    _validate_fixed_speed_cap(artifact, speed_cap)
+
+
 class FrontCamPolicyNode(Node):
     """Infer continuously and publish motor commands only while A is held."""
 
@@ -160,7 +178,7 @@ class FrontCamPolicyNode(Node):
             'artifact',
             getattr(self._policy, '_artifact', None),
         )
-        _validate_fixed_speed_cap(self.artifact, self.speed_cap)
+        _validate_artifact_speed_cap(self.artifact, self.speed_cap)
         self._artifact_motion_contract_valid = (
             self.artifact is not None
             and self.artifact.steering_contract
@@ -307,8 +325,8 @@ class FrontCamPolicyNode(Node):
                 raise ValueError(f'{label} must not be empty')
         if self.a_button_index < 0:
             raise ValueError('a_button_index must be non-negative')
-        if not np.isfinite(self.speed_cap) or not 0.0 <= self.speed_cap <= 30.0:
-            raise ValueError('speed_cap must be finite and in [0, 30]')
+        if not np.isfinite(self.speed_cap) or not 0.0 <= self.speed_cap <= 50.0:
+            raise ValueError('speed_cap must be finite and in [0, 50]')
         for node in self.allowed_motor_relay_nodes:
             if not node.startswith('/') or node.endswith('/'):
                 raise ValueError(
@@ -378,7 +396,10 @@ class FrontCamPolicyNode(Node):
             self.artifact is not None
             and self.artifact.control_encoding == COMPACT_CONTROL_ENCODING
         ):
-            return command_history_token_ids(command)
+            return command_history_token_ids(
+                command,
+                speed_max=getattr(self.artifact, 'speed_output_max', 30.0),
+            )
         return command_class_ids(command)
 
     def _on_joy(self, message: Joy) -> None:
@@ -536,6 +557,15 @@ class FrontCamPolicyNode(Node):
                     executed_command = cap_command_speed(
                         prediction.command,
                         self.speed_cap,
+                        maximum_speed=(
+                            getattr(
+                                self.artifact,
+                                'speed_output_max',
+                                30.0,
+                            )
+                            if self.artifact is not None
+                            else 30.0
+                        ),
                     )
                     self._stop_reason = None
                     # Keep the state decision and publish ordered against a

@@ -219,6 +219,7 @@ class DeviceTorchScriptPolicy:
                     command = decode_regression_outputs(
                         float(angle_logits.item()),
                         float(speed_logits.item()),
+                        speed_max=self.artifact.speed_output_max,
                     )
                     angle_class_id = speed_class_id = None
                 else:
@@ -372,6 +373,7 @@ class DeviceTorchScriptPolicy:
                 decode_regression_outputs(
                     float(angle_logits.item()),
                     float(speed_logits.item()),
+                    speed_max=self.artifact.speed_output_max,
                 )
             except ValueError as exc:
                 raise PolicyRuntimeError(str(exc)) from exc

@@ -232,6 +232,7 @@ def attach_executed_command_history(
     *,
     control_encoding: str = LEGACY_CONTROL_ENCODING,
     initial_command: tuple[float, float] = (0.0, 25.0),
+    compact_speed_max: float = 30.0,
 ) -> PolicyDataSplits:
     """Attach the actual previously executed commands to every split."""
     if history_frames <= 0:
@@ -243,6 +244,7 @@ def attach_executed_command_history(
                 history_frames,
                 control_encoding=control_encoding,
                 initial_command=initial_command,
+                compact_speed_max=compact_speed_max,
             )
             for session in sessions
         )
@@ -326,9 +328,13 @@ def _attach_session_executed_history(
     *,
     control_encoding: str,
     initial_command: tuple[float, float],
+    compact_speed_max: float,
 ) -> PolicySession:
     if control_encoding == COMPACT_CONTROL_ENCODING:
-        initial_pair = executed_command_to_history_tokens(*initial_command)
+        initial_pair = executed_command_to_history_tokens(
+            *initial_command,
+            speed_max=compact_speed_max,
+        )
         initial = (initial_pair,) * history_frames
     else:
         initial = _session_initial_history(session, history_frames)
@@ -340,6 +346,7 @@ def _attach_session_executed_history(
             executed_pair = executed_command_to_history_tokens(
                 sample.angle_raw,
                 sample.speed_raw,
+                speed_max=compact_speed_max,
             )
         else:
             executed_pair = (sample.angle_class_id, sample.speed_class_id)

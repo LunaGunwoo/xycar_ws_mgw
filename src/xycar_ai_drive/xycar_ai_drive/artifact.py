@@ -53,6 +53,7 @@ class PolicyHistoryContract:
     initial_class_ids: tuple[int, int]
     update: str
     control_encoding: str = LEGACY_CONTROL_ENCODING
+    speed_output_max: int = 30
 
     def valid_pair(self, pair: object) -> bool:
         if (
@@ -64,7 +65,8 @@ class PolicyHistoryContract:
         angle_id, speed_id = pair
         if self.control_encoding == COMPACT_CONTROL_ENCODING:
             return pair == [101, 102] or pair == (101, 102) or (
-                0 <= angle_id <= 100 and 50 <= speed_id <= 80
+                0 <= angle_id <= 100
+                and 50 <= speed_id <= 50 + self.speed_output_max
             )
         return 0 <= angle_id <= 200 and 0 <= speed_id <= 200
 
@@ -88,6 +90,7 @@ class PolicyArtifact:
     prediction_mode: str = CATEGORICAL_PREDICTION_MODE
     fixed_speed: float | None = None
     speed_normalization_divisor: float | None = None
+    speed_output_max: float = 30.0
 
 
 def load_policy_artifact(root: str | Path) -> PolicyArtifact:
@@ -189,7 +192,6 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
             raise ArtifactContractError('history input dtype must be int64')
         if history_input.get('shape') != [1, 4, 2]:
             raise ArtifactContractError('history input shape must be [1,4,2]')
-        history = _history_contract(manifest, schema_version=schema_version)
     image_size = shape[2]
 
     model_output = _required_mapping(model, 'output', 'model')
@@ -241,7 +243,15 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
     if prediction_mode != expected_prediction_mode:
         raise ArtifactContractError('model prediction_mode is incompatible')
     if schema_version == 6:
-        _validate_regression_output_values(model_output)
+        speed_output_max = _validate_regression_output_values(model_output)
+    else:
+        speed_output_max = 30.0
+    if schema_version not in {1, 7}:
+        history = _history_contract(
+            manifest,
+            schema_version=schema_version,
+            speed_output_max=speed_output_max,
+        )
 
     preprocessing = _required_mapping(
         manifest,
@@ -304,6 +314,7 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
         _validate_compact_label_contract(
             label_contract,
             regression=schema_version == 6,
+            speed_output_max=speed_output_max,
         )
     else:
         if label_contract.get('num_classes') != 201:
@@ -334,6 +345,7 @@ def load_policy_artifact(root: str | Path) -> PolicyArtifact:
         prediction_mode=prediction_mode,
         fixed_speed=fixed_speed,
         speed_normalization_divisor=speed_normalization_divisor,
+        speed_output_max=speed_output_max,
     )
 
 
@@ -361,6 +373,7 @@ def _history_contract(
     manifest: Mapping[str, object],
     *,
     schema_version: int,
+    speed_output_max: float,
 ) -> PolicyHistoryContract:
     history = _required_mapping(manifest, 'history', 'manifest')
     if history.get('frames') != 4:
@@ -413,7 +426,7 @@ def _history_contract(
             or not all(isinstance(value, (int, float)) for value in initial_command)
             or not all(math.isfinite(float(value)) for value in initial_command)
             or not -100 <= float(initial_command[0]) <= 100
-            or not 0 <= float(initial_command[1]) <= 30
+            or not 0 <= float(initial_command[1]) <= speed_output_max
         ):
             raise ArtifactContractError(
                 'schema v5 canonical history command is invalid'
@@ -438,7 +451,10 @@ def _history_contract(
             )
         if history.get('actual_angle_token_range') != [0, 100]:
             raise ArtifactContractError('schema v5 angle token range is invalid')
-        if history.get('actual_speed_token_range') != [50, 80]:
+        if history.get('actual_speed_token_range') != [
+            50,
+            50 + int(speed_output_max),
+        ]:
             raise ArtifactContractError('schema v5 speed token range is invalid')
     else:
         initial_command = history.get('initial_command')
@@ -453,6 +469,7 @@ def _history_contract(
             if schema_version in {5, 6}
             else LEGACY_CONTROL_ENCODING
         ),
+        speed_output_max=int(speed_output_max),
     )
 
 
@@ -460,6 +477,7 @@ def _validate_compact_label_contract(
     contract: Mapping[str, object],
     *,
     regression: bool,
+    speed_output_max: float,
 ) -> None:
     if contract.get('control_encoding') != COMPACT_CONTROL_ENCODING:
         raise ArtifactContractError('compact control encoding is unsupported')
@@ -480,7 +498,7 @@ def _validate_compact_label_contract(
             or angle.get('range') != [-50.0, 50.0]
             or angle.get('runtime_normalized_mapping') != 'angle_driver * 2'
             or speed.get('unit') != 'motor_speed'
-            or speed.get('range') != [0.0, 30.0]
+            or speed.get('range') != [0.0, speed_output_max]
         ):
             raise ArtifactContractError('schema v6 scalar label contract is invalid')
         return
@@ -533,7 +551,26 @@ def _validate_fixed_speed_angle_label_contract(
 
 def _validate_regression_output_values(
     output: Mapping[str, object],
-) -> None:
+) -> float:
+    values = output.get('values')
+    if not isinstance(values, list) or len(values) != 2:
+        raise ArtifactContractError('schema v6 output value contract is invalid')
+    speed = values[1]
+    if not isinstance(speed, Mapping):
+        raise ArtifactContractError('schema v6 output value contract is invalid')
+    speed_range = speed.get('range')
+    if (
+        not isinstance(speed_range, list)
+        or len(speed_range) != 2
+        or speed_range[0] != 0.0
+        or isinstance(speed_range[1], bool)
+        or not isinstance(speed_range[1], (int, float))
+        or not math.isfinite(float(speed_range[1]))
+        or not float(speed_range[1]).is_integer()
+        or not 0.0 < float(speed_range[1]) <= 50.0
+    ):
+        raise ArtifactContractError('schema v6 speed range is invalid')
+    speed_output_max = float(speed_range[1])
     expected = [
         {
             'name': 'angle_driver',
@@ -546,11 +583,12 @@ def _validate_regression_output_values(
             'name': 'speed',
             'dtype': 'float32',
             'unit': 'motor_speed',
-            'range': [0.0, 30.0],
+            'range': [0.0, speed_output_max],
         },
     ]
-    if output.get('values') != expected:
+    if values != expected:
         raise ArtifactContractError('schema v6 output value contract is invalid')
+    return speed_output_max
 
 
 def _road_warp_parameters(
