@@ -69,7 +69,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 'initial_stop_arm_button_index',
-                default_value='4',
+                default_value='9',
             ),
             DeclareLaunchArgument(
                 'signal_status_log_hz',

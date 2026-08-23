@@ -93,7 +93,7 @@ from xycar_ai_drive.traffic_shortcut_monitor import (
     monitor_crop_panel,
     monitor_frame_panel,
 )
-from xycar_ai_drive.control import DriveCommand
+from xycar_ai_drive.control import DriveCommand, ToggleAction
 
 
 class _FakeOnnxSession:
@@ -1792,6 +1792,76 @@ def test_integrated_node_without_gamepad_does_not_require_joy():
     assert TrafficShortcutPolicyNode._can_enable_locked(node, 1.0)
 
 
+def test_integrated_node_maps_sdl_lb_button_nine_to_initial_wait():
+    observations = []
+    operator_logs = []
+
+    def observe(_self, **kwargs):
+        observations.append(kwargs)
+        return ToggleAction.ENABLED
+
+    node = SimpleNamespace(
+        require_gamepad_hold=True,
+        bundle=SimpleNamespace(schema_version=15),
+        a_button_index=0,
+        initial_stop_arm_button_index=9,
+        _lock=threading.Lock(),
+        _joy_valid=False,
+        _last_joy_monotonic=None,
+        _observe_drive_gate_locked=lambda **kwargs: observe(None, **kwargs),
+        _force_fault=lambda _reason: None,
+        get_logger=lambda: SimpleNamespace(warning=lambda *_args, **_kwargs: None),
+        _safe_log_warning=operator_logs.append,
+    )
+    buttons = [0] * 10
+    buttons[0] = 1
+    buttons[9] = 1
+
+    TrafficShortcutPolicyNode._on_joy(
+        node,
+        SimpleNamespace(buttons=buttons),
+    )
+
+    assert observations[-1]['pressed']
+    assert observations[-1]['initial_stop_armed']
+    assert observations[-1]['wait_for_signal']
+    assert operator_logs[-1] == 'WAIT_FOR_SIGNAL source=LB+A'
+
+    buttons[9] = 0
+    buttons[4] = 1
+    TrafficShortcutPolicyNode._on_joy(
+        node,
+        SimpleNamespace(buttons=buttons),
+    )
+    assert not observations[-1]['initial_stop_armed']
+    assert not observations[-1]['wait_for_signal']
+
+
+def test_integrated_node_initial_wait_control_tick_publishes_stop():
+    published = []
+    fsm = TrafficShortcutFsm(
+        one_shot_initial_stop=True,
+        initial_left_direct_shortcut=True,
+    )
+    fsm.enable(initial_stop_armed=True, wait_for_signal=True)
+    node = SimpleNamespace(
+        _next_graph_check_monotonic=math.inf,
+        require_gamepad_hold=True,
+        _drive_gate=SimpleNamespace(enabled=True),
+        _lock=threading.Lock(),
+        _unsafe_reason_locked=lambda _now: None,
+        _fsm=fsm,
+        _transition_stop_pending=False,
+        _decision=None,
+        _publish_stop=lambda: published.append(DriveCommand()),
+    )
+
+    TrafficShortcutPolicyNode._on_control_timer(node)
+
+    assert fsm.state == MissionState.WAIT_FOR_SIGNAL
+    assert published == [DriveCommand()]
+
+
 def test_traffic_shortcut_launch_ties_gamepad_to_hold_gate():
     launch_path = (
         Path(__file__).parents[1]
@@ -1803,6 +1873,7 @@ def test_traffic_shortcut_launch_ties_gamepad_to_hold_gate():
     assert "'require_gamepad_hold': ParameterValue(" in launch_text
     assert 'use_gamepad,' in launch_text
     assert "'initial_stop_arm_button_index'" in launch_text
+    assert "default_value='9'" in launch_text
     assert "'signal_status_log_hz'" in launch_text
     assert "'use_monitor_gui'" in launch_text
     assert "default_value='false'" in launch_text
@@ -1817,6 +1888,7 @@ def test_traffic_shortcut_launch_ties_gamepad_to_hold_gate():
         / 'jetson_traffic_shortcut.launch.py'
     ).read_text(encoding='utf-8')
     assert "'initial_stop_arm_button_index:='" in jetson_launch_text
+    assert "default_value='9'" in jetson_launch_text
     assert "'signal_status_log_hz:='" in jetson_launch_text
     assert "'use_monitor_gui:='" in jetson_launch_text
 

@@ -192,7 +192,8 @@ softmax `0.50` 미만은 `UNKNOWN`이다. YOLO는 매 3 camera frame에 box를 �
 검출 뒤 중간 frame에서는 직전 bbox와 현재 frame으로 CNN만 매 frame 실행한다.
 Base 구간과 shadow는 cap `35`, initial history `(0,35)×4`와 token `[50,85]×4`를
 사용하고, shortcut 구간의 고정 speed `23`은 변경하지 않는다.
-Gamepad `LB+A`와 headless mode는 활성화 순간부터 motor 정지를 유지한다. STOP,
+SDL `game_controller_node`의 LB `buttons[9]`와 A를 함께 누르는 Gamepad mode 및
+headless mode는 활성화 순간부터 motor 정지를 유지한다. STOP,
 STRAIGHT, LEFT는 3 camera frame마다 실행하는 fresh YOLO+CNN의 같은 raw class
 5회에서만 확정한다. initial STRAIGHT는 Base로 출발하고 initial LEFT는 한 제어
 주기 정지 뒤 shortcut으로 직행한다. initial STOP은 정지를 확정하며, 이후 같은
@@ -215,8 +216,8 @@ cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source inst
 
 camera, gamepad와 motor publisher를 시작하므로 실차 실행마다 별도 직전 승인을
 받고 바퀴 지지/안전 공간, 전원 차단, A release·`Ctrl+C`, 경쟁 publisher 부재를
-확인한다. 정지 상태에서 첫 신호를 판정하려면 LB를 누른 채 A를 누르고, STOP을
-처음부터 무시하며 Base로 즉시 출발하려면 A만 누른다. 정지 중에도 A를 유지하며
+확인한다. 정지 상태에서 첫 신호를 판정하려면 `buttons[9]`인 LB를 누른 채 A를
+누르고, STOP을 처음부터 무시하며 Base로 즉시 출발하려면 A만 누른다. 정지 중에도 A를 유지하며
 같은 STRAIGHT 또는 LEFT의 fresh 판독 5회에서 자동 출발한다. 좌회전 성공
 one-shot을 다시 실행하려면 node를 재시작한다.
 

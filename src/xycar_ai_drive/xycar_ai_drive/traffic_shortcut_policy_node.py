@@ -434,7 +434,8 @@ class TrafficShortcutPolicyNode(Node):
             '/traffic_shortcut/signal_debug',
         )
         self.declare_parameter('a_button_index', 0)
-        self.declare_parameter('initial_stop_arm_button_index', 4)
+        # joy/game_controller_node uses the SDL left-shoulder index for LB.
+        self.declare_parameter('initial_stop_arm_button_index', 9)
         self.declare_parameter('a_release_grace_sec', 0.12)
         self.declare_parameter('signal_status_log_hz', 2.0)
         self.declare_parameter('require_gamepad_hold', True)

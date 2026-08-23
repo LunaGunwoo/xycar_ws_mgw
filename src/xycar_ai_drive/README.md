@@ -510,7 +510,8 @@ detector와 3-class CNN 전체를 포함한다. detector ONNX SHA-256은
   artifact의 서로 다른 normalization을 적용해 shortcut과 Base를 차례로 추론한다.
   따라서 Base self-AR를 계속 갱신하면서도 실제 선택 policy decision을 함께 반환한다.
 - `use_gamepad:=true`에서는 OFF로 시작하고 A hold/release grace `0.12s` 계약을
-  유지한다. `LB+A` 활성 edge는 즉시 `WAIT_FOR_SIGNAL` 정지 대기에 들어가며 LB는
+  유지한다. SDL `game_controller_node`의 LB는 `buttons[9]`이며, `LB+A` 활성 edge는
+  즉시 `WAIT_FOR_SIGNAL` 정지 대기에 들어가며 LB는
   이후 놓아도 되지만 A는 계속 유지해야 한다. fresh STOP 5회는 정지 상태를
   확정하고, 같은 STRAIGHT 5회는 Base 출발, 같은 LEFT 5회는 shortcut 직행이다.
   A만 누르면 Base로 즉시 출발하고 STOP을 처음부터 무시한다.
@@ -562,8 +563,8 @@ schema v2 red-3 bundle은 rollback용으로 삭제하거나 덮어쓰지 않는�
 cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-ada-very-fast-speed35-regression-resnet18-8s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl40to225-initial-wait-all5-stop-once-left-direct-search3-classify1-vote-yolo3-45sessions-20260823 use_camera:=true use_gamepad:=true allow_motion:=true
 ```
 
-신호를 기다리려면 LB를 누른 채 A를 누른다. 차량은 정지한 채 fresh 같은 class
-5회를 기다리고 STRAIGHT면 Base, LEFT면 shortcut으로 출발한다. STOP을 처음부터
+신호를 기다리려면 `buttons[9]`인 LB를 누른 채 A를 누른다. 차량은 정지한 채
+fresh 같은 class 5회를 기다리고 STRAIGHT면 Base, LEFT면 shortcut으로 출발한다. STOP을 처음부터
 무시하고 Base로 바로 출발하려면 A만 누른다. A는 주행 내내 유지하며 LB는 활성화
 뒤 놓아도 된다.
 
