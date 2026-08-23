@@ -84,7 +84,7 @@ class SignalInspection:
 
 @dataclass(frozen=True)
 class TrafficClassifierInferencePlan:
-    """Select one YOLO refresh or cached-box CNN classification."""
+    """Select one fresh YOLO pass or an allowed cached-box classification."""
 
     run_detector: bool
     classification_box: DetectionBox | None
@@ -92,7 +92,7 @@ class TrafficClassifierInferencePlan:
 
 
 class TrafficClassifierCadence:
-    """Search every N frames, then classify a cached bbox every frame."""
+    """Schedule fresh detection and optional legacy cached classification."""
 
     def __init__(
         self,
@@ -188,7 +188,7 @@ class TrafficSignalLatchSnapshot:
 
 
 class InitialStopPhase(str, Enum):
-    """Initial signal-wait phase for schema v14/v15 missions."""
+    """Initial signal-wait phase for schema v14..v16 missions."""
 
     NAVIGATION = 'NAVIGATION'
     ARMED = 'ARMED'
@@ -198,7 +198,7 @@ class InitialStopPhase(str, Enum):
 
 @dataclass(frozen=True)
 class InitialStopSignalLatchSnapshot:
-    """Read-only vote state for schema v14/v15 initial signal handling."""
+    """Read-only vote state for schema v14..v16 initial signal handling."""
 
     candidate: SignalClass
     candidate_reads: int
@@ -1055,15 +1055,28 @@ class InitialWaitSignalLatch:
         *,
         bbox_width_min: int,
         bbox_width_max: int,
-        consecutive_reads: int,
+        stop_consecutive_reads: int,
+        left_consecutive_reads: int,
+        straight_consecutive_reads: int,
     ) -> None:
         if bbox_width_min < 1 or bbox_width_max < bbox_width_min:
             raise ValueError('invalid traffic bbox width gate')
-        if consecutive_reads < 1:
-            raise ValueError('signal consecutive reads must be positive')
+        for label, value in (
+            ('stop', stop_consecutive_reads),
+            ('left', left_consecutive_reads),
+            ('straight', straight_consecutive_reads),
+        ):
+            if value < 1:
+                raise ValueError(
+                    f'{label} signal consecutive reads must be positive'
+                )
         self._bbox_width_min = int(bbox_width_min)
         self._bbox_width_max = int(bbox_width_max)
-        self._consecutive_reads = int(consecutive_reads)
+        self._required_reads_by_action = {
+            LampAction.RED: int(stop_consecutive_reads),
+            LampAction.LEFT: int(left_consecutive_reads),
+            LampAction.STRAIGHT: int(straight_consecutive_reads),
+        }
         self.reset()
 
     @property
@@ -1082,7 +1095,7 @@ class InitialWaitSignalLatch:
         return InitialStopSignalLatchSnapshot(
             candidate=self._candidate,
             candidate_reads=self._candidate_reads,
-            required_reads=self._consecutive_reads,
+            required_reads=self._required_reads(self._candidate),
             stop_latched=self.stop_latched,
             phase=self._phase,
             raw_class=self._raw,
@@ -1101,7 +1114,9 @@ class InitialWaitSignalLatch:
         if wait_for_signal and not initial_stop_armed:
             raise ValueError('signal wait requires initial STOP arm')
         if initial_stop_armed and not wait_for_signal:
-            raise ValueError('schema v15 initial STOP must wait before motion')
+            raise ValueError(
+                'initial signal-wait STOP must wait before motion'
+            )
         self._phase = (
             InitialStopPhase.WAIT_FOR_SIGNAL
             if wait_for_signal
@@ -1123,8 +1138,12 @@ class InitialWaitSignalLatch:
 
     def _observe_stopped(self, raw: SignalClass) -> LampAction:
         action = _signal_class_action(raw)
-        self._advance_same_class(raw)
-        if self._candidate_reads < self._consecutive_reads:
+        required_reads = self._required_reads_by_action.get(action)
+        if required_reads is None:
+            self._reset_candidate()
+            return LampAction.RED
+        self._advance_same_class(raw, required_reads=required_reads)
+        if self._candidate_reads < required_reads:
             return LampAction.RED
         if action == LampAction.RED:
             self._phase = InitialStopPhase.STOPPED
@@ -1140,12 +1159,18 @@ class InitialWaitSignalLatch:
         if action not in {LampAction.LEFT, LampAction.STRAIGHT}:
             self._reset_candidate()
             return LampAction.UNKNOWN
-        self._advance_same_class(raw)
-        if self._candidate_reads < self._consecutive_reads:
+        required_reads = self._required_reads_by_action[action]
+        self._advance_same_class(raw, required_reads=required_reads)
+        if self._candidate_reads < required_reads:
             return LampAction.UNKNOWN
         return action
 
-    def _advance_same_class(self, raw: SignalClass) -> None:
+    def _advance_same_class(
+        self,
+        raw: SignalClass,
+        *,
+        required_reads: int,
+    ) -> None:
         if raw == self._candidate:
             self._candidate_reads += 1
         else:
@@ -1153,7 +1178,13 @@ class InitialWaitSignalLatch:
             self._candidate_reads = 1
         self._candidate_reads = min(
             self._candidate_reads,
-            self._consecutive_reads,
+            required_reads,
+        )
+
+    def _required_reads(self, raw: SignalClass) -> int:
+        return self._required_reads_by_action.get(
+            _signal_class_action(raw),
+            0,
         )
 
     def _reset_candidate(self) -> None:

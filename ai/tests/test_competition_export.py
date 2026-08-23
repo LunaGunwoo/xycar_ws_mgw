@@ -34,6 +34,7 @@ from xycar_ai.export_traffic_shortcut_bundle import (
     SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    SPEED35_INITIAL_WAIT_FRESH3_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_INITIAL_WAIT_FRESH5_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     _bundle_manifest,
 )
@@ -434,4 +435,38 @@ def test_human_bbox_traffic_bundle_manifests_preserve_models_and_version_votes(
     assert initial_wait_fresh5['mission']['red_cancels_shortcut'] is False
     assert 'red_stop_yolo_missing_release_frames' not in (
         initial_wait_fresh5['mission']
+    )
+
+    initial_wait_fresh3 = _bundle_manifest(
+        artifact_id=(
+            SPEED35_INITIAL_WAIT_FRESH3_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+        schema_version=16,
+        consecutive_signal_reads_by_action=(5, 3, 3),
+        base_artifact=base,
+        shortcut_artifact=shortcut,
+        shortcut_artifact_id=EXPANDED_SHORTCUT_ID,
+        traffic_classifier=tmp_path / 'classifier.onnx',
+    )
+    assert initial_wait_fresh3['detector'] == {
+        **adaptive_detector,
+        'classification_every_n_frames_after_detection': 3,
+        'reuse_detected_bbox_between_yolo_frames': False,
+    }
+    assert initial_wait_fresh3['signal_vote'] == {
+        **initial_wait_fresh5['signal_vote'],
+        'consecutive_reads_by_raw_class': {
+            'STOP': 5,
+            'STRAIGHT': 3,
+            'LEFT': 3,
+        },
+        'cached_classifier_behavior': 'disabled',
+    }
+    assert initial_wait_fresh3['mission']['initial_stop'] == {
+        **initial_wait_fresh5['mission']['initial_stop'],
+        'clear_consecutive_reads': 3,
+    }
+    assert initial_wait_fresh3['mission']['base_speed_cap'] == 35.0
+    assert 'red_stop_yolo_missing_release_frames' not in (
+        initial_wait_fresh3['mission']
     )

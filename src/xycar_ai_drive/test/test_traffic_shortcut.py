@@ -60,6 +60,7 @@ from xycar_ai_drive.traffic_shortcut_artifact import (
     EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    EXPECTED_SPEED35_INITIAL_WAIT_FRESH3_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_INITIAL_WAIT_FRESH5_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID,
@@ -377,6 +378,31 @@ def test_classifier_cadence_searches_every_three_then_classifies_every_frame():
     assert cadence.plan(frame_sequence=9).run_detector
 
 
+def test_classifier_cadence_runs_fresh_yolo_cnn_only_every_three_frames():
+    cadence = TrafficClassifierCadence(
+        detector_every_n_frames=3,
+        classification_every_n_frames_after_detection=3,
+        reuse_detected_bbox_between_yolo_frames=False,
+    )
+    box = DetectionBox(10.0, 20.0, 100.0, 40.0, 0.9)
+
+    for sequence in (1, 2):
+        plan = cadence.plan(frame_sequence=sequence)
+        assert not plan.run_detector
+        assert plan.classification_box is None
+    first = cadence.plan(frame_sequence=3)
+    assert first.run_detector
+    assert first.detector_frame_span == 3
+    cadence.observe_detection(frame_sequence=3, box=box)
+    for sequence in (4, 5):
+        plan = cadence.plan(frame_sequence=sequence)
+        assert not plan.run_detector
+        assert plan.classification_box is None
+    second = cadence.plan(frame_sequence=6)
+    assert second.run_detector
+    assert second.detector_frame_span == 3
+
+
 def test_action_classifier_stop_maps_to_latched_red():
     latch = TrafficSignalLatch(
         bbox_width_min=40,
@@ -609,11 +635,13 @@ def test_initial_stop_once_fsm_arms_waits_and_ignores_later_red():
     ).state == MissionState.SWITCH_TO_SHORTCUT
 
 
-def test_initial_wait_latch_votes_only_fresh_same_class_five_times():
+def test_initial_wait_latch_uses_fresh_stop5_and_go3_votes():
     latch = InitialWaitSignalLatch(
         bbox_width_min=40,
         bbox_width_max=225,
-        consecutive_reads=5,
+        stop_consecutive_reads=5,
+        left_consecutive_reads=3,
+        straight_consecutive_reads=3,
     )
     latch.reset(initial_stop_armed=True, wait_for_signal=True)
     left = _signal(SignalClass.LEFT)
@@ -648,16 +676,25 @@ def test_initial_wait_latch_votes_only_fresh_same_class_five_times():
     assert latch.snapshot.phase == InitialStopPhase.WAIT_FOR_SIGNAL
     assert latch.observe(stop) == LampAction.RED
     assert latch.snapshot.phase == InitialStopPhase.STOPPED
-    for _ in range(4):
+    for _ in range(2):
         assert latch.observe(left) == LampAction.RED
     assert latch.observe(left) == LampAction.LEFT
     assert latch.snapshot.phase == InitialStopPhase.NAVIGATION
 
     assert latch.observe(stop) == LampAction.UNKNOWN
     assert latch.snapshot.stop_ignored
-    for _ in range(4):
+    for _ in range(2):
         assert latch.observe(straight) == LampAction.UNKNOWN
     assert latch.observe(straight) == LampAction.STRAIGHT
+
+    latch.reset(initial_stop_armed=True, wait_for_signal=True)
+    for _ in range(2):
+        assert latch.observe(straight) == LampAction.RED
+    assert latch.observe(straight) == LampAction.STRAIGHT
+    latch.reset(initial_stop_armed=True, wait_for_signal=True)
+    for _ in range(2):
+        assert latch.observe(left) == LampAction.RED
+    assert latch.observe(left) == LampAction.LEFT
 
 
 def test_initial_wait_fsm_stops_then_routes_confirmed_left_directly():
@@ -1426,6 +1463,34 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
             EXPECTED_SPEED35_INITIAL_WAIT_FRESH5_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
         ),
     ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    initial_wait_fresh3_vote = {
+        **initial_wait_fresh5_vote,
+        'consecutive_reads_by_raw_class': {
+            'STOP': 5,
+            'STRAIGHT': 3,
+            'LEFT': 3,
+        },
+        'cached_classifier_behavior': 'disabled',
+    }
+    assert _load_signal_vote_contract(
+        {'signal_vote': initial_wait_fresh3_vote},
+        schema_version=16,
+        artifact_id=(
+            EXPECTED_SPEED35_INITIAL_WAIT_FRESH3_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == (5, 3, 3)
+    assert _expected_shortcut_artifact_id(
+        schema_version=16,
+        artifact_id=(
+            EXPECTED_SPEED35_INITIAL_WAIT_FRESH3_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert _expected_base_artifact_id(
+        schema_version=16,
+        artifact_id=(
+            EXPECTED_SPEED35_INITIAL_WAIT_FRESH3_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
     with pytest.raises(ArtifactContractError, match='signal vote'):
         _load_signal_vote_contract(
             {
@@ -1542,7 +1607,9 @@ def test_initial_wait_terminal_events_ignore_cached_vote_updates():
     latch = InitialWaitSignalLatch(
         bbox_width_min=40,
         bbox_width_max=225,
-        consecutive_reads=5,
+        stop_consecutive_reads=5,
+        left_consecutive_reads=5,
+        straight_consecutive_reads=5,
     )
     latch.reset(initial_stop_armed=True, wait_for_signal=True)
     fsm = TrafficShortcutFsm(
@@ -1921,7 +1988,7 @@ def test_integrated_node_maps_sdl_lb_button_nine_to_initial_wait():
 
     node = SimpleNamespace(
         require_gamepad_hold=True,
-        bundle=SimpleNamespace(schema_version=15),
+        bundle=SimpleNamespace(schema_version=16),
         a_button_index=0,
         initial_stop_arm_button_index=9,
         _lock=threading.Lock(),
@@ -2096,18 +2163,21 @@ def test_traffic_shortcut_monitor_is_passive_and_has_no_inference_runtime():
 
 
 @pytest.mark.parametrize(
-    ('schema_version', 'votes'),
+    ('schema_version', 'votes', 'classification_every', 'reuse_bbox'),
     [
-        (11, (30, 30, 30)),
-        (12, (10, 30, 30)),
-        (13, (15, 15, 15)),
-        (14, (15, 15, 15)),
-        (15, (5, 5, 5)),
+        (11, (30, 30, 30), 1, True),
+        (12, (10, 30, 30), 1, True),
+        (13, (15, 15, 15), 1, True),
+        (14, (15, 15, 15), 1, True),
+        (15, (5, 5, 5), 1, True),
+        (16, (5, 3, 3), 3, False),
     ],
 )
 def test_traffic_light_viewer_accepts_speed35_bundle_contracts(
     schema_version,
     votes,
+    classification_every,
+    reuse_bbox,
 ):
     node = SimpleNamespace(
         bundle=SimpleNamespace(
@@ -2117,8 +2187,10 @@ def test_traffic_light_viewer_accepts_speed35_bundle_contracts(
                 bbox_width_min=40,
                 bbox_width_max=225,
                 inference_every_n_frames=3,
-                classification_every_n_frames_after_detection=1,
-                reuse_detected_bbox_between_yolo_frames=True,
+                classification_every_n_frames_after_detection=(
+                    classification_every
+                ),
+                reuse_detected_bbox_between_yolo_frames=reuse_bbox,
                 red_consecutive_reads=votes[0],
                 left_consecutive_reads=votes[1],
                 straight_consecutive_reads=votes[2],
