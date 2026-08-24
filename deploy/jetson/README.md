@@ -124,6 +124,9 @@ discovery endpoint는 보여도 host 사용자의 ROS 2 payload가 ROS 1으로 �
 시작한다. 매 실행 직전 사용자 승인을 받고 바퀴 지지, 전원 차단 수단, Ctrl+C
 정지 경로와 경쟁 `/xycar_motor` publisher 부재를 확인한다. 둘 다 boot service로
 등록하지 않는다.
+`motor` 종료 시 zero publish는 각 시도를 1초로 제한한다. ROS 1 graph가 이미
+끊겼거나 subscriber discovery가 멈춰도 cleanup이 `rostopic pub -1`에서 무기한
+대기하지 않고 bridge와 motor container를 정지·제거한다.
 
 ```bash
 motor

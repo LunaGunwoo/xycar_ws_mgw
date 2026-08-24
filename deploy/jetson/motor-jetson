@@ -13,9 +13,10 @@ cleanup() {
     set +e
     if docker ps --format '{{.Names}}' | grep -Fxq "${MOTOR_CONTAINER}"; then
         for _ in 1 2 3 4 5; do
-            docker exec "${MOTOR_CONTAINER}" bash -lc \
+            timeout --signal=TERM --kill-after=0.5s 1s \
+                docker exec "${MOTOR_CONTAINER}" bash -lc \
                 "source /opt/ros/noetic/setup.bash; rostopic pub -1 /xycar_motor std_msgs/Float32MultiArray 'data: [0.0, 0.0]'" \
-                >/dev/null 2>&1
+                >/dev/null 2>&1 || true
             sleep 0.05
         done
     fi
