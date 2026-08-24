@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 
 from xycar_ai_drive.artifact import (
+    ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE,
     ANGLE_REGRESSION_FIXED_SPEED_PREDICTION_MODE,
     CATEGORICAL_PREDICTION_MODE,
     COMPACT_CONTROL_ENCODING,
@@ -22,6 +23,7 @@ from xycar_ai_drive.control import (
     DriveCommand,
     decode_class_ids,
     decode_compact_output_ids,
+    decode_hybrid_outputs,
     decode_regression_outputs,
 )
 from xycar_ai_drive.road_warp import warp_road_image
@@ -204,6 +206,19 @@ class TorchScriptPolicy:
                         speed_max=self.artifact.speed_output_max,
                     )
                     angle_class_id = speed_class_id = None
+                elif (
+                    self.artifact.prediction_mode
+                    == ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE
+                ):
+                    speed_class_id = int(
+                        self._torch.argmax(speed_logits, dim=1).item()
+                    )
+                    command = decode_hybrid_outputs(
+                        float(angle_logits.item()),
+                        speed_class_id,
+                        speed_class_commands=self.artifact.speed_class_commands,
+                    )
+                    angle_class_id = None
                 else:
                     angle_class_id = int(
                         self._torch.argmax(angle_logits, dim=1).item()
@@ -335,6 +350,18 @@ class TorchScriptPolicy:
                     float(angle_logits.item()),
                     float(speed_logits.item()),
                     speed_max=self.artifact.speed_output_max,
+                )
+            except ValueError as exc:
+                raise PolicyRuntimeError(str(exc)) from exc
+        elif (
+            self.artifact.prediction_mode
+            == ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE
+        ):
+            try:
+                decode_hybrid_outputs(
+                    float(angle_logits.item()),
+                    int(self._torch.argmax(speed_logits, dim=1).item()),
+                    speed_class_commands=self.artifact.speed_class_commands,
                 )
             except ValueError as exc:
                 raise PolicyRuntimeError(str(exc)) from exc

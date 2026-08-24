@@ -48,6 +48,7 @@ class _TinyARPolicy(nn.Module):
         control_encoding: str = "legacy_command_201",
         prediction_mode: str = "categorical",
         speed_output_max: float = 30.0,
+        speed_class_commands: tuple[int, ...] = (),
     ) -> None:
         super().__init__()
         del (
@@ -55,7 +56,6 @@ class _TinyARPolicy(nn.Module):
             pretrained,
             image_size,
             use_control_type_embedding,
-            speed_output_max,
         )
         self.history_frames = history_frames
         compact = control_encoding == "driver_compact_v2"
@@ -63,6 +63,11 @@ class _TinyARPolicy(nn.Module):
         if prediction_mode == "continuous_regression":
             self.angle_bias = nn.Parameter(torch.zeros(1))
             self.speed_bias = nn.Parameter(torch.ones(1))
+        elif prediction_mode == "angle_regression_speed_classification":
+            assert speed_output_max == 35.0
+            assert speed_class_commands == (20, 35)
+            self.angle_bias = nn.Parameter(torch.zeros(1))
+            self.speed_bias = nn.Parameter(torch.tensor([0.0, 1.0]))
         else:
             self.angle_bias = nn.Parameter(torch.zeros(101 if compact else 201))
             self.speed_bias = nn.Parameter(torch.ones(31 if compact else 201))
@@ -78,6 +83,11 @@ class _TinyARPolicy(nn.Module):
             return {
                 "angle_driver": self.angle_bias.expand(batch_size, -1),
                 "speed": self.speed_bias.expand(batch_size, -1) * 15.0,
+            }
+        if self.prediction_mode == "angle_regression_speed_classification":
+            return {
+                "angle_driver": self.angle_bias.expand(batch_size, -1),
+                "speed_logits": self.speed_bias.expand(batch_size, -1),
             }
         return {
             "angle_logits": self.angle_bias.expand(batch_size, -1)
@@ -652,3 +662,112 @@ def test_export_regression_checkpoint_writes_schema_v6(
         torch.tensor([[[50, 85]] * 4], dtype=torch.long),
     )
     assert 0.0 <= speed_35.item() <= 35.0
+
+
+def test_export_hybrid_checkpoint_writes_schema_v8(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(
+        export_module,
+        "AutoregressiveControlTokenViTPolicy",
+        _TinyARPolicy,
+    )
+    checkpoint_path = tmp_path / "hybrid.pt"
+    model = _TinyARPolicy(
+        model_name="tiny",
+        pretrained=False,
+        image_size=16,
+        history_frames=4,
+        use_control_type_embedding=False,
+        control_encoding="driver_compact_v2",
+        prediction_mode="angle_regression_speed_classification",
+        speed_output_max=35.0,
+        speed_class_commands=(20, 35),
+    )
+    label_contract = {
+        "schema_version": 5,
+        "control_encoding": "driver_compact_v2",
+        "prediction_mode": "angle_regression_speed_classification",
+        "output_shapes": {"angle_driver": [1, 1], "speed_logits": [1, 2]},
+        "angle": {
+            "unit": "driver_angle",
+            "range": [-50.0, 50.0],
+            "runtime_normalized_mapping": "angle_driver * 2",
+        },
+        "speed": {
+            "num_classes": 2,
+            "class_commands": [20, 35],
+            "target_mapping": "nearest_class_command",
+            "decode_mapping": "class_commands[argmax(speed_logits)]",
+        },
+        "history": {
+            "initialization": "canonical_initial_command",
+            "initial_command": [0, 35],
+            "initial_token_ids": [50, 85],
+            "actual_speed_token_range": [50, 85],
+        },
+    }
+    torch.save(
+        {
+            "epoch": 2,
+            "config": {
+                "model": {
+                    "name": "tiny",
+                    "image_size": 16,
+                    "architecture": "ar_control_tokens",
+                    "control_encoding": "driver_compact_v2",
+                    "prediction_mode": "angle_regression_speed_classification",
+                    "history_frames": 4,
+                    "control_token_type_embedding": False,
+                    "history_initial_angle": 0,
+                    "history_initial_speed": 35,
+                    "speed_output_max": 35.0,
+                    "speed_class_commands": [20, 35],
+                },
+                "data": {"required_steering_contract": "normalized_percent_v2"},
+            },
+            "model_state": model.state_dict(),
+            "preprocessing": {
+                "geometry": "full_frame_bicubic_resize",
+                "image_size": 16,
+                "mean": [0.5, 0.5, 0.5],
+                "std": [0.5, 0.5, 0.5],
+            },
+            "label_contract": label_contract,
+            "training_objective": {
+                "mode": "angle_regression_speed_classification",
+                "speed_output_trained": True,
+                "speed_loss_weight": 0.5,
+                "validation_speed_mae_weight": 0.05,
+                "loss": "smooth_l1_angle_cross_entropy_speed",
+                "angle_normalization": 50.0,
+                "angle_beta": 0.1,
+                "speed_class_commands": [20, 35],
+                "speed_target_mapping": "nearest_class_command",
+            },
+        },
+        checkpoint_path,
+    )
+
+    artifact = export_checkpoint(
+        checkpoint_path=checkpoint_path,
+        artifact_id="hybrid-policy",
+        output_root=tmp_path / "models",
+        require_schema_version=8,
+    )
+    verify_artifact(artifact, require_schema_version=8)
+    manifest = yaml.safe_load((artifact / "manifest.yaml").read_text())
+    assert manifest["schema_version"] == 8
+    assert manifest["model"]["prediction_mode"] == (
+        "angle_regression_speed_classification"
+    )
+    assert manifest["model"]["speed_class_commands"] == [20, 35]
+    assert manifest["model"]["output"]["order"] == [
+        "angle_driver",
+        "speed_logits",
+    ]
+    model_ts = torch.jit.load(str(artifact / "model.ts"), map_location="cpu")
+    angle, speed_logits = model_ts(
+        torch.zeros(1, 3, 16, 16),
+        torch.tensor([[[50, 85]] * 4], dtype=torch.long),
+    )
+    assert angle.item() == pytest.approx(0.0)
+    assert int(speed_logits.argmax(dim=1).item()) == 1

@@ -613,6 +613,27 @@ trace, reload, 범위 및 checksum을 모두 확인한다. 기존 schema v1/v2/v
 함께 기록한다. 기본 실차 명령은 항상 위 schema v6 artifact와
 `speed_cap:=25.0`을 명시한다.
 
+### Angle 회귀 + binary speed 분류
+
+route-specific shortcut처럼 실행 속도가 두 명령으로 제한되는 정책은
+`model.prediction_mode: angle_regression_speed_classification`을 사용한다. 입력은
+compact AR4 `history_token_ids [1,4,2]`이고 출력은 `angle_driver [1,1]`와
+`speed_logits [1,2]`다. angle은 기존 회귀와 같이 `tanh × 50`을 학습하고 runtime이
+`×2`로 normalized steering을 복원한다. speed는 manifest의
+`speed_class_commands: [20, 35]`를 `argmax` 결과에 대응시킨다. raw CSV는 고치지
+않으며 두 명령 밖의 값도 학습 시 가까운 명령으로만 매핑한다.
+
+연속 회귀 parent에서 초기화할 때 backbone, AR embedding/position과 angle 회귀
+head는 strict하게 이어받고 `speed_regression_head`만 버린다. 새
+`LayerNorm + Linear(2)` speed head는 `optimizer.speed_head_learning_rate`의 독립
+AdamW group으로 시작한다. 학습 loss는 normalized angle SmoothL1과 speed CE의
+합이며 sequence rollout은 decoded speed `20` 또는 `35`를 history token으로 넣는다.
+schema v8 artifact는 `[angle_driver, speed_logits]`, class command, speed maximum 35,
+canonical `(0,35)×4` 초기 history와 external executed-history를 함께 검증한다. 실제
+runtime history에는 예측 자체가 아니라 speed cap까지 적용해 발행한 명령만 들어간다.
+traffic shortcut bundle validator는 이 generic schema v8을 자동으로 Base나 shortcut
+artifact에 포함하지 않는다.
+
 ### 기존 AR control token 재현 (rollback 전용)
 
 이 절은 과거 결과 재현과 rollback 검증에만 사용한다. 새 stateless dataset과

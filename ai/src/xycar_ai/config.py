@@ -21,7 +21,11 @@ from xycar_ai.steering_contract import validate_required_contract_name
 CONFIG_SCHEMA_VERSIONS = {1, 2, 3}
 CLASS_WEIGHTING_MODES = {"none", "sqrt_inverse_frequency"}
 MODEL_ARCHITECTURES = {"task_tokens", "ar_control_tokens"}
-PREDICTION_MODES = {"categorical", "continuous_regression"}
+PREDICTION_MODES = {
+    "categorical",
+    "continuous_regression",
+    "angle_regression_speed_classification",
+}
 HISTORY_UPDATE_MODES = {"predicted_argmax", "externally_executed_commands"}
 HISTORY_TRAINING_SOURCES = {
     "runtime_default",
@@ -46,6 +50,7 @@ class ModelConfig:
     history_update: str = "predicted_argmax"
     prediction_mode: str = "categorical"
     speed_output_max: float = float(SPEED_MAX)
+    speed_class_commands: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -104,6 +109,7 @@ class OptimizerConfig:
     learning_rate: float
     weight_decay: float
     backbone_learning_rate_multiplier: float = 1.0
+    speed_head_learning_rate: float | None = None
 
 
 @dataclass(frozen=True)
@@ -220,6 +226,7 @@ def load_train_config(path: str | Path) -> TrainConfig:
             "history_update",
             "prediction_mode",
             "speed_output_max",
+            "speed_class_commands",
         },
     )
     _expect_data_keys(data_payload, schema_version=schema_version)
@@ -244,7 +251,7 @@ def load_train_config(path: str | Path) -> TrainConfig:
         optimizer_payload,
         {"name", "learning_rate", "weight_decay"},
         "optimizer",
-        optional={"backbone_learning_rate_multiplier"},
+        optional={"backbone_learning_rate_multiplier", "speed_head_learning_rate"},
     )
     _expect_keys(scheduler_payload, {"name", "warmup_epochs"}, "scheduler")
     _expect_keys(
@@ -336,6 +343,11 @@ def load_train_config(path: str | Path) -> TrainConfig:
                 _number(model_payload, "speed_output_max")
                 if "speed_output_max" in model_payload
                 else float(SPEED_MAX)
+            ),
+            speed_class_commands=(
+                _integer_tuple(model_payload, "speed_class_commands")
+                if "speed_class_commands" in model_payload
+                else ()
             ),
         ),
         data=DataConfig(
@@ -477,6 +489,11 @@ def load_train_config(path: str | Path) -> TrainConfig:
                 if "backbone_learning_rate_multiplier" in optimizer_payload
                 else 1.0
             ),
+            speed_head_learning_rate=(
+                _number(optimizer_payload, "speed_head_learning_rate")
+                if "speed_head_learning_rate" in optimizer_payload
+                else None
+            ),
         ),
         scheduler=SchedulerConfig(
             name=_string(scheduler_payload, "name"),
@@ -575,15 +592,28 @@ def _validate(config: TrainConfig) -> None:
         or not 0 < config.model.speed_output_max <= NUMERIC_TOKEN_MAX
     ):
         raise ValueError(
-            "model.speed_output_max must be a whole number in "
-            f"[1, {NUMERIC_TOKEN_MAX}]"
+            f"model.speed_output_max must be a whole number in [1, {NUMERIC_TOKEN_MAX}]"
         )
     if (
-        config.model.prediction_mode != "continuous_regression"
+        config.model.prediction_mode == "categorical"
         and config.model.speed_output_max != SPEED_MAX
     ):
         raise ValueError(
             f"categorical models require model.speed_output_max={SPEED_MAX}"
+        )
+    hybrid_speed = (
+        config.model.prediction_mode == "angle_regression_speed_classification"
+    )
+    if hybrid_speed:
+        if config.model.speed_output_max != 35:
+            raise ValueError("hybrid speed classification requires speed_output_max=35")
+        if config.model.speed_class_commands != (20, 35):
+            raise ValueError(
+                "hybrid speed classification requires speed_class_commands=[20, 35]"
+            )
+    elif config.model.speed_class_commands:
+        raise ValueError(
+            "speed_class_commands is only valid for hybrid speed classification"
         )
     if config.model.control_encoding not in CONTROL_ENCODINGS:
         raise ValueError("unsupported model.control_encoding")
@@ -595,7 +625,7 @@ def _validate(config: TrainConfig) -> None:
         raise ValueError("model.history_initial_speed must be in [-100, 100]")
     if config.model.architecture == "task_tokens":
         if config.model.prediction_mode != "categorical":
-            raise ValueError("continuous regression requires ar_control_tokens")
+            raise ValueError("non-categorical prediction requires ar_control_tokens")
         if config.model.control_encoding != LEGACY_CONTROL_ENCODING:
             raise ValueError("task_tokens model requires legacy control encoding")
         if config.model.history_frames != 0:
@@ -630,10 +660,13 @@ def _validate(config: TrainConfig) -> None:
                 f"[0, {config.model.speed_output_max:g}]"
             )
         if (
-            config.model.prediction_mode == "continuous_regression"
+            config.model.prediction_mode
+            in {"continuous_regression", "angle_regression_speed_classification"}
             and config.model.control_encoding != COMPACT_CONTROL_ENCODING
         ):
-            raise ValueError("continuous regression requires compact control encoding")
+            raise ValueError(
+                "angle regression predictions require compact control encoding"
+            )
     if config.data.num_workers < 0:
         raise ValueError("data.num_workers must be >= 0")
     if config.data.sources:
@@ -784,6 +817,13 @@ def _validate(config: TrainConfig) -> None:
         raise ValueError("optimizer.weight_decay must be >= 0")
     if optimizer.backbone_learning_rate_multiplier <= 0:
         raise ValueError("optimizer.backbone_learning_rate_multiplier must be > 0")
+    if optimizer.speed_head_learning_rate is not None:
+        if optimizer.speed_head_learning_rate <= 0:
+            raise ValueError("optimizer.speed_head_learning_rate must be > 0")
+        if not hybrid_speed:
+            raise ValueError(
+                "optimizer.speed_head_learning_rate requires hybrid speed classification"
+            )
     scheduler = config.scheduler
     if scheduler.name != "cosine":
         raise ValueError("scheduler.name must be cosine")
@@ -930,7 +970,23 @@ def _validate(config: TrainConfig) -> None:
                 "continuous regression disables label smoothing, class weighting, and EMD"
             )
         if training.sequence_rollout_fixed_speed is not None:
-            raise ValueError("continuous regression must train the predicted speed rollout")
+            raise ValueError(
+                "continuous regression must train the predicted speed rollout"
+            )
+    elif hybrid_speed:
+        if (
+            loss.angle_label_smoothing != 0
+            or loss.angle_class_weighting != "none"
+            or loss.emd_loss_weight != 0
+        ):
+            raise ValueError(
+                "hybrid angle regression disables angle label smoothing, angle class "
+                "weighting, and EMD"
+            )
+        if training.sequence_rollout_fixed_speed is not None:
+            raise ValueError(
+                "hybrid speed classification must train the predicted speed rollout"
+            )
 
 
 def _load_yaml_mapping(path: Path) -> dict[str, object]:
@@ -1150,6 +1206,15 @@ def _string_tuple(payload: Mapping[str, object], key: str) -> tuple[str, ...]:
         raise ValueError(f"{key} must be a non-empty list")
     if not all(isinstance(item, str) and item for item in value):
         raise ValueError(f"{key} must contain only non-empty strings")
+    return tuple(value)
+
+
+def _integer_tuple(payload: Mapping[str, object], key: str) -> tuple[int, ...]:
+    value = payload.get(key)
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{key} must be a non-empty list")
+    if not all(isinstance(item, int) and not isinstance(item, bool) for item in value):
+        raise ValueError(f"{key} must contain only integers")
     return tuple(value)
 
 

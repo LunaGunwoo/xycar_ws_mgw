@@ -16,6 +16,7 @@ from xycar_ai.train_front_cam_policy import (
     build_label_contract,
     build_preprocessing_contract,
     build_training_objective_contract,
+    build_optimizer,
     class_weights,
     early_stopping_triggered,
     initialize_model_weights,
@@ -134,6 +135,23 @@ def test_regression_rollout_rounds_and_detaches_both_history_values():
     assert speed_35_pair.tolist() == [[50, 85]]
 
 
+def test_hybrid_rollout_decodes_binary_speed_commands():
+    from xycar_ai.train_front_cam_policy import predicted_executed_class_pair
+
+    pair = predicted_executed_class_pair(
+        {
+            "angle_driver": torch.tensor([[-49.6], [4.6]], requires_grad=True),
+            "speed_logits": torch.tensor([[10.0, -10.0], [-10.0, 10.0]]),
+        },
+        control_encoding="driver_compact_v2",
+        speed_max=35.0,
+        speed_class_commands=(20, 35),
+    )
+
+    assert pair.tolist() == [[0, 70], [55, 85]]
+    assert not pair.requires_grad
+
+
 def test_regression_config_and_normalized_smooth_l1_loss(tmp_path: Path):
     config_path = _write_config(
         tmp_path,
@@ -204,6 +222,101 @@ def test_regression_config_and_normalized_smooth_l1_loss(tmp_path: Path):
     assert build_training_objective_contract(config)["speed_normalization"] == 35.0
 
 
+def test_hybrid_config_loss_contract_and_optimizer_groups(tmp_path: Path):
+    config_path = _write_config(
+        tmp_path,
+        tmp_path / "config" / "split.yaml",
+        epochs=20,
+        autoregressive=True,
+    )
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["model"].update(
+        {
+            "control_encoding": "driver_compact_v2",
+            "history_update": "externally_executed_commands",
+            "history_initial_speed": 35,
+            "prediction_mode": "angle_regression_speed_classification",
+            "speed_output_max": 35.0,
+            "speed_class_commands": [20, 35],
+        }
+    )
+    payload["optimizer"].update(
+        {
+            "learning_rate": 8e-5,
+            "backbone_learning_rate_multiplier": 0.1,
+            "speed_head_learning_rate": 3e-4,
+        }
+    )
+    payload["scheduler"]["warmup_epochs"] = 2
+    payload["training"].update(
+        {
+            "history_training_source": "canonical_initial_command",
+            "validation_speed_mae_weight": 0.05,
+        }
+    )
+    payload["loss"].update(
+        {
+            "angle_label_smoothing": 0.0,
+            "speed_label_smoothing": 0.0,
+            "angle_class_weighting": "none",
+            "speed_class_weighting": "none",
+            "emd_loss_weight": 0.0,
+            "angle_regression_beta": 0.1,
+        }
+    )
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    config = load_train_config(config_path)
+    total, angle, speed, emd = compute_policy_losses(
+        outputs={
+            "angle_driver": torch.tensor([[0.0], [0.0]]),
+            "speed_logits": torch.tensor([[10.0, -10.0], [-10.0, 10.0]]),
+        },
+        batch={
+            "angle_raw": torch.tensor([0.0, 0.0]),
+            "speed_raw": torch.tensor([24.01944, 32.688302]),
+        },
+        config=config,
+        angle_criterion=torch.nn.SmoothL1Loss(beta=0.1),
+        speed_criterion=torch.nn.CrossEntropyLoss(),
+    )
+
+    assert angle.item() == 0.0
+    assert speed.item() < 1e-6
+    assert total.item() < 1e-6
+    assert emd.item() == 0.0
+    contract = build_label_contract(config)
+    assert contract["output_shapes"] == {
+        "angle_driver": [1, 1],
+        "speed_logits": [1, 2],
+    }
+    assert contract["speed"]["class_commands"] == [20, 35]
+    assert contract["history"]["initial_token_ids"] == [50, 85]
+    objective = build_training_objective_contract(config)
+    assert objective["mode"] == "angle_regression_speed_classification"
+
+    from xycar_ai.front_cam_policy_model import AutoregressiveControlTokenViTPolicy
+
+    model = AutoregressiveControlTokenViTPolicy(
+        model_name=config.model.name,
+        pretrained=False,
+        image_size=32,
+        history_frames=4,
+        control_encoding=config.model.control_encoding,
+        prediction_mode=config.model.prediction_mode,
+        speed_output_max=config.model.speed_output_max,
+        speed_class_commands=config.model.speed_class_commands,
+    )
+    optimizer = build_optimizer(model, config)
+    assert [group["name"] for group in optimizer.param_groups] == [
+        "backbone",
+        "policy",
+        "speed_head",
+    ]
+    assert [group["lr"] for group in optimizer.param_groups] == pytest.approx(
+        [8e-6, 8e-5, 3e-4]
+    )
+
+
 def test_ab_configs_only_change_flip_and_run_name():
     project_root = Path(__file__).parents[1]
     candidate = yaml.safe_load(
@@ -270,6 +383,103 @@ def test_initialize_from_loads_model_weights_only(tmp_path: Path):
     assert metadata["source_speed_output_max"] == 30.0
     assert metadata["target_speed_output_max"] == 30.0
     assert len(metadata["checkpoint_sha256"]) == 64
+
+
+def test_initialize_regression_parent_preserves_angle_and_replaces_speed_head(
+    tmp_path: Path,
+):
+    config_path = _write_config(
+        tmp_path,
+        tmp_path / "config" / "split.yaml",
+        epochs=1,
+        autoregressive=True,
+    )
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["model"].update(
+        {
+            "control_encoding": "driver_compact_v2",
+            "history_update": "externally_executed_commands",
+            "history_initial_speed": 35,
+            "prediction_mode": "angle_regression_speed_classification",
+            "speed_output_max": 35.0,
+            "speed_class_commands": [20, 35],
+        }
+    )
+    payload["training"]["history_training_source"] = "canonical_initial_command"
+    payload["loss"].update(
+        {
+            "angle_label_smoothing": 0.0,
+            "speed_label_smoothing": 0.0,
+            "angle_class_weighting": "none",
+            "speed_class_weighting": "none",
+            "emd_loss_weight": 0.0,
+        }
+    )
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    config = load_train_config(config_path)
+    parent_config = copy.deepcopy(config)
+    object.__setattr__(
+        parent_config.model,
+        "prediction_mode",
+        "continuous_regression",
+    )
+    object.__setattr__(parent_config.model, "speed_class_commands", ())
+
+    from xycar_ai.front_cam_policy_model import AutoregressiveControlTokenViTPolicy
+
+    common = {
+        "model_name": config.model.name,
+        "pretrained": False,
+        "image_size": 32,
+        "history_frames": 4,
+        "control_encoding": "driver_compact_v2",
+        "speed_output_max": 35.0,
+    }
+    parent = AutoregressiveControlTokenViTPolicy(
+        **common,
+        prediction_mode="continuous_regression",
+    )
+    candidate = AutoregressiveControlTokenViTPolicy(
+        **common,
+        prediction_mode="angle_regression_speed_classification",
+        speed_class_commands=(20, 35),
+    )
+    with torch.no_grad():
+        parent.angle_regression_head[-1].bias.fill_(7.0)
+    original_speed_head = {
+        key: value.clone()
+        for key, value in candidate.speed_classification_head.state_dict().items()
+    }
+    checkpoint_path = tmp_path / "regression-parent.pt"
+    torch.save(
+        {
+            "schema_version": 1,
+            "epoch": 3,
+            "model_name": config.model.name,
+            "config": parent_config.serializable(),
+            "model_state": parent.state_dict(),
+        },
+        checkpoint_path,
+    )
+
+    metadata = initialize_model_weights(
+        model=candidate,
+        checkpoint=str(checkpoint_path),
+        config=config,
+        device=torch.device("cpu"),
+    )
+
+    assert torch.equal(
+        candidate.angle_regression_head[-1].bias,
+        parent.angle_regression_head[-1].bias,
+    )
+    assert all(
+        torch.equal(value, original_speed_head[key])
+        for key, value in candidate.speed_classification_head.state_dict().items()
+    )
+    assert metadata is not None
+    assert metadata["mode"] == "shared_regression_to_hybrid_speed_head"
+    assert metadata["target_speed_class_commands"] == [20, 35]
 
 
 def test_small_config_uses_minimum_speed_and_flip():

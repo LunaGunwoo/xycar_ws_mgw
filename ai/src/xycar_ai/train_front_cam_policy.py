@@ -62,6 +62,7 @@ from xycar_ai.front_cam_policy_metrics import (
     selection_score,
 )
 from xycar_ai.front_cam_policy_model import (
+    ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE,
     AR_CONTROL_TOKEN_ARCHITECTURE,
     CATEGORICAL_PREDICTION_MODE,
     CONTINUOUS_REGRESSION_PREDICTION_MODE,
@@ -200,6 +201,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         control_encoding=config.model.control_encoding,
         prediction_mode=config.model.prediction_mode,
         speed_output_max=config.model.speed_output_max,
+        speed_class_commands=config.model.speed_class_commands,
     ).to(device)
     initialization = initialize_model_weights(
         model=model,
@@ -224,6 +226,21 @@ def main(argv: Iterable[str] | None = None) -> int:
     if config.model.prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE:
         angle_criterion = nn.SmoothL1Loss(beta=config.loss.angle_regression_beta)
         speed_criterion = nn.SmoothL1Loss(beta=config.loss.speed_regression_beta)
+    elif (
+        config.model.prediction_mode
+        == ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE
+    ):
+        speed_weights = hybrid_speed_class_weights(
+            train_samples,
+            mode=config.loss.speed_class_weighting,
+            config=config,
+            device=device,
+        )
+        angle_criterion = nn.SmoothL1Loss(beta=config.loss.angle_regression_beta)
+        speed_criterion = nn.CrossEntropyLoss(
+            weight=speed_weights,
+            label_smoothing=config.loss.speed_label_smoothing,
+        )
     else:
         angle_weights = class_weights(
             train_samples,
@@ -495,6 +512,11 @@ def main(argv: Iterable[str] | None = None) -> int:
 def build_label_contract(config: TrainConfig) -> dict[str, object]:
     if config.model.prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE:
         return _build_regression_label_contract(config)
+    if (
+        config.model.prediction_mode
+        == ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE
+    ):
+        return _build_hybrid_label_contract(config)
     if config.model.control_encoding == COMPACT_CONTROL_ENCODING:
         canonical_initialization = (
             config.training.history_training_source == "canonical_initial_command"
@@ -899,6 +921,104 @@ def _build_regression_label_contract(config: TrainConfig) -> dict[str, object]:
     }
 
 
+def _build_hybrid_label_contract(config: TrainConfig) -> dict[str, object]:
+    if config.model.control_encoding != COMPACT_CONTROL_ENCODING:
+        raise ValueError("hybrid angle regression requires compact control encoding")
+    initial_pair = executed_command_to_history_tokens(
+        config.model.history_initial_angle,
+        config.model.history_initial_speed,
+        speed_max=config.model.speed_output_max,
+    )
+    history_contract: dict[str, object] = {
+        "frames": config.model.history_frames,
+        "shape": [config.model.history_frames, 2],
+        "input_name": "history_token_ids",
+        "pair_order": ["angle_token_id", "speed_token_id"],
+        "time_order": "oldest_to_newest",
+        "initialization": "canonical_initial_command",
+        "initial_command": [
+            config.model.history_initial_angle,
+            config.model.history_initial_speed,
+        ],
+        "initial_token_ids": list(initial_pair),
+        "actual_angle_token_range": [0, 100],
+        "actual_speed_token_range": [50, int(config.model.speed_output_max) + 50],
+        "update": "externally_executed_commands",
+        "known_train_label_leakage": False,
+    }
+    if config.training.sequence_length:
+        history_contract.update(
+            {
+                "train_source": "self_predicted_hybrid_sequence_rollout",
+                "train_prediction_execution": {
+                    "angle_driver_clamp": [-50.0, 50.0],
+                    "speed_class_commands": list(config.model.speed_class_commands),
+                    "speed_decode": "speed_class_commands[argmax(speed_logits)]",
+                    "angle_history_token_mapping": "round(angle_driver) + 50",
+                    "speed_history_token_mapping": "round(decoded_speed) + 50",
+                    "gradient": "clamp_argmax_detach_before_history_update",
+                },
+                "sequence_length": config.training.sequence_length,
+                "sequence_boundaries": (
+                    "session_start_reset_non_overlapping_compute_chunks_"
+                    "carry_predicted_history"
+                ),
+                "sequence_reverse_probability": 0.0,
+                "evaluation_source": "predicted_hybrid_full_session_rollout",
+                "session_history_initialization": "canonical_initial_command",
+                "compute_chunk_resets_history": False,
+                "augmentation_scope": "whole_session_per_epoch",
+                "edge_padding": "masked_repeat_last_frame",
+                "teacher_forcing": False,
+                "scheduled_sampling": False,
+            }
+        )
+    else:
+        history_contract.update(
+            {
+                "train_source": "canonical_initial_command",
+                "evaluation_source": "canonical_initial_command",
+                "frame_pretraining": True,
+                "labels_used_as_history": False,
+                "edge_padding": "not_applicable",
+            }
+        )
+    return {
+        "schema_version": 5,
+        "control_encoding": COMPACT_CONTROL_ENCODING,
+        "prediction_mode": ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE,
+        "output_keys": ["angle_driver", "speed_logits"],
+        "output_shapes": {"angle_driver": [1, 1], "speed_logits": [1, 2]},
+        "angle": {
+            "dtype": "float32",
+            "unit": "driver_angle",
+            "range": [-50.0, 50.0],
+            "activation": "tanh_times_50",
+            "runtime_normalized_mapping": "angle_driver * 2",
+        },
+        "speed": {
+            "dtype": "float32",
+            "num_classes": len(config.model.speed_class_commands),
+            "class_commands": list(config.model.speed_class_commands),
+            "target_mapping": "nearest_class_command",
+            "class_boundary": 27.5,
+            "decode_mapping": "class_commands[argmax(speed_logits)]",
+            "outlier_policy": "raw_csv_unchanged_nearest_command_at_training_time",
+        },
+        "train_angle_target": {
+            "method": "centered_mean",
+            "window_size": config.data.train_angle_mean_window,
+            "padding": "repeat_session_edge",
+            "applied_splits": ["train"],
+            "average_before_driver_scale": True,
+            "driver_scale": 0.5,
+            "validation_test_target": "raw_continuous",
+            "speed_target": "nearest_class_command_from_raw_continuous",
+        },
+        "history": history_contract,
+    }
+
+
 def build_training_objective_contract(config: TrainConfig) -> dict[str, object]:
     speed_output_trained = config.loss.speed_loss_weight > 0
     angle_only = (
@@ -919,6 +1039,20 @@ def build_training_objective_contract(config: TrainConfig) -> dict[str, object]:
                 "speed_normalization": config.model.speed_output_max,
                 "angle_beta": config.loss.angle_regression_beta,
                 "speed_beta": config.loss.speed_regression_beta,
+            }
+        )
+    elif (
+        config.model.prediction_mode
+        == ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE
+    ):
+        objective.update(
+            {
+                "mode": "angle_regression_speed_classification",
+                "loss": "smooth_l1_angle_cross_entropy_speed",
+                "angle_normalization": 50.0,
+                "angle_beta": config.loss.angle_regression_beta,
+                "speed_class_commands": list(config.model.speed_class_commands),
+                "speed_target_mapping": "nearest_class_command",
             }
         )
     return objective
@@ -1197,6 +1331,7 @@ def run_rollout_evaluation(
                     control_encoding=config.model.control_encoding,
                     fixed_speed=config.training.sequence_rollout_fixed_speed,
                     speed_max=config.model.speed_output_max,
+                    speed_class_commands=config.model.speed_class_commands,
                 )
                 history = torch.cat(
                     (history[:, 1:], predicted_pair.unsqueeze(1)),
@@ -1218,8 +1353,31 @@ def predicted_executed_class_pair(
     control_encoding: str = LEGACY_CONTROL_ENCODING,
     fixed_speed: int | None = None,
     speed_max: float = 30.0,
+    speed_class_commands: Sequence[int] = (),
 ) -> torch.Tensor:
     """Decode the class pair that the no-reverse runtime can publish."""
+    if set(outputs) == {"angle_driver", "speed_logits"}:
+        if fixed_speed is not None:
+            raise ValueError("hybrid rollout cannot use fixed speed")
+        if tuple(speed_class_commands) != (20, 35):
+            raise ValueError("hybrid rollout requires speed class commands (20, 35)")
+        angle_driver = outputs["angle_driver"].reshape(-1)
+        speed_logits = outputs["speed_logits"]
+        if speed_logits.shape != (angle_driver.shape[0], len(speed_class_commands)):
+            raise ValueError("hybrid output batch sizes must match")
+        commands = torch.tensor(
+            speed_class_commands,
+            device=speed_logits.device,
+            dtype=torch.long,
+        )
+        speed = commands[speed_logits.argmax(dim=1)]
+        return torch.stack(
+            (
+                angle_driver.clamp(-50.0, 50.0).round().long() + 50,
+                speed + 50,
+            ),
+            dim=1,
+        ).detach()
     if "angle_driver" in outputs or "speed" in outputs:
         if set(outputs) != {"angle_driver", "speed"}:
             raise ValueError("regression outputs must contain angle_driver and speed")
@@ -1295,6 +1453,11 @@ def rollout_predicted_histories(
                     ),
                     fixed_speed=fixed_speed,
                     speed_max=getattr(model, "speed_output_max", 30.0),
+                    speed_class_commands=getattr(
+                        model,
+                        "speed_class_commands",
+                        (),
+                    ),
                 )
                 updated = torch.cat(
                     (history[:, 1:], predicted_pair.unsqueeze(1)), dim=1
@@ -1477,6 +1640,16 @@ def _metric_accumulator(
 ) -> ClassificationMetricAccumulator | RegressionMetricAccumulator:
     if config.model.prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE:
         return RegressionMetricAccumulator(split_name)
+    if (
+        config.model.prediction_mode
+        == ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE
+    ):
+        return RegressionMetricAccumulator(
+            split_name,
+            speed_class_commands=tuple(
+                float(command) for command in config.model.speed_class_commands
+            ),
+        )
     return ClassificationMetricAccumulator(
         split_name,
         control_encoding=config.model.control_encoding,
@@ -1491,6 +1664,34 @@ def compute_policy_losses(
     angle_criterion: nn.Module,
     speed_criterion: nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if (
+        config.model.prediction_mode
+        == ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE
+    ):
+        angle_prediction = outputs["angle_driver"].reshape(-1)
+        speed_logits = outputs["speed_logits"]
+        device = angle_prediction.device
+        angle_target = _batch_tensor(batch["angle_raw"], device).float().reshape(-1)
+        speed_raw_target = _batch_tensor(batch["speed_raw"], device).float().reshape(-1)
+        speed_class = nearest_speed_class_ids(
+            speed_raw_target,
+            config.model.speed_class_commands,
+        )
+        if angle_prediction.shape != angle_target.shape:
+            raise ValueError("hybrid angle output shape must match the target")
+        if speed_logits.shape != (
+            speed_class.shape[0],
+            len(config.model.speed_class_commands),
+        ):
+            raise ValueError("hybrid speed logits shape must match the target")
+        angle_loss = angle_criterion(
+            angle_prediction / 50.0,
+            angle_target / 100.0,
+        )
+        speed_loss = speed_criterion(speed_logits, speed_class)
+        emd_loss = angle_loss.new_zeros(())
+        total_loss = angle_loss + config.loss.speed_loss_weight * speed_loss
+        return total_loss, angle_loss, speed_loss, emd_loss
     if config.model.prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE:
         angle_prediction = outputs["angle_driver"].reshape(-1)
         speed_prediction = outputs["speed"].reshape(-1)
@@ -1540,6 +1741,20 @@ def _batch_tensor(value: object, device: torch.device) -> torch.Tensor:
     return torch.as_tensor(value, device=device)
 
 
+def nearest_speed_class_ids(
+    speed_values: torch.Tensor,
+    speed_class_commands: Sequence[int],
+) -> torch.Tensor:
+    if tuple(speed_class_commands) != (20, 35):
+        raise ValueError("hybrid speed classes must be (20, 35)")
+    commands = torch.tensor(
+        speed_class_commands,
+        device=speed_values.device,
+        dtype=speed_values.dtype,
+    )
+    return (speed_values.reshape(-1, 1) - commands.reshape(1, -1)).abs().argmin(dim=1)
+
+
 def run_epoch(
     *,
     model: TaskTokenViTPolicy | AutoregressiveControlTokenViTPolicy,
@@ -1579,14 +1794,12 @@ def run_epoch(
                     outputs = model(images, history_class_ids)
                 else:
                     outputs = model(images)
-                total_loss, angle_loss, speed_loss, emd_loss = (
-                    compute_policy_losses(
-                        outputs=outputs,
-                        batch=batch,
-                        config=config,
-                        angle_criterion=angle_criterion,
-                        speed_criterion=speed_criterion,
-                    )
+                total_loss, angle_loss, speed_loss, emd_loss = compute_policy_losses(
+                    outputs=outputs,
+                    batch=batch,
+                    config=config,
+                    angle_criterion=angle_criterion,
+                    speed_criterion=speed_criterion,
                 )
             if training:
                 scaler.scale(total_loss).backward()
@@ -1663,6 +1876,35 @@ def class_weights(
             else 0.0
         ),
         sample_weights=sample_weights,
+    ).to(device)
+
+
+def hybrid_speed_class_weights(
+    samples: Sequence[PolicySample],
+    *,
+    mode: str,
+    config: TrainConfig,
+    device: torch.device,
+) -> torch.Tensor | None:
+    if mode == "none":
+        return None
+    if mode != "sqrt_inverse_frequency":
+        raise ValueError(f"unsupported class weighting mode: {mode}")
+    commands = config.model.speed_class_commands
+    class_ids = [
+        min(
+            range(len(commands)),
+            key=lambda index: abs(sample.speed_raw - commands[index]),
+        )
+        for sample in samples
+    ]
+    return compute_sqrt_inverse_frequency_weights(
+        samples,
+        field="speed_class_id",
+        num_classes=len(commands),
+        class_ids=class_ids,
+        min_weight=config.loss.min_class_weight,
+        max_weight=config.loss.max_class_weight,
     ).to(device)
 
 
@@ -1869,7 +2111,25 @@ def initialize_model_weights(
             )
         )
     )
-    if actual != expected and not shared_categorical_to_regression:
+    shared_regression_to_hybrid = (
+        actual["prediction_mode"] == CONTINUOUS_REGRESSION_PREDICTION_MODE
+        and expected["prediction_mode"]
+        == ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE
+        and all(
+            actual[key] == expected[key]
+            for key in (
+                "architecture",
+                "history_frames",
+                "control_token_type_embedding",
+                "control_encoding",
+            )
+        )
+    )
+    if (
+        actual != expected
+        and not shared_categorical_to_regression
+        and not shared_regression_to_hybrid
+    ):
         raise ValueError(
             "initialization checkpoint model architecture differs from config"
         )
@@ -1919,6 +2179,24 @@ def initialize_model_weights(
                 "categorical checkpoint differs outside the regression output heads"
             )
         initialization_mode = "shared_model_weights_only"
+    elif shared_regression_to_hybrid:
+        incompatible = model.load_state_dict(model_state, strict=False)
+        expected_missing = {
+            key
+            for key in model.state_dict()
+            if key.startswith("speed_classification_head.")
+        }
+        expected_unexpected = {
+            key for key in model_state if key.startswith("speed_regression_head.")
+        }
+        if (
+            set(incompatible.missing_keys) != expected_missing
+            or set(incompatible.unexpected_keys) != expected_unexpected
+        ):
+            raise ValueError(
+                "regression checkpoint differs outside the replaced speed head"
+            )
+        initialization_mode = "shared_regression_to_hybrid_speed_head"
     else:
         model.load_state_dict(model_state, strict=True)
         initialization_mode = "model_weights_only"
@@ -1931,6 +2209,7 @@ def initialize_model_weights(
         "target_prediction_mode": expected["prediction_mode"],
         "source_speed_output_max": source_speed_output_max,
         "target_speed_output_max": config.model.speed_output_max,
+        "target_speed_class_commands": list(config.model.speed_class_commands),
     }
 
 
@@ -1981,15 +2260,18 @@ def validate_resume_payload(
     if not isinstance(label_contract, dict):
         raise ValueError("resume checkpoint label contract is incompatible")
     if config.model.control_encoding == COMPACT_CONTROL_ENCODING:
-        expected_shapes = (
-            {"angle_driver": [1, 1], "speed": [1, 1]}
-            if config.model.prediction_mode
-            == CONTINUOUS_REGRESSION_PREDICTION_MODE
-            else {
+        if config.model.prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE:
+            expected_shapes = {"angle_driver": [1, 1], "speed": [1, 1]}
+        elif (
+            config.model.prediction_mode
+            == ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE
+        ):
+            expected_shapes = {"angle_driver": [1, 1], "speed_logits": [1, 2]}
+        else:
+            expected_shapes = {
                 "angle_logits": [1, ANGLE_OUTPUT_CLASSES],
                 "speed_logits": [1, SPEED_OUTPUT_CLASSES],
             }
-        )
         if label_contract.get("output_shapes") != expected_shapes:
             raise ValueError("resume checkpoint compact output shapes are incompatible")
     elif label_contract.get("num_classes") != NUM_COMMAND_CLASSES:
@@ -2026,6 +2308,7 @@ def validate_resume_payload(
         "history_initial_speed": config.model.history_initial_speed,
         "prediction_mode": config.model.prediction_mode,
         "speed_output_max": config.model.speed_output_max,
+        "speed_class_commands": list(config.model.speed_class_commands),
     }
     checkpoint_model_contract = {
         "architecture": (
@@ -2065,6 +2348,11 @@ def validate_resume_payload(
         ),
         "speed_output_max": (
             checkpoint_model.get("speed_output_max", 30.0)
+            if isinstance(checkpoint_model, dict)
+            else None
+        ),
+        "speed_class_commands": (
+            checkpoint_model.get("speed_class_commands", [])
             if isinstance(checkpoint_model, dict)
             else None
         ),
@@ -2240,15 +2528,28 @@ def build_optimizer(
     """Create fresh AdamW state, optionally using a lower backbone LR."""
     base_lr = config.optimizer.learning_rate
     multiplier = config.optimizer.backbone_learning_rate_multiplier
-    if multiplier == 1.0:
+    speed_head_lr = config.optimizer.speed_head_learning_rate
+    if multiplier == 1.0 and speed_head_lr is None:
         parameter_groups: object = model.parameters()
     else:
         backbone_parameters = list(model.backbone.parameters())
         backbone_ids = {id(parameter) for parameter in backbone_parameters}
+        speed_head_parameters = (
+            list(model.speed_classification_head.parameters())
+            if speed_head_lr is not None
+            and isinstance(model, AutoregressiveControlTokenViTPolicy)
+            and hasattr(model, "speed_classification_head")
+            else []
+        )
+        speed_head_ids = {id(parameter) for parameter in speed_head_parameters}
+        if speed_head_lr is not None and not speed_head_parameters:
+            raise ValueError(
+                "configured speed head LR but model has no hybrid speed head"
+            )
         policy_parameters = [
             parameter
             for parameter in model.parameters()
-            if id(parameter) not in backbone_ids
+            if id(parameter) not in backbone_ids and id(parameter) not in speed_head_ids
         ]
         parameter_groups = [
             {
@@ -2262,6 +2563,14 @@ def build_optimizer(
                 "name": "policy",
             },
         ]
+        if speed_head_parameters:
+            parameter_groups.append(
+                {
+                    "params": speed_head_parameters,
+                    "lr": speed_head_lr,
+                    "name": "speed_head",
+                }
+            )
     return torch.optim.AdamW(
         parameter_groups,
         lr=base_lr,

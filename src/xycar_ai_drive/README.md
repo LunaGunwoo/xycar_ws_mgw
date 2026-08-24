@@ -44,6 +44,13 @@ adapter가 `×0.5`로 변환한 driver command `-50..50`만
   NaN/Inf 또는 범위 위반은 fail-closed다. launch `speed_cap` 기본값은 `30`이고
   해당 artifact maximum을 넘을 수 없다. external AR history에도 이 capped 실제
   명령만 넣는다.
+- schema v8은 compact AR4 입력과 angle 회귀를 schema v6와 공유하지만 두 번째
+  출력은 `speed_logits [1,2]`다. manifest의 `speed_class_commands [20,35]`에서
+  argmax class를 실제 speed로 복원한다. angle scalar와 두 logit의 shape·finite 값,
+  angle 범위, class command와 speed maximum 35를 모두 검사한다. history는
+  `(0,35)×4`/`[50,85]×4`에서 시작하며 speed cap 적용 뒤 실제 발행된 명령만
+  external history에 기록한다. cap이 35보다 낮으면 history speed는 decoded class보다
+  낮을 수 있다.
 - schema v7은 정사각형 road warp RGB `[1,3,224,224]`와 명시 속도 `[1,1]`을
   받아 normalized angle `[1,1]`만 출력한다. manifest의 고정 속도를 `25`로 나눠
   model input에 넣고 angle은 `×100`한다. 실제 `speed_cap`이 고정 속도와 다르면
@@ -100,6 +107,11 @@ schema v7은 ResNet18 `image + speed/25 → angle` 전용 계약이다. 기존 n
 road-warp와 ImageNet 정규화를 사용하며 speed를 예측하거나 AR history를 만들지
 않는다. angle tensor shape, finite 값과 `[-1,1]` 범위를 검사한 뒤 `×100`으로
 normalized steering을 복원한다.
+schema v8은 `history_token_ids [1,4,2]`와 tuple output
+`[angle_driver [1,1], speed_logits [1,2]]`를 사용한다. artifact loader는
+`angle_regression_speed_classification`, class command `[20,35]`, output 순서,
+canonical `[50,85]×4`, executed-history, label/loss 계약을 함께 확인하며 하나라도
+다르면 load를 거부한다. 이 generic artifact는 traffic bundle에 자동 혼입되지 않는다.
 CPU thread 8개로 model을 load하고 3회 warm-up한다. artifact 생성과 배포는 개발
 Laptop의 MGW root에서 수행한다.
 

@@ -100,8 +100,7 @@ class ClassificationMetricAccumulator:
             ) / NORMALIZED_TO_DRIVER_SCALE
             speed_pred = speed_pred_class.float()
             angle_expected = (
-                expected_class_id(outputs["angle_logits"])
-                - DRIVER_ANGLE_OFFSET
+                expected_class_id(outputs["angle_logits"]) - DRIVER_ANGLE_OFFSET
             ) / NORMALIZED_TO_DRIVER_SCALE
             speed_expected = expected_class_id(outputs["speed_logits"])
         else:
@@ -219,9 +218,7 @@ class ClassificationMetricAccumulator:
         }
         if self.control_encoding == COMPACT_CONTROL_ENCODING:
             metrics[f"{prefix}_angle_driver_mae"] = (
-                self.angle_abs_error_sum
-                / count
-                * NORMALIZED_TO_DRIVER_SCALE
+                self.angle_abs_error_sum / count * NORMALIZED_TO_DRIVER_SCALE
             )
         for bucket in ANGLE_BUCKETS:
             bucket_count = self.bucket_counts[bucket]
@@ -251,9 +248,7 @@ class ClassificationMetricAccumulator:
             key = (source_id, generation)
             source_generation_count = self.source_generation_counts[key]
             source_prefix = f"{prefix}_source_{source_id}_generation_{generation}"
-            metrics[f"{source_prefix}_sample_count"] = float(
-                source_generation_count
-            )
+            metrics[f"{source_prefix}_sample_count"] = float(source_generation_count)
             metrics[f"{source_prefix}_angle_mae"] = (
                 self.source_generation_angle_abs_error_sums[key]
                 / source_generation_count
@@ -274,6 +269,7 @@ class RegressionMetricAccumulator:
     """Accumulate scalar regression metrics in runtime command units."""
 
     split_name: str
+    speed_class_commands: tuple[float, ...] = ()
     sample_count: int = 0
     total_loss_sum: float = 0.0
     angle_loss_sum: float = 0.0
@@ -284,6 +280,7 @@ class RegressionMetricAccumulator:
     angle_within_10_count: int = 0
     speed_within_5_count: int = 0
     speed_within_10_count: int = 0
+    speed_exact_count: int = 0
     angle_sign_match_count: int = 0
     angle_prediction_sum: float = 0.0
     angle_prediction_square_sum: float = 0.0
@@ -297,12 +294,17 @@ class RegressionMetricAccumulator:
     bucket_counts: dict[str, int] = field(default_factory=dict)
     bucket_abs_error_sums: dict[str, float] = field(default_factory=dict)
     bucket_within_10_counts: dict[str, int] = field(default_factory=dict)
+    speed_class_counts: dict[int, int] = field(default_factory=dict)
+    speed_class_correct_counts: dict[int, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for bucket in ANGLE_BUCKETS:
             self.bucket_counts.setdefault(bucket, 0)
             self.bucket_abs_error_sums.setdefault(bucket, 0.0)
             self.bucket_within_10_counts.setdefault(bucket, 0)
+        for class_id in range(len(self.speed_class_commands)):
+            self.speed_class_counts.setdefault(class_id, 0)
+            self.speed_class_correct_counts.setdefault(class_id, 0)
 
     @torch.no_grad()
     def update(
@@ -316,10 +318,38 @@ class RegressionMetricAccumulator:
         emd_loss: torch.Tensor,
     ) -> None:
         angle_prediction = outputs["angle_driver"].reshape(-1)
-        speed_prediction = outputs["speed"].reshape(-1)
         device = angle_prediction.device
         angle_target = _tensor(batch["angle_raw"], device).float().reshape(-1) * 0.5
-        speed_target = _tensor(batch["speed_raw"], device).float().reshape(-1)
+        speed_raw_target = _tensor(batch["speed_raw"], device).float().reshape(-1)
+        speed_target_class: torch.Tensor | None = None
+        speed_prediction_class: torch.Tensor | None = None
+        if self.speed_class_commands:
+            speed_logits = outputs["speed_logits"]
+            if speed_logits.shape != (
+                angle_prediction.shape[0],
+                len(self.speed_class_commands),
+            ):
+                raise ValueError(
+                    "hybrid speed logits shape must match configured classes"
+                )
+            if not bool(torch.isfinite(speed_logits).all()):
+                raise ValueError("hybrid speed logits contain a non-finite value")
+            commands = torch.tensor(
+                self.speed_class_commands,
+                device=device,
+                dtype=speed_raw_target.dtype,
+            )
+            speed_target_class = (
+                (speed_raw_target.unsqueeze(1) - commands.unsqueeze(0))
+                .abs()
+                .argmin(dim=1)
+            )
+            speed_prediction_class = speed_logits.argmax(dim=1)
+            speed_target = commands[speed_target_class]
+            speed_prediction = commands[speed_prediction_class]
+        else:
+            speed_prediction = outputs["speed"].reshape(-1)
+            speed_target = speed_raw_target
         if angle_prediction.shape != angle_target.shape:
             raise ValueError("regression angle output shape must match the target")
         if speed_prediction.shape != speed_target.shape:
@@ -348,6 +378,15 @@ class RegressionMetricAccumulator:
         self.angle_within_10_count += int((normalized_error <= 10).sum())
         self.speed_within_5_count += int((speed_error <= 5).sum())
         self.speed_within_10_count += int((speed_error <= 10).sum())
+        if speed_target_class is not None and speed_prediction_class is not None:
+            class_matches = speed_prediction_class == speed_target_class
+            self.speed_exact_count += int(class_matches.sum())
+            for class_id in range(len(self.speed_class_commands)):
+                mask = speed_target_class == class_id
+                self.speed_class_counts[class_id] += int(mask.sum())
+                self.speed_class_correct_counts[class_id] += int(
+                    (class_matches & mask).sum()
+                )
         self.angle_sign_match_count += int(
             (torch.sign(angle_prediction) == torch.sign(angle_target)).sum()
         )
@@ -408,7 +447,7 @@ class RegressionMetricAccumulator:
             f"{prefix}_speed_loss": self.speed_loss_sum / count,
             f"{prefix}_emd_loss": 0.0,
             f"{prefix}_angle_exact_acc": 0.0,
-            f"{prefix}_speed_exact_acc": 0.0,
+            f"{prefix}_speed_exact_acc": self.speed_exact_count / count,
             f"{prefix}_angle_within_5_acc": self.angle_within_5_count / count,
             f"{prefix}_speed_within_5_acc": self.speed_within_5_count / count,
             f"{prefix}_angle_within_10_acc": self.angle_within_10_count / count,
@@ -422,6 +461,22 @@ class RegressionMetricAccumulator:
             f"{prefix}_speed_prediction_std": self._std("speed", "prediction"),
             f"{prefix}_speed_target_std": self._std("speed", "target"),
         }
+        if self.speed_class_commands:
+            recalls: list[float] = []
+            for class_id, command in enumerate(self.speed_class_commands):
+                class_count = self.speed_class_counts[class_id]
+                recall = (
+                    self.speed_class_correct_counts[class_id] / class_count
+                    if class_count
+                    else 0.0
+                )
+                recalls.append(recall)
+                command_label = f"{command:g}"
+                metrics[f"{prefix}_speed_class_{command_label}_count"] = float(
+                    class_count
+                )
+                metrics[f"{prefix}_speed_class_{command_label}_recall"] = recall
+            metrics[f"{prefix}_speed_balanced_acc"] = sum(recalls) / len(recalls)
         for bucket in ANGLE_BUCKETS:
             bucket_count = self.bucket_counts[bucket]
             bucket_prefix = f"{prefix}_angle_bucket_{bucket}"

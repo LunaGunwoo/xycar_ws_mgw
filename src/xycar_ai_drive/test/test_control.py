@@ -29,6 +29,7 @@ from xycar_ai_drive.control import (
     command_history_token_ids,
     decode_class_ids,
     decode_compact_output_ids,
+    decode_hybrid_outputs,
     decode_regression_outputs,
     is_fresh,
 )
@@ -61,9 +62,7 @@ from xycar_ai_drive.steering_contract import (
 
 def test_motor_relay_default_is_explicit_in_vehicle_config():
     config_path = (
-        Path(__file__).parents[1]
-        / 'config'
-        / 'front_cam_policy.yaml'
+        Path(__file__).parents[1] / 'config' / 'front_cam_policy.yaml'
     )
     config = yaml.safe_load(config_path.read_text(encoding='utf-8'))
     parameters = config['front_cam_policy']['ros__parameters']
@@ -95,6 +94,25 @@ def test_regression_decode_and_speed_cap_are_applied_in_command_units():
         decode_regression_outputs(50.1, 20.0)
     with pytest.raises(ValueError, match='finite'):
         decode_regression_outputs(0.0, float('nan'))
+
+
+def test_hybrid_decode_maps_binary_class_to_command():
+    assert decode_hybrid_outputs(
+        -12.5,
+        0,
+        speed_class_commands=(20.0, 35.0),
+    ) == DriveCommand(-25.0, 20.0)
+    assert decode_hybrid_outputs(
+        25.0,
+        1,
+        speed_class_commands=(20.0, 35.0),
+    ) == DriveCommand(50.0, 35.0)
+    with pytest.raises(ValueError, match='class id'):
+        decode_hybrid_outputs(
+            0.0,
+            2,
+            speed_class_commands=(20.0, 35.0),
+        )
 
 
 def test_a_button_toggle_requires_release_and_fault_rearming():
@@ -423,7 +441,9 @@ def test_guided_control_indices_and_joy_length_include_rb():
     )
 
 
-def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
+def test_stateless_guided_record_uses_executed_label_and_profile_hash(
+    tmp_path,
+):
     profile = tmp_path / 'guided.yaml'
     profile.write_text(
         'guided_policy_collector:\n'
@@ -434,21 +454,23 @@ def test_stateless_guided_record_uses_executed_label_and_profile_hash(tmp_path):
         encoding='utf-8',
     )
     validate_collection_profile(str(profile))
-    assert GuidedPolicyCollectorNode._initial_history(
-        SimpleNamespace(artifact=SimpleNamespace(history=None))
-    ) is None
+    assert (
+        GuidedPolicyCollectorNode._initial_history(
+            SimpleNamespace(artifact=SimpleNamespace(history=None))
+        )
+        is None
+    )
     profile_metadata = _collection_profile_metadata(str(profile))
     assert profile_metadata['path'] == str(profile)
-    assert profile_metadata['sha256'] == hashlib.sha256(
-        profile.read_bytes()
-    ).hexdigest()
+    assert (
+        profile_metadata['sha256']
+        == hashlib.sha256(profile.read_bytes()).hexdigest()
+    )
     with pytest.raises(ValueError, match='existing absolute file'):
         validate_collection_profile(str(tmp_path / 'missing.yaml'))
     legacy_profile = tmp_path / 'legacy.yaml'
     legacy_profile.write_text(
-        'guided_policy_collector:\n'
-        '  ros__parameters:\n'
-        '    residual_gain: 200.0\n',
+        'guided_policy_collector:\n  ros__parameters:\n    residual_gain: 200.0\n',
         encoding='utf-8',
     )
     with pytest.raises(ValueError, match='legacy residual_gain'):
@@ -591,9 +613,7 @@ def test_external_collection_templates_and_launch_contract():
         package_root / 'launch' / 'guided_policy_collection.launch.py'
     ).read_text(encoding='utf-8')
     collector_text = (
-        package_root
-        / 'xycar_ai_drive'
-        / 'guided_policy_collector.py'
+        package_root / 'xycar_ai_drive' / 'guided_policy_collector.py'
     ).read_text(encoding='utf-8')
 
     assert profile['recording_root_dir'].endswith('/stateless_guided')
@@ -605,8 +625,7 @@ def test_external_collection_templates_and_launch_contract():
     for configured_profile in profiles:
         assert configured_profile['max_steering_angle'] == 100.0
         assert (
-            configured_profile['steering_contract']
-            == 'normalized_percent_v2'
+            configured_profile['steering_contract'] == 'normalized_percent_v2'
         )
         assert configured_profile['steering_takeover_button'] == 10
         assert 'residual_gain' not in configured_profile
@@ -620,9 +639,9 @@ def test_external_collection_templates_and_launch_contract():
     assert 'guided_policy_collection_normalized_v2.yaml' in launch_text
     assert 'OpaqueFunction(function=_require_params_file)' in launch_text
     assert 'validate_collection_profile(str(configured))' in launch_text
-    assert launch_text.index('OpaqueFunction(function=_require_params_file)') < (
-        launch_text.index('ExecuteProcess(')
-    )
+    assert launch_text.index(
+        'OpaqueFunction(function=_require_params_file)'
+    ) < (launch_text.index('ExecuteProcess('))
     assert 'OpaqueFunction(function=_require_params_file)' in (
         generic_launch_text
     )
@@ -881,12 +900,14 @@ def test_schema_v5_runtime_uses_compact_initial_and_external_tokens(
         def forward(self, images, history_token_ids):
             batch_size = images.shape[0]
             history_signal = history_token_ids[:, :1, :1].to(images.dtype) * 0
-            angle = torch.full(
-                (batch_size, 101), -10.0, dtype=images.dtype
-            ) + history_signal
-            speed = torch.full(
-                (batch_size, 31), -10.0, dtype=images.dtype
-            ) + history_signal
+            angle = (
+                torch.full((batch_size, 101), -10.0, dtype=images.dtype)
+                + history_signal
+            )
+            speed = (
+                torch.full((batch_size, 31), -10.0, dtype=images.dtype)
+                + history_signal
+            )
             angle[:, 0] = 10.0
             speed[:, 30] = 10.0
             return angle, speed
@@ -1134,6 +1155,146 @@ def test_schema_v6_runtime_decodes_regression_and_fails_closed(
     runtime._model = OutOfRangeSpeedPolicy()
     with pytest.raises(PolicyRuntimeError, match='regression speed'):
         runtime.infer(frame, [initial_ids] * 4)
+
+
+def test_schema_v8_runtime_decodes_binary_speed_and_requires_external_history(
+    tmp_path,
+):
+    torch = pytest.importorskip('torch')
+
+    class HybridPolicy(torch.nn.Module):
+        def forward(self, images, history_token_ids):
+            signal = history_token_ids[:, :1, :1].to(images.dtype) * 0
+            logits = torch.cat((signal - 1.0, signal + 1.0), dim=1)
+            return signal - 12.5, logits
+
+    artifact = tmp_path / 'fixture-hybrid-ar-policy'
+    artifact.mkdir()
+    sample_image = torch.zeros(1, 3, 4, 4)
+    initial_ids = [50, 85]
+    sample_history = torch.tensor([[initial_ids] * 4], dtype=torch.long)
+    torch.jit.trace(
+        HybridPolicy(),
+        (sample_image, sample_history),
+        strict=True,
+    ).save(str(artifact / 'model.ts'))
+    manifest = {
+        'schema_version': 8,
+        'artifact_id': artifact.name,
+        'model': {
+            'format': 'torchscript',
+            'file': 'model.ts',
+            'architecture': 'ar_control_tokens',
+            'control_encoding': 'driver_compact_v2',
+            'prediction_mode': 'angle_regression_speed_classification',
+            'speed_output_max': 35,
+            'speed_class_commands': [20, 35],
+            'input': {
+                'kind': 'tuple',
+                'order': ['images', 'history_token_ids'],
+                'images': {
+                    'color_space': 'RGB',
+                    'dtype': 'float32',
+                    'shape': [1, 3, 4, 4],
+                },
+                'history_token_ids': {
+                    'dtype': 'int64',
+                    'shape': [1, 4, 2],
+                },
+            },
+            'output': {
+                'kind': 'tuple',
+                'order': ['angle_driver', 'speed_logits'],
+                'shapes': [[1, 1], [1, 2]],
+                'values': [
+                    {
+                        'name': 'angle_driver',
+                        'dtype': 'float32',
+                        'unit': 'driver_angle',
+                        'range': [-50.0, 50.0],
+                        'runtime_normalized_mapping': 'value * 2',
+                    },
+                    {
+                        'name': 'speed_logits',
+                        'dtype': 'float32',
+                        'class_commands': [20, 35],
+                        'decode_mapping': 'class_commands[argmax(value)]',
+                    },
+                ],
+            },
+        },
+        'preprocessing': {
+            'geometry': 'full_frame_bicubic_resize',
+            'image_size': 4,
+            'mean': [0.5, 0.5, 0.5],
+            'std': [0.5, 0.5, 0.5],
+        },
+        'label_contract': {
+            'control_encoding': 'driver_compact_v2',
+            'prediction_mode': 'angle_regression_speed_classification',
+            'output_shapes': {
+                'angle_driver': [1, 1],
+                'speed_logits': [1, 2],
+            },
+            'angle': {
+                'unit': 'driver_angle',
+                'range': [-50.0, 50.0],
+                'runtime_normalized_mapping': 'angle_driver * 2',
+            },
+            'speed': {
+                'num_classes': 2,
+                'class_commands': [20, 35],
+                'target_mapping': 'nearest_class_command',
+                'decode_mapping': 'class_commands[argmax(speed_logits)]',
+            },
+        },
+        'history': {
+            'frames': 4,
+            'pair_order': ['angle_token_id', 'speed_token_id'],
+            'time_order': 'oldest_to_newest',
+            'initialization': 'canonical_initial_command',
+            'initial_command': [0, 35],
+            'initial_token_ids': initial_ids,
+            'actual_angle_token_range': [0, 100],
+            'actual_speed_token_range': [50, 85],
+            'update': 'externally_executed_commands',
+        },
+        'training_objective': {
+            'mode': 'angle_regression_speed_classification',
+            'speed_output_trained': True,
+            'loss': 'smooth_l1_angle_cross_entropy_speed',
+            'angle_normalization': 50.0,
+            'speed_class_commands': [20, 35],
+            'speed_target_mapping': 'nearest_class_command',
+        },
+        'steering_contract': steering_contract_mapping(),
+    }
+    (artifact / 'manifest.yaml').write_text(
+        yaml.safe_dump(manifest, sort_keys=False),
+        encoding='utf-8',
+    )
+    _write_checksums(artifact)
+
+    contract = load_policy_artifact(artifact)
+    assert contract.prediction_mode == 'angle_regression_speed_classification'
+    assert contract.speed_output_max == 35.0
+    assert contract.speed_class_commands == (20.0, 35.0)
+    runtime = TorchScriptPolicy(
+        artifact_dir=str(artifact),
+        torch_num_threads=1,
+        warmup_count=0,
+    )
+    frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    result = runtime.infer(frame, [initial_ids] * 4)
+    assert result.command == DriveCommand(-25.0, 35.0)
+    assert command_history_token_ids(
+        result.command,
+        speed_max=35.0,
+    ) == (38, 85)
+    with pytest.raises(
+        PolicyRuntimeError, match='requires executed command history'
+    ):
+        runtime.infer(frame)
 
 
 def test_schema_v7_runtime_uses_angle_only_and_fixed_speed(tmp_path):

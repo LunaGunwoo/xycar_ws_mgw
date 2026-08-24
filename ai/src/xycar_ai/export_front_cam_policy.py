@@ -24,6 +24,7 @@ from xycar_ai.compact_control import (
     unknown_history_pair,
 )
 from xycar_ai.front_cam_policy_model import (
+    ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE,
     AR_CONTROL_TOKEN_ARCHITECTURE,
     CATEGORICAL_PREDICTION_MODE,
     CONTINUOUS_REGRESSION_PREDICTION_MODE,
@@ -40,6 +41,7 @@ LEGACY_ARTIFACT_SCHEMA_VERSION = 1
 AR_ARTIFACT_SCHEMA_VERSION = 3
 COMPACT_AR_ARTIFACT_SCHEMA_VERSION = 5
 REGRESSION_AR_ARTIFACT_SCHEMA_VERSION = 6
+HYBRID_AR_ARTIFACT_SCHEMA_VERSION = 8
 ARTIFACT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 DEFAULT_OUTPUT_ROOT = Path("artifacts/models")
 MODEL_FILENAME = "model.ts"
@@ -89,6 +91,20 @@ class _RegressionTupleOutputARPolicy(nn.Module):
         return outputs["angle_driver"], outputs["speed"]
 
 
+class _HybridTupleOutputARPolicy(nn.Module):
+    def __init__(self, policy: nn.Module) -> None:
+        super().__init__()
+        self.policy = policy
+
+    def forward(
+        self,
+        images: torch.Tensor,
+        history_class_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        outputs = self.policy(images, history_class_ids)
+        return outputs["angle_driver"], outputs["speed_logits"]
+
+
 class _FixedSpeedTupleOutputARPolicy(nn.Module):
     def __init__(self, policy: nn.Module, fixed_speed_class_id: int) -> None:
         super().__init__()
@@ -125,6 +141,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
             AR_ARTIFACT_SCHEMA_VERSION,
             COMPACT_AR_ARTIFACT_SCHEMA_VERSION,
             REGRESSION_AR_ARTIFACT_SCHEMA_VERSION,
+            HYBRID_AR_ARTIFACT_SCHEMA_VERSION,
         ),
         help="Reject export unless the artifact has this schema version.",
     )
@@ -206,22 +223,44 @@ def export_checkpoint(
             "checkpoint.config.model.speed_output_max must be a whole number in [1, 50]"
         )
     speed_output_max = float(speed_output_max_value)
+    raw_speed_class_commands = model_config.get("speed_class_commands", [])
+    if not isinstance(raw_speed_class_commands, list) or any(
+        not isinstance(value, int) or isinstance(value, bool)
+        for value in raw_speed_class_commands
+    ):
+        raise PolicyExportError(
+            "checkpoint.config.model.speed_class_commands must be an integer list"
+        )
+    speed_class_commands = tuple(raw_speed_class_commands)
     if prediction_mode not in {
         CATEGORICAL_PREDICTION_MODE,
         CONTINUOUS_REGRESSION_PREDICTION_MODE,
+        ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE,
     }:
         raise PolicyExportError(f"unsupported prediction mode: {prediction_mode}")
-    if prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE and (
+    if prediction_mode in {
+        CONTINUOUS_REGRESSION_PREDICTION_MODE,
+        ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE,
+    } and (
         architecture != AR_CONTROL_TOKEN_ARCHITECTURE
         or control_encoding != COMPACT_CONTROL_ENCODING
     ):
-        raise PolicyExportError("continuous regression requires compact AR control")
-    if prediction_mode != CONTINUOUS_REGRESSION_PREDICTION_MODE and (
-        speed_output_max != 30.0
-    ):
+        raise PolicyExportError("angle regression requires compact AR control")
+    if prediction_mode == CATEGORICAL_PREDICTION_MODE and speed_output_max != 30.0:
         raise PolicyExportError("categorical artifacts require speed_output_max=30")
+    if prediction_mode == ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE:
+        if speed_output_max != 35.0 or speed_class_commands != (20, 35):
+            raise PolicyExportError(
+                "hybrid artifacts require speed_output_max=35 and classes [20, 35]"
+            )
+    elif speed_class_commands:
+        raise PolicyExportError(
+            "speed_class_commands is only valid for hybrid artifacts"
+        )
     schema_version = (
-        REGRESSION_AR_ARTIFACT_SCHEMA_VERSION
+        HYBRID_AR_ARTIFACT_SCHEMA_VERSION
+        if prediction_mode == ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE
+        else REGRESSION_AR_ARTIFACT_SCHEMA_VERSION
         if architecture == AR_CONTROL_TOKEN_ARCHITECTURE
         and control_encoding == COMPACT_CONTROL_ENCODING
         and prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE
@@ -279,6 +318,29 @@ def export_checkpoint(
             raise PolicyExportError(
                 "regression checkpoint label and training objective contracts differ"
             )
+    elif prediction_mode == ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE:
+        hybrid_speed = _mapping(label_contract, "speed", "checkpoint.label_contract")
+        hybrid_history = _mapping(
+            label_contract,
+            "history",
+            "checkpoint.label_contract",
+        )
+        if (
+            label_contract.get("prediction_mode")
+            != ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE
+            or label_contract.get("output_shapes")
+            != {"angle_driver": [1, 1], "speed_logits": [1, 2]}
+            or hybrid_speed.get("class_commands") != list(speed_class_commands)
+            or hybrid_speed.get("target_mapping") != "nearest_class_command"
+            or hybrid_history.get("actual_speed_token_range") != [50, 85]
+            or training_objective is None
+            or training_objective.get("mode")
+            != ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE
+            or training_objective.get("speed_output_trained") is not True
+        ):
+            raise PolicyExportError(
+                "hybrid checkpoint label and training objective contracts differ"
+            )
 
     history_frames = int(model_config.get("history_frames", 0))
     use_type_embedding = bool(model_config.get("control_token_type_embedding", False))
@@ -299,9 +361,10 @@ def export_checkpoint(
         }
         if control_encoding == COMPACT_CONTROL_ENCODING:
             policy_arguments["control_encoding"] = control_encoding
-        if prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE:
+        if prediction_mode != CATEGORICAL_PREDICTION_MODE:
             policy_arguments["prediction_mode"] = prediction_mode
             policy_arguments["speed_output_max"] = speed_output_max
+            policy_arguments["speed_class_commands"] = speed_class_commands
         policy = AutoregressiveControlTokenViTPolicy(
             **policy_arguments,
         )
@@ -323,6 +386,10 @@ def export_checkpoint(
             if fixed_speed_class_id is not None:
                 raise PolicyExportError("regression artifact cannot use fixed speed")
             wrapper = _RegressionTupleOutputARPolicy(policy).eval()
+        elif prediction_mode == ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE:
+            if fixed_speed_class_id is not None:
+                raise PolicyExportError("hybrid artifact cannot use fixed speed")
+            wrapper = _HybridTupleOutputARPolicy(policy).eval()
         else:
             wrapper = (
                 _TupleOutputARPolicy(policy)
@@ -334,11 +401,17 @@ def export_checkpoint(
                 label_contract,
                 speed_output_max=speed_output_max,
             )
-            expected_shapes = (
-                ((1, 1), (1, 1))
-                if prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE
-                else ((1, ANGLE_OUTPUT_CLASSES), (1, SPEED_OUTPUT_CLASSES))
-            )
+            if prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE:
+                expected_shapes = ((1, 1), (1, 1))
+            elif (
+                prediction_mode == ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE
+            ):
+                expected_shapes = ((1, 1), (1, 2))
+            else:
+                expected_shapes = (
+                    (1, ANGLE_OUTPUT_CLASSES),
+                    (1, SPEED_OUTPUT_CLASSES),
+                )
         else:
             initial_angle = int(model_config.get("history_initial_angle", 0)) + 100
             initial_speed = int(model_config.get("history_initial_speed", 25)) + 100
@@ -562,14 +635,22 @@ def _build_manifest(
                     label_contract,
                     speed_output_max=(
                         speed_output_max
-                        if prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE
+                        if prediction_mode
+                        in {
+                            CONTINUOUS_REGRESSION_PREDICTION_MODE,
+                            ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE,
+                        }
                         else 30.0
                     ),
                 )
             )
             history_speed_output_max = (
                 int(speed_output_max)
-                if prediction_mode == CONTINUOUS_REGRESSION_PREDICTION_MODE
+                if prediction_mode
+                in {
+                    CONTINUOUS_REGRESSION_PREDICTION_MODE,
+                    ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE,
+                }
                 else 30
             )
             history_contract = {
@@ -613,6 +694,30 @@ def _build_manifest(
                     },
                 ]
                 schema_version = REGRESSION_AR_ARTIFACT_SCHEMA_VERSION
+            elif (
+                prediction_mode == ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE
+            ):
+                speed_class_commands = list(
+                    model_config.get("speed_class_commands", [])
+                )
+                output_shapes = [[1, 1], [1, len(speed_class_commands)]]
+                output_order = ["angle_driver", "speed_logits"]
+                output_values = [
+                    {
+                        "name": "angle_driver",
+                        "dtype": "float32",
+                        "unit": "driver_angle",
+                        "range": [-50.0, 50.0],
+                        "runtime_normalized_mapping": "value * 2",
+                    },
+                    {
+                        "name": "speed_logits",
+                        "dtype": "float32",
+                        "class_commands": speed_class_commands,
+                        "decode_mapping": "class_commands[argmax(value)]",
+                    },
+                ]
+                schema_version = HYBRID_AR_ARTIFACT_SCHEMA_VERSION
             else:
                 output_shapes = [
                     [1, ANGLE_OUTPUT_CLASSES],
@@ -687,6 +792,12 @@ def _build_manifest(
     }
     if history_contract is not None:
         manifest["history"] = history_contract
+    if prediction_mode == ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE:
+        model_manifest = manifest["model"]
+        if not isinstance(model_manifest, dict):
+            raise PolicyExportError("internal model manifest must be a mapping")
+        model_manifest["speed_output_max"] = 35
+        model_manifest["speed_class_commands"] = [20, 35]
     if training_objective is not None:
         manifest["training_objective"] = dict(training_objective)
     if fixed_speed_class_id is not None:
@@ -780,6 +891,37 @@ def _training_objective_contract(
                 "speed_normalization": speed_normalization,
                 "angle_beta": angle_beta,
                 "speed_beta": speed_beta,
+            }
+        )
+    elif mode == ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE:
+        angle_normalization = _finite_number(
+            raw_objective,
+            "angle_normalization",
+            "checkpoint.training_objective",
+        )
+        angle_beta = _finite_number(
+            raw_objective,
+            "angle_beta",
+            "checkpoint.training_objective",
+        )
+        speed_class_commands = raw_objective.get("speed_class_commands")
+        if (
+            raw_objective.get("loss") != "smooth_l1_angle_cross_entropy_speed"
+            or angle_normalization != 50.0
+            or angle_beta <= 0.0
+            or speed_class_commands != [20, 35]
+            or raw_objective.get("speed_target_mapping") != "nearest_class_command"
+            or speed_loss_weight <= 0.0
+            or not speed_output_trained
+        ):
+            raise PolicyExportError("hybrid training objective contract is invalid")
+        objective.update(
+            {
+                "loss": "smooth_l1_angle_cross_entropy_speed",
+                "angle_normalization": angle_normalization,
+                "angle_beta": angle_beta,
+                "speed_class_commands": [20, 35],
+                "speed_target_mapping": "nearest_class_command",
             }
         )
     if speed_output_trained:
@@ -1061,11 +1203,19 @@ def _validate_regression_outputs(
     prediction_mode: str,
     speed_output_max: float,
 ) -> None:
-    if prediction_mode != CONTINUOUS_REGRESSION_PREDICTION_MODE:
+    if prediction_mode not in {
+        CONTINUOUS_REGRESSION_PREDICTION_MODE,
+        ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE,
+    }:
         return
-    angle_driver, speed = outputs
+    angle_driver, speed_output = outputs
     if bool((angle_driver < -50.0).any()) or bool((angle_driver > 50.0).any()):
         raise PolicyExportError("regression angle output is outside [-50, 50]")
+    if prediction_mode == ANGLE_REGRESSION_SPEED_CLASSIFICATION_PREDICTION_MODE:
+        if tuple(speed_output.shape) != (1, 2):
+            raise PolicyExportError("hybrid speed output must contain two logits")
+        return
+    speed = speed_output
     if bool((speed < 0.0).any()) or bool((speed > speed_output_max).any()):
         raise PolicyExportError(
             f"regression speed output is outside [0, {speed_output_max:g}]"
