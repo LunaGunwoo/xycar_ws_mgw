@@ -76,25 +76,38 @@ if ! docker exec "${MOTOR_CONTAINER}" bash -lc \
     exit 1
 fi
 
-docker run --detach \
-    --name "${BRIDGE_CONTAINER}" \
-    --network host \
-    --ipc host \
-    --user "${bridge_uid}:${bridge_gid}" \
-    --env HOME=/tmp \
-    --env ROS_MASTER_URI=http://127.0.0.1:11311 \
-    --env ROS_DOMAIN_ID=7 \
-    --env ROS_LOCALHOST_ONLY=1 \
-    --env RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
-    --env FASTDDS_BUILTIN_TRANSPORTS=UDPv4 \
-    "${BRIDGE_IMAGE}" \
-    /opt/ros1_bridge/lib/ros1_bridge/parameter_bridge \
-    /ros1_bridge/topics
+start_bridge() {
+    docker run --detach \
+        --name "${BRIDGE_CONTAINER}" \
+        --network host \
+        --ipc host \
+        --user "${bridge_uid}:${bridge_gid}" \
+        --env HOME=/tmp \
+        --env ROS_MASTER_URI=http://127.0.0.1:11311 \
+        --env ROS_DOMAIN_ID=7 \
+        --env ROS_LOCALHOST_ONLY=1 \
+        --env RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
+        --env FASTDDS_BUILTIN_TRANSPORTS=UDPv4 \
+        "${BRIDGE_IMAGE}" \
+        /opt/ros1_bridge/lib/ros1_bridge/parameter_bridge \
+        /ros1_bridge/topics
+}
 
-if ! timeout 35s bash -lc \
-    'source /opt/ros/humble/setup.bash; ROS_DOMAIN_ID=7 ROS_LOCALHOST_ONLY=1 RMW_IMPLEMENTATION=rmw_fastrtps_cpp FASTDDS_BUILTIN_TRANSPORTS=UDPv4 ros2 topic echo --once /xycar/parking/vesc_odom >/dev/null 2>&1'; then
+bridge_ready=false
+for bridge_attempt in 1 2; do
+    start_bridge
+    if timeout 30s bash -lc \
+        'source /opt/ros/humble/setup.bash; ROS_DOMAIN_ID=7 ROS_LOCALHOST_ONLY=1 RMW_IMPLEMENTATION=rmw_fastrtps_cpp FASTDDS_BUILTIN_TRANSPORTS=UDPv4 ros2 topic echo --once /xycar/parking/vesc_odom >/dev/null 2>&1'; then
+        bridge_ready=true
+        break
+    fi
+    echo "[WARN] ROS 2 bridge readiness ${bridge_attempt}/2 실패; bridge container만 재시작합니다." >&2
     docker logs "${BRIDGE_CONTAINER}" >&2 || true
-    echo "[ERROR] 제한 시간 안에 ROS 2 bridge VESC odometry 첫 sample을 받지 못했습니다." >&2
+    docker stop --time 3 "${BRIDGE_CONTAINER}" >/dev/null 2>&1 || true
+    docker rm -f "${BRIDGE_CONTAINER}" >/dev/null 2>&1 || true
+done
+if [ "${bridge_ready}" != true ]; then
+    echo "[ERROR] 두 번의 제한된 bridge 시도에서 VESC odometry sample을 받지 못했습니다." >&2
     exit 1
 fi
 
