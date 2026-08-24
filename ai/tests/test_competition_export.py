@@ -30,6 +30,8 @@ from xycar_ai.export_traffic_shortcut_bundle import (
     STOP10_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_BASE_ID,
+    SPEED35_FIX_BASE_ID,
+    SPEED35_FIX_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
@@ -500,3 +502,21 @@ def test_human_bbox_traffic_bundle_manifests_preserve_models_and_version_votes(
     assert 'red_stop_yolo_missing_release_frames' not in (
         initial_wait_go1['mission']
     )
+
+    fix_initial_wait_go1 = _bundle_manifest(
+        artifact_id=(
+            SPEED35_FIX_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+        schema_version=18,
+        consecutive_signal_reads_by_action=(5, 1, 1),
+        base_artifact=base,
+        shortcut_artifact=shortcut,
+        shortcut_artifact_id=EXPANDED_SHORTCUT_ID,
+        traffic_classifier=tmp_path / 'classifier.onnx',
+    )
+    assert fix_initial_wait_go1['detector'] == initial_wait_go1['detector']
+    assert fix_initial_wait_go1['signal_vote'] == initial_wait_go1['signal_vote']
+    assert fix_initial_wait_go1['mission'] == initial_wait_go1['mission']
+    assert fix_initial_wait_go1['components']['base'][
+        'artifact_id'
+    ] == SPEED35_FIX_BASE_ID

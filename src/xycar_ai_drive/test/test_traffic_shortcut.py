@@ -57,6 +57,8 @@ from xycar_ai_drive.traffic_shortcut_artifact import (
     EXPECTED_STOP10_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_BASE_ARTIFACT_ID,
+    EXPECTED_SPEED35_FIX_BASE_ARTIFACT_ID,
+    EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
@@ -1576,6 +1578,25 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
             EXPECTED_SPEED35_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
         ),
     ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    assert _load_signal_vote_contract(
+        {'signal_vote': initial_wait_go1_vote},
+        schema_version=18,
+        artifact_id=(
+            EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == (5, 1, 1)
+    assert _expected_shortcut_artifact_id(
+        schema_version=18,
+        artifact_id=(
+            EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert _expected_base_artifact_id(
+        schema_version=18,
+        artifact_id=(
+            EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == EXPECTED_SPEED35_FIX_BASE_ARTIFACT_ID
     with pytest.raises(ArtifactContractError, match='signal vote'):
         _load_signal_vote_contract(
             {
@@ -2265,6 +2286,7 @@ def test_traffic_shortcut_monitor_is_passive_and_has_no_inference_runtime():
         (15, (5, 5, 5), 1, True),
         (16, (5, 3, 3), 3, False),
         (17, (5, 1, 1), 3, False),
+        (18, (5, 1, 1), 3, False),
     ],
 )
 def test_traffic_light_viewer_accepts_speed35_bundle_contracts(
