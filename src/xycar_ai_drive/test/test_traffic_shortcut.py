@@ -62,6 +62,7 @@ from xycar_ai_drive.traffic_shortcut_artifact import (
     EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_SESSION_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_SESSION_4S_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_SESSION_4S_TL35_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    EXPECTED_SPEED35_FIX_RED_REQUIRED_GO1_SESSION_4S_TL35_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
@@ -769,6 +770,41 @@ def test_initial_wait_latch_uses_fresh_stop5_and_go1_votes():
     assert latch.observe(straight) == LampAction.STRAIGHT
     latch.reset(initial_stop_armed=True, wait_for_signal=True)
     assert latch.observe(left) == LampAction.LEFT
+
+
+def test_initial_wait_latch_requires_confirmed_stop_before_go():
+    latch = InitialWaitSignalLatch(
+        bbox_width_min=35,
+        bbox_width_max=225,
+        stop_consecutive_reads=5,
+        left_consecutive_reads=1,
+        straight_consecutive_reads=1,
+        require_stop_before_clear=True,
+    )
+    latch.reset(initial_stop_armed=True, wait_for_signal=True)
+    stop = _signal(SignalClass.STOP)
+    straight = _signal(SignalClass.STRAIGHT)
+    left = _signal(SignalClass.LEFT)
+
+    for reading in (straight, left, straight, left, None):
+        assert latch.observe(reading) == LampAction.RED
+        assert latch.snapshot.phase == InitialStopPhase.WAIT_FOR_SIGNAL
+        assert latch.snapshot.candidate_reads == 0
+
+    for step in range(4):
+        assert latch.observe(stop) == LampAction.RED
+        assert latch.snapshot.phase == InitialStopPhase.WAIT_FOR_SIGNAL
+        assert latch.snapshot.candidate_reads == step + 1
+    assert latch.observe(straight) == LampAction.RED
+    assert latch.snapshot.candidate_reads == 0
+    for _ in range(5):
+        assert latch.observe(stop) == LampAction.RED
+    assert latch.snapshot.phase == InitialStopPhase.STOPPED
+
+    assert latch.observe(left) == LampAction.LEFT
+    assert latch.snapshot.phase == InitialStopPhase.NAVIGATION
+    assert latch.observe(stop) == LampAction.UNKNOWN
+    assert latch.snapshot.stop_ignored
 
 
 def test_initial_wait_fsm_stops_then_routes_confirmed_left_directly():
@@ -1796,6 +1832,35 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
         )
         == EXPECTED_SPEED35_FIX_BASE_ARTIFACT_ID
     )
+    red_required_go1_vote = {
+        **initial_wait_go1_vote,
+        'initial_stop_required_before_clear': True,
+    }
+    assert _load_signal_vote_contract(
+        {'signal_vote': red_required_go1_vote},
+        schema_version=22,
+        artifact_id=(
+            EXPECTED_SPEED35_FIX_RED_REQUIRED_GO1_SESSION_4S_TL35_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == (5, 1, 1)
+    assert (
+        _expected_shortcut_artifact_id(
+            schema_version=22,
+            artifact_id=(
+                EXPECTED_SPEED35_FIX_RED_REQUIRED_GO1_SESSION_4S_TL35_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    )
+    assert (
+        _expected_base_artifact_id(
+            schema_version=22,
+            artifact_id=(
+                EXPECTED_SPEED35_FIX_RED_REQUIRED_GO1_SESSION_4S_TL35_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_SPEED35_FIX_BASE_ARTIFACT_ID
+    )
     with pytest.raises(ArtifactContractError, match='signal vote'):
         _load_signal_vote_contract(
             {
@@ -1932,6 +1997,7 @@ def test_initial_wait_terminal_events_ignore_cached_vote_updates():
         _lamp_latch=latch,
         bundle=SimpleNamespace(
             schema_version=15,
+            initial_stop_requires_stop_confirmation=False,
             detector=SimpleNamespace(
                 red_consecutive_reads=5,
                 left_consecutive_reads=5,
@@ -1997,6 +2063,70 @@ def test_initial_wait_terminal_events_ignore_cached_vote_updates():
     assert plan.state == MissionState.SWITCH_TO_SHORTCUT
     assert 'LEFT_CONFIRMED vote=5/5' in final
     assert not any(message.startswith('READY') for message in final)
+
+
+def test_schema22_ready_requires_fresh_stop_not_green():
+    latch = InitialWaitSignalLatch(
+        bbox_width_min=35,
+        bbox_width_max=225,
+        stop_consecutive_reads=5,
+        left_consecutive_reads=1,
+        straight_consecutive_reads=1,
+        require_stop_before_clear=True,
+    )
+    latch.reset(initial_stop_armed=True, wait_for_signal=True)
+    fsm = TrafficShortcutFsm(
+        one_shot_initial_stop=True,
+        initial_left_direct_shortcut=True,
+    )
+    fsm.enable(initial_stop_armed=True, wait_for_signal=True)
+    node = SimpleNamespace(
+        _lamp_latch=latch,
+        bundle=SimpleNamespace(
+            schema_version=22,
+            initial_stop_requires_stop_confirmation=True,
+            detector=SimpleNamespace(
+                red_consecutive_reads=5,
+                left_consecutive_reads=1,
+            ),
+        ),
+        _ready_logged=False,
+        _stop_ignored_logged=False,
+        _signal_log_gate=SignalStatusLogGate(rate_hz=2.0),
+    )
+    log_method = TrafficShortcutPolicyNode._one_shot_signal_logs_locked
+
+    previous = latch.snapshot
+    left = _signal(SignalClass.LEFT)
+    left_signal = latch.observe(left)
+    left_logs = log_method(
+        node,
+        previous=previous,
+        reading=left,
+        raw_class=SignalClass.LEFT,
+        source='YOLO_CNN',
+        signal=left_signal,
+        plan=fsm.on_frame(left_signal, now_monotonic=1.0),
+        now_monotonic=1.0,
+        vote_updated=True,
+    )
+    assert not any(message.startswith('READY') for message in left_logs)
+
+    previous = latch.snapshot
+    stop = _signal(SignalClass.STOP)
+    stop_signal = latch.observe(stop)
+    stop_logs = log_method(
+        node,
+        previous=previous,
+        reading=stop,
+        raw_class=SignalClass.STOP,
+        source='YOLO_CNN',
+        signal=stop_signal,
+        plan=fsm.on_frame(stop_signal, now_monotonic=1.1),
+        now_monotonic=1.1,
+        vote_updated=True,
+    )
+    assert any(message.startswith('READY raw=STOP') for message in stop_logs)
 
 
 def test_completed_activation_logs_left_ignored_once_and_status():
@@ -2312,6 +2442,10 @@ def test_fsm_off_fault_and_red_priority_paths_stop():
 
 def _safe_node_state():
     return SimpleNamespace(
+        bundle=SimpleNamespace(
+            initial_stop_requires_stop_confirmation=False,
+        ),
+        _fsm=SimpleNamespace(state=MissionState.BASE),
         _competitors=(),
         _has_motor_subscriber=True,
         require_gamepad_hold=True,
@@ -2493,6 +2627,59 @@ def test_integrated_node_without_gamepad_does_not_require_joy():
     assert TrafficShortcutPolicyNode._can_enable_locked(node, 1.0)
 
 
+def test_schema22_headless_emulates_lb_a_and_stays_stopped():
+    observations = []
+    published = []
+    warnings = []
+    node = SimpleNamespace(
+        _next_graph_check_monotonic=math.inf,
+        require_gamepad_hold=False,
+        _drive_gate=SimpleNamespace(enabled=False),
+        _can_enable_locked=lambda _now: True,
+        _observe_drive_gate_locked=lambda **kwargs: (
+            observations.append(kwargs) or ToggleAction.ENABLED
+        ),
+        bundle=SimpleNamespace(schema_version=22),
+        _lock=threading.Lock(),
+        _transition_stop_sent_waiting_decision=False,
+        _safe_log_warning=warnings.append,
+        get_logger=lambda: SimpleNamespace(warning=warnings.append),
+        _force_fault=lambda reason: pytest.fail(reason),
+        _publish_stop=lambda: published.append(DriveCommand()),
+    )
+
+    TrafficShortcutPolicyNode._on_control_timer(node)
+
+    assert observations == [
+        {
+            'pressed': True,
+            'now': observations[0]['now'],
+            'initial_stop_armed': True,
+            'wait_for_signal': True,
+        }
+    ]
+    assert published == [DriveCommand()]
+    assert 'INITIAL_STOP_ARMED source=HEADLESS' in warnings
+    assert any('red-first wait started' in message for message in warnings)
+
+
+def test_red_first_wait_ignores_policy_stale_but_not_camera_stale():
+    node = _safe_node_state()
+    node.bundle.initial_stop_requires_stop_confirmation = True
+    node._fsm.state = MissionState.WAIT_FOR_SIGNAL
+    node._decision = None
+    node._awaiting_post_reset_decision = True
+    node._history_reset_monotonic = 0.0
+
+    assert TrafficShortcutPolicyNode._unsafe_reason_locked(node, 1.0) is None
+
+    node._last_camera_monotonic = 0.0
+    assert 'camera input' in TrafficShortcutPolicyNode._unsafe_reason_locked(
+        node,
+        1.0,
+    )
+
+
 def test_integrated_node_maps_sdl_lb_button_nine_to_initial_wait():
     observations = []
     operator_logs = []
@@ -2503,7 +2690,7 @@ def test_integrated_node_maps_sdl_lb_button_nine_to_initial_wait():
 
     node = SimpleNamespace(
         require_gamepad_hold=True,
-        bundle=SimpleNamespace(schema_version=16),
+        bundle=SimpleNamespace(schema_version=22),
         a_button_index=0,
         initial_stop_arm_button_index=9,
         _lock=threading.Lock(),
@@ -2705,6 +2892,7 @@ def test_traffic_shortcut_monitor_is_passive_and_has_no_inference_runtime():
         (19, (5, 1, 1), 3, False),
         (20, (5, 1, 1), 3, False),
         (21, (5, 1, 1), 3, False),
+        (22, (5, 1, 1), 3, False),
     ],
 )
 def test_traffic_light_viewer_accepts_speed35_bundle_contracts(
@@ -2718,7 +2906,7 @@ def test_traffic_light_viewer_accepts_speed35_bundle_contracts(
             schema_version=schema_version,
             detector=SimpleNamespace(
                 mode='yolo_cnn_classifier',
-                bbox_width_min=35 if schema_version == 21 else 40,
+                bbox_width_min=35 if schema_version in {21, 22} else 40,
                 bbox_width_max=225,
                 inference_every_n_frames=3,
                 classification_every_n_frames_after_detection=(

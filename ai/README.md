@@ -1053,7 +1053,7 @@ cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
 신호등 통합 runtime에는 두 policy artifact 전체와 검증된 ONNX를 atomic bundle로
 묶는다. builder는 Base schema v6/compact external history, shortcut schema v7/fixed
 speed `23`, 224 square warp, steering 계약과 ONNX SHA-256을 확인하고 기존 bundle을
-덮어쓰지 않는다. 현재 bundle schema v21은 2026-08-24 fix speed-35 Base의
+덮어쓰지 않는다. 현재 bundle schema v22는 2026-08-24 fix speed-35 Base의
 output/cap `35`, initial
 history `(0,35)×4`, token `[50,85]×4`를 exact 검사한다. 신호등 경로는 사람 보정
 GT로 재학습한 YOLO11s의
@@ -1062,15 +1062,16 @@ GT로 재학습한 YOLO11s의
 416×128로 바꿔 3-class `STOP/STRAIGHT/LEFT` CNN을 실행한다. classifier softmax
 확률 `0.50` 미만은 `UNKNOWN`이다. YOLO와 CNN은 같은 fresh frame에서 camera
 sequence 간격 3 이상마다 함께 실행하고 중간 frame에서는 cached bbox CNN을
-실행하지 않는다. `LB+A` 또는 headless 시작은 즉시 정지 대기에 들어간다. STOP은
-scheduled fresh YOLO+CNN의 같은 raw class 5회, STRAIGHT/LEFT는 첫 fresh 판독
-1회에서 확정한다. STRAIGHT는 Base, LEFT는 한 제어 주기 정지 뒤 바로 shortcut으로
+실행하지 않는다. `LB+A` 또는 headless 시작은 즉시 정지 대기에 들어간다. STOP
+scheduled fresh YOLO+CNN 같은 raw class 5회가 반드시 먼저 확정돼야 하며, 그 전의
+STRAIGHT/LEFT는 출발시키지 않는다. STOP 확정 뒤 첫 fresh STRAIGHT는 Base,
+LEFT는 한 제어 주기 정지 뒤 바로 shortcut으로
 진입한다. 첫 출발 뒤 STOP은 motion action에서 영구 무시하고 navigation LEFT도 fresh 1회로
 확정한다. 성공한 shortcut은 연속 A-hold 활성화당 한 번이며 A를 0.12초 이상
 놓았다 다시 누르면 재무장된다. scheduled YOLO no-box와 fresh UNKNOWN은 후보를
 초기화하며 no-box만으로 정지를 해제하지 않는다. policy/post-reset과 Base shadow
 freshness는 0.50초, IPC timeout은 0.40초다. 첫 Shortcut motor command부터 4초에
-Base self-AR shadow로 handoff하며 schema v1-v20 rollback bundle은 그대로 보존한다.
+Base self-AR shadow로 handoff하며 schema v1-v21 rollback bundle은 그대로 보존한다.
 
 ```bash
 cd /home/xytron/xycar_ws/apps/xycar_ws_mgw/ai
@@ -1080,7 +1081,7 @@ SOURCE_SIGNAL_BUNDLE=artifacts/models/traffic-shortcut-nice-ada-very-fast-fix-sp
   --shortcut-artifact "${SOURCE_SIGNAL_BUNDLE}/policies/nice-shortcut-resnet18-squarewarp-speed23-45sessions-20260821" \
   --traffic-model "${SOURCE_SIGNAL_BUNDLE}/signal/traffic_light.onnx" \
   --traffic-classifier "${SOURCE_SIGNAL_BUNDLE}/signal/tl_cls.onnx" \
-  --artifact-id traffic-shortcut-nice-ada-very-fast-fix-speed35-regression-resnet18-4s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl35to225-initial-wait-stop5-go1-stoponce-leftsession1-search3-classify3-vote-yolo3-t500-45sessions-20260824 \
+  --artifact-id traffic-shortcut-nice-ada-very-fast-fix-speed35-regression-resnet18-4s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl35to225-red5first-go1-stoponce-leftsession1-search3-classify3-vote-yolo3-t500-45sessions-20260824 \
   --output-root artifacts/models
 ```
 

@@ -35,6 +35,7 @@ from xycar_ai.export_traffic_shortcut_bundle import (
     SPEED35_FIX_INITIAL_WAIT_GO1_SESSION_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_FIX_INITIAL_WAIT_GO1_SESSION_4S_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_FIX_INITIAL_WAIT_GO1_SESSION_4S_TL35_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    SPEED35_FIX_RED_REQUIRED_GO1_SESSION_4S_TL35_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
@@ -579,4 +580,48 @@ def test_human_bbox_traffic_bundle_manifests_preserve_models_and_version_votes(
     assert session_initial_wait_go1_4s_tl35["detector"] == {
         **session_initial_wait_go1_4s["detector"],
         "bbox_width_px": [35, 225],
+    }
+
+    red_required_go1_4s_tl35 = _bundle_manifest(
+        artifact_id=(
+            SPEED35_FIX_RED_REQUIRED_GO1_SESSION_4S_TL35_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+        schema_version=22,
+        consecutive_signal_reads_by_action=(5, 1, 1),
+        base_artifact=base,
+        shortcut_artifact=shortcut,
+        shortcut_artifact_id=EXPANDED_SHORTCUT_ID,
+        traffic_classifier=tmp_path / "classifier.onnx",
+    )
+    assert red_required_go1_4s_tl35["components"] == (
+        session_initial_wait_go1_4s_tl35["components"]
+    )
+    assert red_required_go1_4s_tl35["detector"] == (
+        session_initial_wait_go1_4s_tl35["detector"]
+    )
+    assert red_required_go1_4s_tl35["signal_vote"] == {
+        **session_initial_wait_go1_4s_tl35["signal_vote"],
+        "initial_stop_required_before_clear": True,
+    }
+    assert red_required_go1_4s_tl35["mission"] == {
+        **session_initial_wait_go1_4s_tl35["mission"],
+        "initial_stop": {
+            "gamepad_activation": (
+                "lb_held_on_a_enable_wait_for_confirmed_stop"
+            ),
+            "headless_activation": "emulate_lb_a_wait_for_confirmed_stop",
+            "stop_consecutive_reads": 5,
+            "require_stop_before_clear": True,
+            "pre_stop_non_stop_behavior": "reset_candidate_retain_wait",
+            "clear_classes": ["STRAIGHT", "LEFT"],
+            "clear_consecutive_reads": 1,
+            "clear_different_class_behavior": "restart_candidate_at_one",
+            "unknown_or_missing_behavior": "reset_candidate_retain_stop",
+            "post_clear_action_by_class": {
+                "STRAIGHT": "BASE",
+                "LEFT": "SHORTCUT",
+            },
+            "post_clear_stop_behavior": "ignore",
+            "ready_behavior": "log_once_on_first_fresh_stop",
+        },
     }

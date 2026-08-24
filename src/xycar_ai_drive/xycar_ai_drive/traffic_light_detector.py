@@ -1048,7 +1048,7 @@ class InitialStopSignalLatch:
 
 
 class InitialWaitSignalLatch:
-    """Wait stopped, vote one fresh raw class, then ignore later STOP."""
+    """Wait stopped, optionally require STOP, then ignore later STOP."""
 
     def __init__(
         self,
@@ -1058,6 +1058,7 @@ class InitialWaitSignalLatch:
         stop_consecutive_reads: int,
         left_consecutive_reads: int,
         straight_consecutive_reads: int,
+        require_stop_before_clear: bool = False,
     ) -> None:
         if bbox_width_min < 1 or bbox_width_max < bbox_width_min:
             raise ValueError('invalid traffic bbox width gate')
@@ -1077,6 +1078,7 @@ class InitialWaitSignalLatch:
             LampAction.LEFT: int(left_consecutive_reads),
             LampAction.STRAIGHT: int(straight_consecutive_reads),
         }
+        self._require_stop_before_clear = bool(require_stop_before_clear)
         self.reset()
 
     @property
@@ -1138,6 +1140,13 @@ class InitialWaitSignalLatch:
 
     def _observe_stopped(self, raw: SignalClass) -> LampAction:
         action = _signal_class_action(raw)
+        if (
+            self._phase == InitialStopPhase.WAIT_FOR_SIGNAL
+            and self._require_stop_before_clear
+            and action != LampAction.RED
+        ):
+            self._reset_candidate()
+            return LampAction.RED
         required_reads = self._required_reads_by_action.get(action)
         if required_reads is None:
             self._reset_candidate()

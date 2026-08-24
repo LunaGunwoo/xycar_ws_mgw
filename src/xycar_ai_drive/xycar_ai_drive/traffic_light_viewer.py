@@ -119,7 +119,7 @@ class TrafficLightViewerNode(Node):
                 self.bundle.detector.reuse_detected_bbox_between_yolo_frames
             ),
         )
-        if self.bundle.schema_version in {15, 16, 17, 18, 19, 20, 21}:
+        if self.bundle.schema_version in {15, 16, 17, 18, 19, 20, 21, 22}:
             self._latch = InitialWaitSignalLatch(
                 bbox_width_min=self.bundle.detector.bbox_width_min,
                 bbox_width_max=self.bundle.detector.bbox_width_max,
@@ -131,6 +131,9 @@ class TrafficLightViewerNode(Node):
                 ),
                 straight_consecutive_reads=(
                     self.bundle.detector.straight_consecutive_reads
+                ),
+                require_stop_before_clear=(
+                    self.bundle.initial_stop_requires_stop_confirmation
                 ),
             )
             self._latch.reset(
@@ -203,7 +206,7 @@ class TrafficLightViewerNode(Node):
         )
         clear_contract = (
             f',clear:{self.bundle.initial_stop_clear_consecutive_reads}'
-            if self.bundle.schema_version in {14, 15, 16, 17, 18, 19, 20, 21}
+            if self.bundle.schema_version in {14, 15, 16, 17, 18, 19, 20, 21, 22}
             else ''
         )
         self.get_logger().info(
@@ -241,9 +244,10 @@ class TrafficLightViewerNode(Node):
             19,
             20,
             21,
+            22,
         }:
             raise ValueError(
-                'traffic viewer supports classifier bundle schema 4..21'
+                'traffic viewer supports classifier bundle schema 4..22'
             )
         if detector.mode != 'yolo_cnn_classifier':
             raise ValueError(
@@ -251,7 +255,7 @@ class TrafficLightViewerNode(Node):
             )
         expected_width = (
             (35, 225)
-            if self.bundle.schema_version == 21
+            if self.bundle.schema_version in {21, 22}
             else (40, 225)
             if self.bundle.schema_version
             in {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
@@ -259,7 +263,7 @@ class TrafficLightViewerNode(Node):
         )
         expected_votes = (
             (5, 1, 1)
-            if self.bundle.schema_version in {17, 18, 19, 20, 21}
+            if self.bundle.schema_version in {17, 18, 19, 20, 21, 22}
             else (5, 3, 3)
             if self.bundle.schema_version == 16
             else (5, 5, 5)
@@ -741,7 +745,10 @@ class TrafficLightViewerApplication:
             f'vote: {snapshot.candidate_reads}/{snapshot.required_reads}\n'
             f'stop latch: {"ON" if snapshot.stop_latched else "OFF"}\n'
             + (
-                'schema v17..v21: fresh YOLO+CNN every 3 camera frames | '
+                'schema v22: require STOP 5 before STRAIGHT/LEFT 1 | '
+                'fresh YOLO+CNN every 3 camera frames | cached CNN disabled\n'
+                if self.node.bundle.schema_version == 22
+                else 'schema v17..v21: fresh YOLO+CNN every 3 camera frames | '
                 'STOP 5 | STRAIGHT/LEFT 1 | cached CNN disabled | '
                 'post-clear STOP ignored\n'
                 if self.node.bundle.schema_version in {17, 18, 19, 20, 21}
