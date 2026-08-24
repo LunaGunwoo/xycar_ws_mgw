@@ -3,12 +3,26 @@
     - topic: /xycar_motor
       type: std_msgs/msg/Float32MultiArray
       queue_size: 10
+    - topic: /xycar/parking/vesc_odom
+      type: nav_msgs/msg/Odometry
+      queue_size: 20
   </rosparam>
+  <param name="/wheelbase" value="0.33" />
   <group>
     <remap from="xycar_motor" to="/xycar_motor_safe" />
     <remap from="/xycar_motor" to="/xycar_motor_safe" />
     <include file="$(find xycar_motor)/launch/xycar_motor.launch" />
   </group>
+  <node pkg="vesc_ackermann"
+        type="vesc_to_odom_node"
+        name="vesc_to_odom_node"
+        output="screen">
+    <remap from="odom" to="/xycar/parking/vesc_odom" />
+    <param name="odom_frame" value="odom" />
+    <param name="base_frame" value="base_link" />
+    <param name="use_servo_cmd_to_calc_angular_velocity" value="true" />
+    <param name="publish_tf" value="false" />
+  </node>
   <node pkg="xycar_motor_safety"
         type="xycar_motor_watchdog.py"
         name="xycar_motor_watchdog"

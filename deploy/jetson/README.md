@@ -17,7 +17,7 @@ build·exec dependency closure만 Focal 안에서 source build한다.
 Focal GCC에서 필요한 `rmw/time.h`의 `<stdbool.h>` 호환 patch는 적용 전
 `images.lock.env`의 RMW commit을 검증한다.
 
-Motor image `xycar/noetic-motor:jp6.2.1-noetic-steering-v2`부터 외부
+Motor image `xycar/noetic-motor:jp6.2.1-noetic-steering-v3`부터 외부
 `/xycar_motor` angle은 normalized percent `-100..100`이고 ROS 1 watchdog이
 유효값만 `×0.5`로 변환해 내부 `/xycar_motor_safe` driver command
 `-50..50`으로 발행한다. 범위 밖 angle, malformed, NaN/Inf, stale와 시간 역행은
@@ -98,8 +98,13 @@ Moby의 명시적 호환 환경변수 `DOCKER_INSECURE_NO_IPTABLES_RAW=1`을 sys
 bridge port를 publish하지 않는다. motor/bridge는 host network, GPU는 network
 none만 사용한다.
 Motor bridge는 ROS 1 subscriber만 있을 때 type을 추론하지 못하는 dynamic bridge를
-사용하지 않는다. `/ros1_bridge/topics`에 `/xycar_motor`의 양쪽 type을 고정한
-parameter bridge를 사용하고, host와 container 사이 Fast DDS data path는
+사용하지 않는다. `/ros1_bridge/topics`에 `/xycar_motor`와
+`/xycar/parking/vesc_odom`의 양쪽 type을 고정한 parameter bridge를 사용한다.
+`vesc_to_odom_node`는 VESC speed와 servo position command를 wheelbase `0.33 m`로
+적분하며 `odom/base_link` frame의 `nav_msgs/Odometry`를 발행한다. TF는 주차
+localizer/EKF 한 곳만 발행하도록 ROS 1 node에서는 끈다. `motor` wrapper readiness는
+watchdog, motor, VESC driver, odometry node와 ROS 1/ROS 2 odometry 첫 sample을 모두 요구한다.
+host와 container 사이 Fast DDS data path는
 `FASTDDS_BUILTIN_TRANSPORTS=UDPv4`로 고정한다. Fast DDS가 host ROS 2 process와
 bridge container를 같은 machine의 shared-memory participant로 판단하므로 bridge는
 `--ipc host`와 wrapper를 실행한 host 사용자의 UID/GID를 함께 사용한다. IPC가

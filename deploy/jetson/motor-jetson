@@ -58,7 +58,7 @@ docker run --detach \
 motor_ready=false
 for _ in $(seq 1 30); do
     if docker exec "${MOTOR_CONTAINER}" bash -lc \
-        'source /opt/ros/noetic/setup.bash; nodes=$(rosnode list); grep -qx /xycar_motor_watchdog <<<"${nodes}" && grep -qx /xycar_motor <<<"${nodes}" && grep -qx /vesc_driver <<<"${nodes}"' \
+        'source /opt/ros/noetic/setup.bash; nodes=$(rosnode list); grep -qx /xycar_motor_watchdog <<<"${nodes}" && grep -qx /xycar_motor <<<"${nodes}" && grep -qx /vesc_driver <<<"${nodes}" && grep -qx /vesc_to_odom_node <<<"${nodes}"' \
         >/dev/null 2>&1; then
         motor_ready=true
         break
@@ -67,6 +67,12 @@ for _ in $(seq 1 30); do
 done
 if [ "${motor_ready}" != true ]; then
     docker logs "${MOTOR_CONTAINER}" >&2 || true
+    exit 1
+fi
+if ! docker exec "${MOTOR_CONTAINER}" bash -lc \
+    'source /opt/ros/noetic/setup.bash; timeout 5s rostopic echo -n 1 /xycar/parking/vesc_odom >/dev/null'; then
+    docker logs "${MOTOR_CONTAINER}" >&2 || true
+    echo "[ERROR] VESC odometry 첫 sample을 받지 못했습니다." >&2
     exit 1
 fi
 
@@ -85,9 +91,10 @@ docker run --detach \
     /opt/ros1_bridge/lib/ros1_bridge/parameter_bridge \
     /ros1_bridge/topics
 
-sleep 1
-if ! docker ps --format '{{.Names}}' | grep -Fxq "${BRIDGE_CONTAINER}"; then
+if ! timeout 6s bash -lc \
+    'source /opt/ros/humble/setup.bash; ROS_DOMAIN_ID=7 ROS_LOCALHOST_ONLY=1 RMW_IMPLEMENTATION=rmw_fastrtps_cpp FASTDDS_BUILTIN_TRANSPORTS=UDPv4 ros2 topic echo --once /xycar/parking/vesc_odom >/dev/null 2>&1'; then
     docker logs "${BRIDGE_CONTAINER}" >&2 || true
+    echo "[ERROR] ROS 2 bridge에서 VESC odometry 첫 sample을 받지 못했습니다." >&2
     exit 1
 fi
 
