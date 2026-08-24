@@ -119,7 +119,7 @@ class TrafficLightViewerNode(Node):
                 self.bundle.detector.reuse_detected_bbox_between_yolo_frames
             ),
         )
-        if self.bundle.schema_version in {15, 16, 17, 18, 19, 20}:
+        if self.bundle.schema_version in {15, 16, 17, 18, 19, 20, 21}:
             self._latch = InitialWaitSignalLatch(
                 bbox_width_min=self.bundle.detector.bbox_width_min,
                 bbox_width_max=self.bundle.detector.bbox_width_max,
@@ -203,7 +203,7 @@ class TrafficLightViewerNode(Node):
         )
         clear_contract = (
             f',clear:{self.bundle.initial_stop_clear_consecutive_reads}'
-            if self.bundle.schema_version in {14, 15, 16, 17, 18, 19, 20}
+            if self.bundle.schema_version in {14, 15, 16, 17, 18, 19, 20, 21}
             else ''
         )
         self.get_logger().info(
@@ -240,23 +240,26 @@ class TrafficLightViewerNode(Node):
             18,
             19,
             20,
+            21,
         }:
             raise ValueError(
-                'traffic viewer supports classifier bundle schema 4..20'
+                'traffic viewer supports classifier bundle schema 4..21'
             )
         if detector.mode != 'yolo_cnn_classifier':
             raise ValueError(
                 'traffic viewer requires yolo_cnn_classifier mode'
             )
         expected_width = (
-            (40, 225)
+            (35, 225)
+            if self.bundle.schema_version == 21
+            else (40, 225)
             if self.bundle.schema_version
             in {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
             else (45, 200)
         )
         expected_votes = (
             (5, 1, 1)
-            if self.bundle.schema_version in {17, 18, 19, 20}
+            if self.bundle.schema_version in {17, 18, 19, 20, 21}
             else (5, 3, 3)
             if self.bundle.schema_version == 16
             else (5, 5, 5)
@@ -738,10 +741,10 @@ class TrafficLightViewerApplication:
             f'vote: {snapshot.candidate_reads}/{snapshot.required_reads}\n'
             f'stop latch: {"ON" if snapshot.stop_latched else "OFF"}\n'
             + (
-                'schema v17..v20: fresh YOLO+CNN every 3 camera frames | '
+                'schema v17..v21: fresh YOLO+CNN every 3 camera frames | '
                 'STOP 5 | STRAIGHT/LEFT 1 | cached CNN disabled | '
                 'post-clear STOP ignored\n'
-                if self.node.bundle.schema_version in {17, 18, 19, 20}
+                if self.node.bundle.schema_version in {17, 18, 19, 20, 21}
                 else 'schema v16: fresh YOLO+CNN every 3 camera frames | '
                 'STOP 5 | STRAIGHT/LEFT 3 | cached CNN disabled | '
                 'post-clear STOP ignored\n'

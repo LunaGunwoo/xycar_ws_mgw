@@ -61,6 +61,7 @@ from xycar_ai_drive.traffic_shortcut_artifact import (
     EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_SESSION_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_SESSION_4S_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_SESSION_4S_TL35_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
@@ -1770,6 +1771,31 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
         )
         == EXPECTED_SPEED35_FIX_BASE_ARTIFACT_ID
     )
+    assert _load_signal_vote_contract(
+        {'signal_vote': initial_wait_go1_vote},
+        schema_version=21,
+        artifact_id=(
+            EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_SESSION_4S_TL35_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+    ) == (5, 1, 1)
+    assert (
+        _expected_shortcut_artifact_id(
+            schema_version=21,
+            artifact_id=(
+                EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_SESSION_4S_TL35_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    )
+    assert (
+        _expected_base_artifact_id(
+            schema_version=21,
+            artifact_id=(
+                EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_SESSION_4S_TL35_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_SPEED35_FIX_BASE_ARTIFACT_ID
+    )
     with pytest.raises(ArtifactContractError, match='signal vote'):
         _load_signal_vote_contract(
             {
@@ -2678,6 +2704,7 @@ def test_traffic_shortcut_monitor_is_passive_and_has_no_inference_runtime():
         (18, (5, 1, 1), 3, False),
         (19, (5, 1, 1), 3, False),
         (20, (5, 1, 1), 3, False),
+        (21, (5, 1, 1), 3, False),
     ],
 )
 def test_traffic_light_viewer_accepts_speed35_bundle_contracts(
@@ -2691,7 +2718,7 @@ def test_traffic_light_viewer_accepts_speed35_bundle_contracts(
             schema_version=schema_version,
             detector=SimpleNamespace(
                 mode='yolo_cnn_classifier',
-                bbox_width_min=40,
+                bbox_width_min=35 if schema_version == 21 else 40,
                 bbox_width_max=225,
                 inference_every_n_frames=3,
                 classification_every_n_frames_after_detection=(

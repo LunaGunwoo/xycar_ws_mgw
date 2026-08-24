@@ -34,6 +34,7 @@ from xycar_ai.export_traffic_shortcut_bundle import (
     SPEED35_FIX_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_FIX_INITIAL_WAIT_GO1_SESSION_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_FIX_INITIAL_WAIT_GO1_SESSION_4S_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    SPEED35_FIX_INITIAL_WAIT_GO1_SESSION_4S_TL35_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
@@ -554,3 +555,28 @@ def test_human_bbox_traffic_bundle_manifests_preserve_models_and_version_votes(
         session_initial_wait_go1_4s["components"]["base"]["artifact_id"]
         == SPEED35_FIX_BASE_ID
     )
+
+    session_initial_wait_go1_4s_tl35 = _bundle_manifest(
+        artifact_id=(
+            SPEED35_FIX_INITIAL_WAIT_GO1_SESSION_4S_TL35_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+        ),
+        schema_version=21,
+        consecutive_signal_reads_by_action=(5, 1, 1),
+        base_artifact=base,
+        shortcut_artifact=shortcut,
+        shortcut_artifact_id=EXPANDED_SHORTCUT_ID,
+        traffic_classifier=tmp_path / "classifier.onnx",
+    )
+    assert session_initial_wait_go1_4s_tl35["components"] == (
+        session_initial_wait_go1_4s["components"]
+    )
+    assert session_initial_wait_go1_4s_tl35["signal_vote"] == (
+        session_initial_wait_go1_4s["signal_vote"]
+    )
+    assert session_initial_wait_go1_4s_tl35["mission"] == (
+        session_initial_wait_go1_4s["mission"]
+    )
+    assert session_initial_wait_go1_4s_tl35["detector"] == {
+        **session_initial_wait_go1_4s["detector"],
+        "bbox_width_px": [35, 225],
+    }
