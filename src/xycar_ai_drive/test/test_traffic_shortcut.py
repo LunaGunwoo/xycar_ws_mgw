@@ -2580,6 +2580,7 @@ def test_traffic_shortcut_wrapper_rejects_orphans_and_cleans_process_group():
     assert 'kill -KILL -- "-${INNER_LAUNCH_PID}"' in wrapper_text
     assert "trap 'exit 129' HUP" in wrapper_text
     assert 'if [ "${CONTAINER_STARTED}" = true ]; then' in wrapper_text
+    assert '--history-reset-timeout-sec 0.50' in wrapper_text
     assert 'CONTAINER_STARTED=true\ndocker run --detach --rm' in wrapper_text
     assert 'INNER_LAUNCH_PID=""\nexit "${STATUS}"' not in wrapper_text
 

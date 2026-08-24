@@ -188,7 +188,7 @@ docker run --detach --rm \
     --shortcut-socket-path "${SHORTCUT_SOCKET}" \
     --device cuda \
     --warmup-count 3 \
-    --history-reset-timeout-sec 0.25
+    --history-reset-timeout-sec 0.50
 
 for _ in $(seq 1 200); do
     if [ -S "${BASE_SOCKET}" ] && [ -S "${SHORTCUT_SOCKET}" ]; then

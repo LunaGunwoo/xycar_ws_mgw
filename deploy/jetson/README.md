@@ -207,6 +207,7 @@ LEFT 확정 뒤 `TRANSITION_STOP cycle=1/1`에 해당하는 `[0,0]`을 정확히
 동안 Base self-AR shadow를 계속 갱신하되 발행하지 않는다. 첫 Shortcut motor
 command부터 8초 뒤 최신 0.50초 이내 shadow command를 즉시 발행하며,
 policy/post-reset age 0.50초 초과나 IPC 0.40초 timeout은 fallback 없이 정지한다.
+dual-policy server의 history reset timeout도 0.50초로 맞춘다.
 성공은 연속 A-hold 활성화당 한 번이고 0.12초 이상 A를 놓으면 재무장된다. 이후
 STOP은 shadow를 폐기하지 않는다. 기존 schema v18 process당 1회 fix-Base GO1,
 schema v17 기존 Base GO1, schema v16
