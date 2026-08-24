@@ -97,7 +97,7 @@ bridge_ready=false
 for bridge_attempt in 1 2; do
     start_bridge
     if timeout 30s bash -lc \
-        'source /opt/ros/humble/setup.bash; ROS_DOMAIN_ID=7 ROS_LOCALHOST_ONLY=1 RMW_IMPLEMENTATION=rmw_fastrtps_cpp FASTDDS_BUILTIN_TRANSPORTS=UDPv4 ros2 topic echo --once /xycar/parking/vesc_odom >/dev/null 2>&1'; then
+        'source /opt/ros/humble/setup.bash; ROS_DOMAIN_ID=7 ROS_LOCALHOST_ONLY=1 RMW_IMPLEMENTATION=rmw_fastrtps_cpp FASTDDS_BUILTIN_TRANSPORTS=UDPv4 ros2 topic echo --no-daemon --spin-time 5 --once /xycar/parking/vesc_odom nav_msgs/msg/Odometry >/dev/null 2>&1'; then
         bridge_ready=true
         break
     fi

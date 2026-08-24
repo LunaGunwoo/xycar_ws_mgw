@@ -105,7 +105,9 @@ Motor bridge는 ROS 1 subscriber만 있을 때 type을 추론하지 못하는 dy
 localizer/EKF 한 곳만 발행하도록 ROS 1 node에서는 끈다. `motor` wrapper readiness는
 watchdog, motor, VESC driver, odometry node와 ROS 1/ROS 2 odometry 첫 sample을 모두 요구한다.
 ROS 2 sample은 Fast DDS 검색 상태가 중간에 초기화되지 않도록 한 시도에서 같은
-subscriber로 최대 30초 동안 기다린다. parameter bridge가 초기화 전에 멈춘 현장
+subscriber로 최대 30초 동안 기다린다. readiness subscriber는 DDS discovery 전에
+topic type 조회가 실패하며 즉시 종료되지 않도록 daemon을 사용하지 않고
+`nav_msgs/msg/Odometry` type을 명시한다. parameter bridge가 초기화 전에 멈춘 현장
 사례를 위해 motor container와 zero watchdog은 유지하고 bridge container만 최대 한 번
 재시작한다. 두 시도 모두 sample이 없으면 기존과 같이 zero cleanup 후 종료한다.
 host와 container 사이 Fast DDS data path는
