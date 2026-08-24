@@ -104,6 +104,8 @@ Motor bridge는 ROS 1 subscriber만 있을 때 type을 추론하지 못하는 dy
 적분하며 `odom/base_link` frame의 `nav_msgs/Odometry`를 발행한다. TF는 주차
 localizer/EKF 한 곳만 발행하도록 ROS 1 node에서는 끈다. `motor` wrapper readiness는
 watchdog, motor, VESC driver, odometry node와 ROS 1/ROS 2 odometry 첫 sample을 모두 요구한다.
+ROS 2 sample은 Fast DDS 검색 순서 차이를 허용하도록 2초 단위로 최대 15회만
+재시도한다. 이 제한 안에 sample이 없으면 기존과 같이 zero cleanup 후 종료한다.
 host와 container 사이 Fast DDS data path는
 `FASTDDS_BUILTIN_TRANSPORTS=UDPv4`로 고정한다. Fast DDS가 host ROS 2 process와
 bridge container를 같은 machine의 shared-memory participant로 판단하므로 bridge는

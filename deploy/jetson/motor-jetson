@@ -91,10 +91,18 @@ docker run --detach \
     /opt/ros1_bridge/lib/ros1_bridge/parameter_bridge \
     /ros1_bridge/topics
 
-if ! timeout 6s bash -lc \
-    'source /opt/ros/humble/setup.bash; ROS_DOMAIN_ID=7 ROS_LOCALHOST_ONLY=1 RMW_IMPLEMENTATION=rmw_fastrtps_cpp FASTDDS_BUILTIN_TRANSPORTS=UDPv4 ros2 topic echo --once /xycar/parking/vesc_odom >/dev/null 2>&1'; then
+bridge_ready=false
+for _ in $(seq 1 15); do
+    if timeout 2s bash -lc \
+        'source /opt/ros/humble/setup.bash; ROS_DOMAIN_ID=7 ROS_LOCALHOST_ONLY=1 RMW_IMPLEMENTATION=rmw_fastrtps_cpp FASTDDS_BUILTIN_TRANSPORTS=UDPv4 ros2 topic echo --once /xycar/parking/vesc_odom >/dev/null 2>&1'; then
+        bridge_ready=true
+        break
+    fi
+    sleep 0.25
+done
+if [ "${bridge_ready}" != true ]; then
     docker logs "${BRIDGE_CONTAINER}" >&2 || true
-    echo "[ERROR] ROS 2 bridge에서 VESC odometry 첫 sample을 받지 못했습니다." >&2
+    echo "[ERROR] 제한된 재시도 안에 ROS 2 bridge VESC odometry 첫 sample을 받지 못했습니다." >&2
     exit 1
 fi
 
