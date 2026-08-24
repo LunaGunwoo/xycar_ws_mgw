@@ -1218,7 +1218,7 @@ class InitialWaitSignalLatch:
 
 
 class RepeatedSignalEncounterLatch:
-    """Stop once per signal encounter until one LEFT shortcut succeeds."""
+    """Wait stopped at headless start, then stop once per later encounter."""
 
     def __init__(
         self,
@@ -1279,15 +1279,14 @@ class RepeatedSignalEncounterLatch:
         initial_stop_armed: bool = False,
         wait_for_signal: bool = False,
     ) -> None:
+        if wait_for_signal and not initial_stop_armed:
+            raise ValueError('signal wait requires initial STOP arm')
         if wait_for_signal:
-            raise ValueError(
-                'repeated signal handling must approach before stopping'
-            )
-        self._phase = (
-            InitialStopPhase.ARMED
-            if initial_stop_armed
-            else InitialStopPhase.NAVIGATION
-        )
+            self._phase = InitialStopPhase.WAIT_FOR_SIGNAL
+        elif initial_stop_armed:
+            self._phase = InitialStopPhase.ARMED
+        else:
+            self._phase = InitialStopPhase.NAVIGATION
         self._raw = SignalClass.UNKNOWN
         self._candidate = SignalClass.UNKNOWN
         self._stop_started_monotonic: float | None = None

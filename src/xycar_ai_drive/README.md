@@ -502,12 +502,13 @@ detector와 3-class CNN 전체를 포함한다. detector ONNX SHA-256은
 - YOLO와 CNN은 같은 fresh frame에서 camera sequence 간격 3 이상마다 함께
   실행한다. 중간 frame에서는 cached bbox CNN을 실행하지 않는다. 제어 vote와
   GUI·terminal 진단은 fresh `YOLO_CNN` 또는 scheduled `YOLO_NO_BOX`에서만
-  갱신된다. LEFT shortcut 성공 전에는 매 신호등 조우에서 유효 bbox 폭에 도달하는
-  순간 정지하고, 실제 첫 `[0,0]` 발행부터 `signal_stop_wait_sec` 기본 `1.0초`를
-  기다린다. dwell 중 class는 버리며 그 뒤 첫 fresh STRAIGHT는 Base, LEFT는
-  shortcut으로 진행한다. STOP/UNKNOWN/no-box는 정지를 유지하고 다음 fresh 판정을
-  기다린다. STRAIGHT 출발 뒤에는 같은 신호의 bbox를 무시하며 accepted bbox가 없는
-  camera frame 30개가 누적됐을 때만 다음 조우를 재무장한다. lap counter는 없다.
+  갱신된다. headless 첫 시작은 즉시 정지하고, Gamepad 반복 모드와 headless의 이후
+  조우는 유효 bbox 폭에 도달하는 순간 정지한다. 실제 첫 `[0,0]` 발행부터
+  `signal_stop_wait_sec` 기본 `1.0초`를 기다리며 dwell 중 class는 버린다. 그 뒤 첫
+  fresh STRAIGHT는 Base, LEFT는 shortcut으로 진행한다. STOP/UNKNOWN/no-box는 정지를
+  유지하고 다음 fresh 판정을 기다린다. STRAIGHT 출발 뒤에는 같은 신호의 bbox를
+  무시하며 accepted bbox가 없는 camera frame 30개가 누적됐을 때만 다음 조우를
+  재무장한다. lap counter는 없다.
 - dwell 뒤 LEFT 첫 fresh 확정 frame에서는 정확히 한 제어 주기
   `[0,0]`을 발행하고, 다음 fresh frame부터 speed `23` ResNet18을 사용한다. 새
   Shortcut prediction을 기다리는 동안 같은 정지 command를 중복 발행하지 않으며
@@ -530,9 +531,10 @@ detector와 3-class CNN 전체를 포함한다. detector ONNX SHA-256은
   유지한다. SDL `game_controller_node`의 LB는 `buttons[9]`이며, `LB+A` 활성 edge는
   Base 접근과 반복 신호 처리를 선택하며 LB는 이후 놓아도 되지만 A는 계속 유지해야
   한다. A만 누르면 조우별 정지는 건너뛰고 Base로 즉시 출발하지만 LEFT shortcut
-  판정은 유지한다. `use_gamepad:=false`는 준비 완료 후 Base로 자동 출발하고 LEFT
-  성공 전까지 조우별 정지·dwell·fresh class 판정을 반복한다. 첫 번째 조우에서도
-  STOP이면 신호가 STRAIGHT 또는 LEFT로 바뀔 때까지 계속 정지한다.
+  판정은 유지한다. `use_gamepad:=false`는 시작부터 `[0,0]`을 유지하며 첫 실제 정지
+  발행부터 dwell을 시작한다. dwell 뒤 첫 fresh STRAIGHT에서만 Base로 출발하고,
+  LEFT는 shortcut으로 진입하며 STOP/UNKNOWN/no-box면 계속 정지한다. 첫 출발 뒤부터
+  LEFT 성공 전까지 이후 조우별 40px 정지·dwell·fresh class 판정을 반복한다.
   camera/IPC stale, ONNX shape·NaN/Inf,
   경쟁 publisher와 motor subscriber 소실은 어느 mode에서나 FAULT와 `[0,0]`이다.
   camera/Joy stale limit은 기존 0.25초, policy/post-reset 및 Base shadow freshness는
@@ -595,9 +597,10 @@ cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source inst
 건너뛰고 Base로 바로 출발하려면 A만 누른다. 이 경우에도 LEFT shortcut 판정은
 유지한다. A는 주행 내내 유지하며 LB는 활성화 뒤 놓아도 된다.
 
-대회 연속 주행은 Gamepad를 시작하지 않고 준비 완료 후 Base로 자동 출발한다.
-LEFT 성공 전까지 각 신호등에서 설정 폭 정지, 실제 정지 발행 기준 dwell, 첫 fresh
-class 판정을 반복한다.
+대회 연속 주행은 Gamepad를 시작하지 않고 시작부터 `[0,0]`으로 정지한다. 첫 실제
+정지 발행 기준 dwell 뒤 fresh STRAIGHT일 때만 Base로 출발하며, STOP/UNKNOWN/no-box는
+계속 정지하고 LEFT는 shortcut으로 진입한다. 첫 출발 뒤에는 LEFT 성공 전까지 이후
+각 신호등에서 설정 폭 정지, dwell, 첫 fresh class 판정을 반복한다.
 
 ```bash
 cd /home/xytron/xycar_ws_mgw

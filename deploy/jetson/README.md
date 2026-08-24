@@ -210,13 +210,14 @@ Base 구간과 shadow는 cap `35`, initial history `(0,35)×4`와 token `[50,85]
 사용하고, shortcut 구간의 고정 speed `23`은 변경하지 않는다.
 SDL `game_controller_node`의 LB `buttons[9]`와 A를 함께 누르면 Base 접근과 반복 신호
 처리를 시작하며 A만 누르면 조우별 정지를 건너뛰되 LEFT shortcut 판정은 유지한다.
-headless는 준비 완료 후 Base로 자동 출발한다. LEFT 성공 전에는 유효 bbox 폭에
-도달한 매 조우에서 `[0,0]`을 발행하고, 첫 실제 정지 발행부터
-`signal_stop_wait_sec` 기본 `1.0초`를 기다린다. dwell 중 class는 무시한다. 이후
-첫 fresh STRAIGHT는 Base, LEFT는 한 제어 주기 정지 뒤 shortcut, STOP/UNKNOWN/no-box는
-계속 정지다. STRAIGHT 출발 뒤 accepted bbox가 없는 camera frame 30개가 누적되면
-다음 조우를 재무장한다. 별도 lap counter는 없다. 터미널은 raw class 변경 즉시 및
-2 Hz heartbeat 외에 정지 trigger, dwell과 재무장 event를 출력한다.
+headless는 시작부터 `[0,0]`을 유지하고 첫 실제 정지 발행부터
+`signal_stop_wait_sec` 기본 `1.0초`를 기다린다. dwell 중 class는 무시하며, 이후
+첫 fresh STRAIGHT에서만 Base로 출발하고 LEFT는 한 제어 주기 정지 뒤 shortcut으로
+진입한다. STOP/UNKNOWN/no-box는 계속 정지다. 첫 출발 뒤 LEFT 성공 전에는 유효 bbox
+폭에 도달한 이후 각 조우에서 다시 정지한다. STRAIGHT 출발 뒤 accepted bbox가 없는
+camera frame 30개가 누적되면 다음 조우를 재무장한다. 별도 lap counter는 없다.
+터미널은 raw class 변경 즉시 및 2 Hz heartbeat 외에 정지 trigger, dwell과 재무장
+event를 출력한다.
 LEFT 확정 뒤 `TRANSITION_STOP cycle=1/1`에 해당하는 `[0,0]`을 정확히 한 번
 발행하고 다음 Shortcut prediction을 기다린다. shortcut이 실제 motor를 제어하는
 동안 Base self-AR shadow를 계속 갱신하되 발행하지 않는다. 첫 Shortcut motor
@@ -252,8 +253,8 @@ ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py \
 camera, gamepad와 motor publisher를 시작하므로 실차 실행마다 별도 직전 승인을
 받고 바퀴 지지/안전 공간, 전원 차단, A release·`Ctrl+C`, 경쟁 publisher 부재를
 확인한다. Gamepad mode에서 반복 조우 정지를 사용하려면 `buttons[9]`인 LB를 누른 채
-A를 누르고, 조우별 정지를 건너뛰려면 A만 누른다. headless는 위 명령으로 Base 접근을
-자동 시작한다.
+A를 누르고, 조우별 정지를 건너뛰려면 A만 누른다. headless는 위 명령으로 시작부터
+정지하며 첫 fresh STRAIGHT를 확인한 뒤에만 Base 주행을 시작한다.
 
 `use_monitor_gui:=true`에서는 ROS callback을 background executor가 계속 비우고
 Tk는 기본 15 Hz로 최신 snapshot만 렌더한다. `LIVE CAMERA`에는 가장 최신 camera

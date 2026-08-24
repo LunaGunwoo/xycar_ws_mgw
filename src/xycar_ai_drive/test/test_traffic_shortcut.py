@@ -868,6 +868,39 @@ def test_repeated_signal_encounter_stops_at_width_and_waits_after_publish():
     assert latch.phase == InitialStopPhase.PASSED
 
 
+def test_repeated_signal_headless_start_waits_before_first_motion():
+    latch = RepeatedSignalEncounterLatch(
+        bbox_width_min=40,
+        bbox_width_max=225,
+        stop_wait_sec=1.0,
+    )
+    latch.reset(initial_stop_armed=True, wait_for_signal=True)
+    straight = _signal(SignalClass.STRAIGHT, width=50)
+
+    assert latch.phase == InitialStopPhase.WAIT_FOR_SIGNAL
+    assert latch.observe(
+        straight,
+        now_monotonic=1.0,
+        detector_frame_span=3,
+    ) == LampAction.RED
+    assert latch.on_stop_command_published(now_monotonic=2.0)
+    assert latch.observe(
+        straight,
+        now_monotonic=2.999,
+        detector_frame_span=3,
+    ) == LampAction.RED
+    assert latch.observe(
+        None,
+        now_monotonic=3.0,
+        detector_frame_span=3,
+    ) == LampAction.RED
+    assert latch.observe(
+        straight,
+        now_monotonic=3.1,
+        detector_frame_span=3,
+    ) == LampAction.STRAIGHT
+
+
 def test_repeated_signal_encounter_rearms_after_thirty_missing_frames():
     latch = RepeatedSignalEncounterLatch(
         bbox_width_min=40,
@@ -2900,10 +2933,16 @@ def test_integrated_node_without_gamepad_does_not_require_joy():
     assert TrafficShortcutPolicyNode._can_enable_locked(node, 1.0)
 
 
-def test_schema22_headless_arms_repeated_approach_without_waiting_at_start():
+def test_schema22_headless_starts_stopped_and_begins_dwell_on_publish():
     observations = []
     published = []
     warnings = []
+    latch = RepeatedSignalEncounterLatch(
+        bbox_width_min=40,
+        bbox_width_max=225,
+        stop_wait_sec=1.0,
+    )
+    latch.reset(initial_stop_armed=True, wait_for_signal=True)
     node = SimpleNamespace(
         _next_graph_check_monotonic=math.inf,
         require_gamepad_hold=False,
@@ -2914,6 +2953,8 @@ def test_schema22_headless_arms_repeated_approach_without_waiting_at_start():
         ),
         bundle=SimpleNamespace(schema_version=22),
         _lock=threading.Lock(),
+        _lamp_latch=latch,
+        _effective_stop_wait_sec=1.0,
         _transition_stop_sent_waiting_decision=False,
         _safe_log_warning=warnings.append,
         get_logger=lambda: SimpleNamespace(warning=warnings.append),
@@ -2928,14 +2969,16 @@ def test_schema22_headless_arms_repeated_approach_without_waiting_at_start():
             'pressed': True,
             'now': observations[0]['now'],
             'initial_stop_armed': True,
-            'wait_for_signal': False,
+            'wait_for_signal': True,
         }
     ]
     assert published == [DriveCommand()]
     assert 'INITIAL_STOP_ARMED source=HEADLESS' in warnings
-    assert 'SIGNAL_APPROACH source=HEADLESS' in warnings
+    assert 'WAIT_FOR_SIGNAL source=HEADLESS' in warnings
+    assert 'SIGNAL_DWELL_STARTED duration=1s' in warnings
+    assert not latch.on_stop_command_published(now_monotonic=100.0)
     assert any(
-        'repeated signal handling started' in message
+        'signal wait started stopped' in message
         for message in warnings
     )
 

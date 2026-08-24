@@ -987,18 +987,13 @@ class TrafficShortcutPolicyNode(Node):
                 )
                 if not isinstance(self._lamp_latch, expected_latch_type):
                     raise RuntimeError('one-shot signal latch is missing')
-                effective_wait_for_signal = (
-                    False
-                    if self.bundle.schema_version == 22
-                    else wait_for_signal
-                )
                 self._fsm.enable(
                     initial_stop_armed=initial_stop_armed,
-                    wait_for_signal=effective_wait_for_signal,
+                    wait_for_signal=wait_for_signal,
                 )
                 self._lamp_latch.reset(
                     initial_stop_armed=initial_stop_armed,
-                    wait_for_signal=effective_wait_for_signal,
+                    wait_for_signal=wait_for_signal,
                 )
             else:
                 self._fsm.enable()
@@ -1824,7 +1819,7 @@ class TrafficShortcutPolicyNode(Node):
                     ),
                     wait_for_signal=(
                         self.bundle.schema_version
-                        in {14, 15, 16, 17, 18, 19, 20, 21}
+                        in {14, 15, 16, 17, 18, 19, 20, 21, 22}
                     ),
                 )
             reason = None
@@ -1875,9 +1870,13 @@ class TrafficShortcutPolicyNode(Node):
                             getattr(self, '_lamp_latch', None),
                             RepeatedSignalEncounterLatch,
                         )
-                        and decision.state == MissionState.INITIAL_STOP
+                        and decision.state
+                        in {
+                            MissionState.WAIT_FOR_SIGNAL,
+                            MissionState.INITIAL_STOP,
+                        }
                         and self._lamp_latch.on_stop_command_published(
-                            now_monotonic=now
+                            now_monotonic=time.monotonic()
                         )
                     ):
                         self._safe_log_warning(
@@ -1908,15 +1907,11 @@ class TrafficShortcutPolicyNode(Node):
                 22,
             }:
                 self._safe_log_warning('INITIAL_STOP_ARMED source=HEADLESS')
-                self._safe_log_warning(
-                    'SIGNAL_APPROACH source=HEADLESS'
-                    if self.bundle.schema_version == 22
-                    else 'WAIT_FOR_SIGNAL source=HEADLESS'
-                )
+                self._safe_log_warning('WAIT_FOR_SIGNAL source=HEADLESS')
             message = (
-                'Traffic shortcut headless repeated signal handling started; '
-                'approaching on Base until the configured YOLO width, then '
-                'stopping for the configured wait before one fresh class.'
+                'Traffic shortcut headless signal wait started stopped; the '
+                'first motor command remains [0,0] through the configured '
+                'wait and until one fresh STRAIGHT or LEFT class.'
                 if self.bundle.schema_version == 22
                 else 'Traffic shortcut headless signal search started; motor '
                 'remains stopped until READY and 1 fresh STRAIGHT/LEFT '
@@ -1947,6 +1942,20 @@ class TrafficShortcutPolicyNode(Node):
         if transition_stop_already_sent:
             return
         self._publish_stop()
+        with self._lock:
+            if (
+                isinstance(
+                    getattr(self, '_lamp_latch', None),
+                    RepeatedSignalEncounterLatch,
+                )
+                and self._lamp_latch.on_stop_command_published(
+                    now_monotonic=time.monotonic()
+                )
+            ):
+                self._safe_log_warning(
+                    'SIGNAL_DWELL_STARTED '
+                    f'duration={self._effective_stop_wait_sec:g}s'
+                )
 
     def _promote_base_shadow_locked(self, now: float) -> str | None:
         decision = self._base_shadow_decision
