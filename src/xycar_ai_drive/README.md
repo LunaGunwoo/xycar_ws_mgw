@@ -493,30 +493,30 @@ detector와 3-class CNN 전체를 포함한다. detector ONNX SHA-256은
 
 - detector는 BGR frame을 종횡비를 유지한 640×640 centered letterbox로 만들고,
   padding을 `(114,114,114)`로 채운 뒤 RGB float32 NCHW로 변환한다. confidence
-  `0.25` 이상 중 최고 confidence bbox 하나만 선택하며 폭 `35..225`를 gate하고
-  YOLO는 3 frame마다 탐색·갱신한다.
+  `0.25` 이상 중 최고 confidence bbox 하나만 선택한다. bundle 원본 gate는
+  `35..225`지만 schema v22 host runtime은 `signal_bbox_width_min_px` 기본 `40`을
+  적용해 실효 gate를 `40..225`로 만들며, YOLO는 3 frame마다 탐색·갱신한다.
 - 선택한 bbox의 각 축에 `15%` padding을 더한 crop을 Pillow bilinear로
   416×128 RGB에 resize하고 ImageNet normalization한 뒤 CNN에 넣는다. raw class는
   `STOP`, `STRAIGHT`, `LEFT`이며 softmax 최고 확률이 `0.50` 미만이면 `UNKNOWN`이다.
 - YOLO와 CNN은 같은 fresh frame에서 camera sequence 간격 3 이상마다 함께
   실행한다. 중간 frame에서는 cached bbox CNN을 실행하지 않는다. 제어 vote와
   GUI·terminal 진단은 fresh `YOLO_CNN` 또는 scheduled `YOLO_NO_BOX`에서만
-  갱신된다. 초기에는 STOP 같은 raw class 5회가 반드시 먼저 확정돼야 하며 그 전의
-  STRAIGHT/LEFT는 출발시키지 않는다. STOP 확정 뒤 첫 fresh STRAIGHT/LEFT에서
-  동작한다. fresh `UNKNOWN`과
-  no-box는 후보를 0으로 초기화한다. 초기 해제 뒤 STOP은 motion action에서 영구
-  무시하지만 pending navigation vote는 초기화한다. schema v22에는 no-box 자동
-  정지 해제가 없다.
-- 초기 또는 navigation LEFT 첫 fresh 확정 frame에서는 정확히 한 제어 주기
+  갱신된다. LEFT shortcut 성공 전에는 매 신호등 조우에서 유효 bbox 폭에 도달하는
+  순간 정지하고, 실제 첫 `[0,0]` 발행부터 `signal_stop_wait_sec` 기본 `1.0초`를
+  기다린다. dwell 중 class는 버리며 그 뒤 첫 fresh STRAIGHT는 Base, LEFT는
+  shortcut으로 진행한다. STOP/UNKNOWN/no-box는 정지를 유지하고 다음 fresh 판정을
+  기다린다. STRAIGHT 출발 뒤에는 같은 신호의 bbox를 무시하며 accepted bbox가 없는
+  camera frame 30개가 누적됐을 때만 다음 조우를 재무장한다. lap counter는 없다.
+- dwell 뒤 LEFT 첫 fresh 확정 frame에서는 정확히 한 제어 주기
   `[0,0]`을 발행하고, 다음 fresh frame부터 speed `23` ResNet18을 사용한다. 새
   Shortcut prediction을 기다리는 동안 같은 정지 command를 중복 발행하지 않으며
   0.50초를 넘기면 fail-close한다. 동시에 Base는 진입 전 history에서 시작한 self-AR shadow prediction을
   매 fresh frame 계속 갱신하지만 motor에는 발행하지 않는다. 첫 실제 shortcut
-  명령부터 4초에 최신 0.50초 이내 shadow command를 즉시 발행해 STOP 없이 Base로
-  복귀한다. 성공은 연속 A-hold 활성화당 한 번이다. A를 0.12초 이상 놓았다 다시
-  누르면 재무장되며, 더 짧은 입력 누락은 같은 활성화로 취급한다. 같은 활성화의
-  두 번째 LEFT에는 `LEFT_IGNORED reason=SESSION_COMPLETE action=RELEASE_A`를
-  출력한다. initial phase가 끝난 뒤 STOP은 shortcut과 shadow를 취소하지 않는다.
+  명령부터 `shortcut_duration_sec` 기본 `5.0초`에 최신 0.50초 이내 shadow
+  command를 즉시 발행해 STOP 없이 Base로 복귀한다. 성공은 Base shadow command와
+  history 승격까지 끝난 뒤에만 기록한다. 그 뒤 같은 process에서는 STOP과 LEFT를
+  모두 무시하고 Base로 계속 주행한다.
 - 실제 실행 history와 미발행 Base shadow history는 분리한다. schema v22 Base와
   shadow에는 cap `35`가
   적용된 Base prediction만 compact token으로 추가하고, handoff 성공 때만 활성
@@ -528,21 +528,21 @@ detector와 3-class CNN 전체를 포함한다. detector ONNX SHA-256은
   따라서 Base self-AR를 계속 갱신하면서도 실제 선택 policy decision을 함께 반환한다.
 - `use_gamepad:=true`에서는 OFF로 시작하고 A hold/release grace `0.12s` 계약을
   유지한다. SDL `game_controller_node`의 LB는 `buttons[9]`이며, `LB+A` 활성 edge는
-  즉시 `WAIT_FOR_SIGNAL` 정지 대기에 들어가며 LB는
-  이후 놓아도 되지만 A는 계속 유지해야 한다. fresh STOP 5회 전에는 STRAIGHT/LEFT가
-  보여도 계속 정지한다. STOP 확정 뒤 첫 fresh STRAIGHT는 Base 출발, LEFT는
-  shortcut 직행이다.
-  A만 누르면 Base로 즉시 출발하고 STOP을 처음부터 무시한다.
-  `use_gamepad:=false`도 자동 활성화 직후 동일하게 정지 대기하며 첫 fresh STOP에서
-  `READY`를 한 번 출력한다. camera/IPC stale, ONNX shape·NaN/Inf,
+  Base 접근과 반복 신호 처리를 선택하며 LB는 이후 놓아도 되지만 A는 계속 유지해야
+  한다. A만 누르면 조우별 정지는 건너뛰고 Base로 즉시 출발하지만 LEFT shortcut
+  판정은 유지한다. `use_gamepad:=false`는 준비 완료 후 Base로 자동 출발하고 LEFT
+  성공 전까지 조우별 정지·dwell·fresh class 판정을 반복한다. 첫 번째 조우에서도
+  STOP이면 신호가 STRAIGHT 또는 LEFT로 바뀔 때까지 계속 정지한다.
+  camera/IPC stale, ONNX shape·NaN/Inf,
   경쟁 publisher와 motor subscriber 소실은 어느 mode에서나 FAULT와 `[0,0]`이다.
   camera/Joy stale limit은 기존 0.25초, policy/post-reset 및 Base shadow freshness는
   0.50초, IPC timeout은 0.40초다. stale FAULT에는 실제 age와 limit를 출력한다.
 - 주행 terminal은 raw class가 바뀌면 즉시, 동일하면 기본 2 Hz로
   `SIGNAL raw=... cnn=... yolo=... source=... phase=... vote=... vote_update=YES/NO stop=...`을
-  출력한다. `signal_status_log_hz`로 heartbeat만 조정하며 READY, STOP 확정·해제와
-  LEFT/shortcut event는 즉시 별도 출력한다. 이 diagnostic 실패는 motion 판정을
-  변경하지 않는다.
+  출력한다. `signal_status_log_hz`로 heartbeat만 조정하며 bbox 정지 trigger,
+  dwell 시작·완료, 30-frame 재무장과 LEFT/shortcut event는 즉시 별도 출력한다.
+  시작 로그에는 bundle 원본 bbox/shortcut 값과 host 실효 bbox/dwell/shortcut 값을
+  함께 출력한다. 이 diagnostic 실패는 motion 판정을 변경하지 않는다.
 - 구독자가 있을 때만 `/traffic_shortcut/signal_debug`에 원본 camera timestamp와
   frame sequence, YOLO bbox/confidence, padded crop 좌표, CNN 3-class 확률,
   fresh/cached source, vote·phase, mission state와 `shortcut_status`를 signal-debug
@@ -587,26 +587,39 @@ schema v1 종료 STOP bundle과
 schema v2 red-3 bundle은 rollback용으로 삭제하거나 덮어쓰지 않는다.
 
 ```bash
-cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-ada-very-fast-fix-speed35-regression-resnet18-4s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl35to225-red5first-go1-stoponce-leftsession1-search3-classify3-vote-yolo3-t500-45sessions-20260824 use_camera:=true use_gamepad:=true allow_motion:=true use_monitor_gui:=true
+cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-ada-very-fast-fix-speed35-regression-resnet18-4s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl35to225-red5first-go1-stoponce-leftsession1-search3-classify3-vote-yolo3-t500-45sessions-20260824 signal_bbox_width_min_px:=40 signal_stop_wait_sec:=1.0 shortcut_duration_sec:=5.0 use_camera:=true use_gamepad:=true allow_motion:=true use_monitor_gui:=true
 ```
 
-신호를 기다리려면 `buttons[9]`인 LB를 누른 채 A를 누른다. 차량은 정지한 채
-fresh STOP 5회를 반드시 먼저 기다린다. 그 전에는 STRAIGHT/LEFT가 보여도 정지하고,
-STOP 확정 뒤 첫 STRAIGHT면 Base, LEFT면 shortcut으로 출발한다. STOP을 처음부터
-무시하고 Base로 바로 출발하려면 A만 누른다. A는 주행 내내 유지하며 LB는 활성화
-뒤 놓아도 된다.
+반복 신호 처리를 사용하려면 `buttons[9]`인 LB를 누른 채 A를 누른다. 차량은 Base로
+접근한 뒤 설정 폭에서 정지하고 dwell 뒤 fresh class를 판정한다. 조우별 정지를
+건너뛰고 Base로 바로 출발하려면 A만 누른다. 이 경우에도 LEFT shortcut 판정은
+유지한다. A는 주행 내내 유지하며 LB는 활성화 뒤 놓아도 된다.
 
-대회 연속 주행은 Gamepad를 시작하지 않고 정지 상태에서 신호등을 찾은 뒤
-첫 fresh STOP의 `READY`, STOP 5회 확정 뒤 STRAIGHT 또는 LEFT 첫 fresh 판독으로 자동 출발한다.
+대회 연속 주행은 Gamepad를 시작하지 않고 준비 완료 후 Base로 자동 출발한다.
+LEFT 성공 전까지 각 신호등에서 설정 폭 정지, 실제 정지 발행 기준 dwell, 첫 fresh
+class 판정을 반복한다.
 
 ```bash
-cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-ada-very-fast-fix-speed35-regression-resnet18-4s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl35to225-red5first-go1-stoponce-leftsession1-search3-classify3-vote-yolo3-t500-45sessions-20260824 use_camera:=true use_gamepad:=false allow_motion:=true use_monitor_gui:=true
+cd /home/xytron/xycar_ws_mgw
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+export ROS_DOMAIN_ID=7
+export ROS_NAMESPACE=xycar
+export ROS_LOCALHOST_ONLY=1
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+
+ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py \
+  bundle_id:=traffic-shortcut-nice-ada-very-fast-fix-speed35-regression-resnet18-4s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl35to225-red5first-go1-stoponce-leftsession1-search3-classify3-vote-yolo3-t500-45sessions-20260824 \
+  signal_bbox_width_min_px:=40 signal_stop_wait_sec:=1.0 \
+  shortcut_duration_sec:=5.0 \
+  use_camera:=true use_gamepad:=false allow_motion:=true \
+  use_monitor_gui:=false
 ```
 
 이 launch는 실제 camera와 motor publisher를 열 수 있으므로 매번 직전 승인을 받고
 바퀴 지지/안전 공간, 전원 차단, A release와 `Ctrl+C`, 경쟁 publisher 부재를
-확인한다. 성공한 좌회전을 다시 실행하려면 A를 0.12초 이상 놓았다 다시 누른다. 오프라인 성공은
-실차 주행 적합성을 보장하지 않는다.
+확인한다. 오프라인 성공은 실차 주행 적합성을 보장하지 않는다.
 
 ### 실시간 주행·신호등 통합 모니터
 
@@ -642,7 +655,7 @@ stale이면 빨간 경고만 표시하며 실제 motion fail-close는 기존 pol
 camera/IPC/graph 검사에 맡긴다.
 
 ```bash
-cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-ada-very-fast-fix-speed35-regression-resnet18-4s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl35to225-red5first-go1-stoponce-leftsession1-search3-classify3-vote-yolo3-t500-45sessions-20260824 use_camera:=true use_gamepad:=true allow_motion:=true use_monitor_gui:=true
+cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-ada-very-fast-fix-speed35-regression-resnet18-4s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl35to225-red5first-go1-stoponce-leftsession1-search3-classify3-vote-yolo3-t500-45sessions-20260824 signal_bbox_width_min_px:=40 signal_stop_wait_sec:=1.0 shortcut_duration_sec:=5.0 use_camera:=true use_gamepad:=true allow_motion:=true use_monitor_gui:=true
 ```
 
 이 옵션도 실제 camera와 motor publisher를 여는 같은 주행 launch이므로 매 실행 직전
@@ -668,6 +681,8 @@ ROS topic을 publish하지 않는다. 따라서 `/xycar_motor` endpoint와 motio
 없다. schema v22 GUI에는 3 frame마다 같은 fresh frame에서 갱신한 YOLO bbox와 CNN
 padding crop, bundle에 선언된 raw class 확률, bbox 폭 gate, STOP 5회 및
 STRAIGHT/LEFT 1회 vote, phase와 최종 `UNKNOWN/RED/LEFT/STRAIGHT`를 함께 표시한다.
+이 standalone viewer는 bundle 원본 판정 확인용이며 host policy의 반복 조우와
+`40px/1초/5초` override를 실행하지 않는다.
 `Reset vote / stop latch`는 현재
 진단 session을 초기화하며 frame이나 결과를 저장하지 않는다.
 
@@ -723,6 +738,8 @@ ros2 run xycar_ai_drive traffic_shortcut_gpu_server -- \
 
 ros2 launch xycar_ai_drive traffic_shortcut_policy.launch.py \
   bundle_id:=traffic-shortcut-nice-ada-very-fast-fix-speed35-regression-resnet18-4s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl35to225-red5first-go1-stoponce-leftsession1-search3-classify3-vote-yolo3-t500-45sessions-20260824 \
+  signal_bbox_width_min_px:=40 signal_stop_wait_sec:=1.0 \
+  shortcut_duration_sec:=5.0 \
   use_camera:=true use_gamepad:=true allow_motion:=true
 
 ros2 run xycar_ai_drive traffic_shortcut_policy --ros-args \

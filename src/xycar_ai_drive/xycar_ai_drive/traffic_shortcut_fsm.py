@@ -46,6 +46,7 @@ class TrafficShortcutFsm:
         one_shot_initial_stop: bool = False,
         initial_left_direct_shortcut: bool = False,
         rearm_shortcut_on_enable: bool = False,
+        repeat_initial_stop_until_shortcut: bool = False,
     ) -> None:
         if (
             not math.isfinite(shortcut_duration_sec)
@@ -59,12 +60,22 @@ class TrafficShortcutFsm:
         self.one_shot_initial_stop = bool(one_shot_initial_stop)
         self.initial_left_direct_shortcut = bool(initial_left_direct_shortcut)
         self.rearm_shortcut_on_enable = bool(rearm_shortcut_on_enable)
+        self.repeat_initial_stop_until_shortcut = bool(
+            repeat_initial_stop_until_shortcut
+        )
         if (
             self.initial_left_direct_shortcut
             and not self.one_shot_initial_stop
         ):
             raise ValueError(
                 'initial LEFT shortcut requires one-shot mission mode'
+            )
+        if (
+            self.repeat_initial_stop_until_shortcut
+            and not self.one_shot_initial_stop
+        ):
+            raise ValueError(
+                'repeated initial STOP requires one-shot mission mode'
             )
         self.state = MissionState.OFF
         self.shortcut_completed = False
@@ -206,6 +217,15 @@ class TrafficShortcutFsm:
             )
         if self.shortcut_started_monotonic is None:
             self.shortcut_started_monotonic = now_monotonic
+
+    def rearm_initial_stop(self) -> bool:
+        if not self.repeat_initial_stop_until_shortcut:
+            raise RuntimeError('repeated initial STOP is not enabled')
+        if self.state != MissionState.BASE or self.shortcut_completed:
+            return False
+        self.initial_stop_armed = True
+        self.initial_stop_consumed = False
+        return True
 
     def on_base_shadow_promoted(self) -> None:
         if not self.seamless_base_handoff:

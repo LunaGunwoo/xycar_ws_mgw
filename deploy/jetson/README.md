@@ -191,30 +191,33 @@ inner launch leader가 먼저 사라진 경우에도 남은 process group과 CUD
 정리하며, SIGINT/SIGTERM 제한 시간을 넘긴 고아 group은 마지막에 SIGKILL로 제거한다.
 이전 `traffic_shortcut_policy` process가 남아 있으면 새 실행을 거부한다.
 schema v22는 2026-08-24 fix speed-35 Base와 사람 보정 YOLO11s의 640 letterbox 결과에서 confidence `0.25` 이상
-최고 box 하나만 선택하고 폭 `35..225`를 gate한다. 각 축 `15%` padded crop은
+최고 box 하나만 선택한다. bundle 원본 폭 gate `35..225`는 checksum 검증과 함께
+유지하고 host의 `signal_bbox_width_min_px` 기본 `40`을 적용해 실효 gate를
+`40..225`로 만든다. 각 축 `15%` padded crop은
 Pillow bilinear 416×128/ImageNet 전처리 후 `STOP/STRAIGHT/LEFT` CNN으로 분류한다.
 softmax `0.50` 미만은 `UNKNOWN`이다. YOLO와 CNN은 같은 fresh frame에서 camera
 sequence 간격 3 이상마다 함께 실행하고, 중간 frame에서는 cached CNN을 실행하지 않는다.
 Base 구간과 shadow는 cap `35`, initial history `(0,35)×4`와 token `[50,85]×4`를
 사용하고, shortcut 구간의 고정 speed `23`은 변경하지 않는다.
-SDL `game_controller_node`의 LB `buttons[9]`와 A를 함께 누르는 Gamepad mode 및
-headless mode는 활성화 순간부터 motor 정지를 유지한다.
-STOP은 3 camera frame마다 실행하는 fresh YOLO+CNN의 같은 raw class 5회가 반드시
-먼저 확정돼야 한다. 이전 STRAIGHT/LEFT는 출발시키지 않는다. STOP 확정 뒤 첫
-STRAIGHT는 Base로 출발하고 첫 LEFT는 한 제어 주기 정지 뒤 shortcut으로 직행한다.
-첫 출발 뒤 STOP은 motion action에서 무시하고 LEFT fresh 1회는 shortcut을 시작한다.
-headless 첫 fresh STOP은
-`READY`를 출력한다. 터미널 `SIGNAL`은 raw class 변경 즉시 및 2 Hz로 class,
-CNN/YOLO 확률, phase, vote와 `vote_update=YES/NO`를 출력한다. scheduled YOLO miss는
-fresh vote를 초기화하며 정지를 자동 해제하지 않는다.
+SDL `game_controller_node`의 LB `buttons[9]`와 A를 함께 누르면 Base 접근과 반복 신호
+처리를 시작하며 A만 누르면 조우별 정지를 건너뛰되 LEFT shortcut 판정은 유지한다.
+headless는 준비 완료 후 Base로 자동 출발한다. LEFT 성공 전에는 유효 bbox 폭에
+도달한 매 조우에서 `[0,0]`을 발행하고, 첫 실제 정지 발행부터
+`signal_stop_wait_sec` 기본 `1.0초`를 기다린다. dwell 중 class는 무시한다. 이후
+첫 fresh STRAIGHT는 Base, LEFT는 한 제어 주기 정지 뒤 shortcut, STOP/UNKNOWN/no-box는
+계속 정지다. STRAIGHT 출발 뒤 accepted bbox가 없는 camera frame 30개가 누적되면
+다음 조우를 재무장한다. 별도 lap counter는 없다. 터미널은 raw class 변경 즉시 및
+2 Hz heartbeat 외에 정지 trigger, dwell과 재무장 event를 출력한다.
 LEFT 확정 뒤 `TRANSITION_STOP cycle=1/1`에 해당하는 `[0,0]`을 정확히 한 번
 발행하고 다음 Shortcut prediction을 기다린다. shortcut이 실제 motor를 제어하는
 동안 Base self-AR shadow를 계속 갱신하되 발행하지 않는다. 첫 Shortcut motor
-command부터 4초 뒤 최신 0.50초 이내 shadow command를 즉시 발행하며,
+command부터 `shortcut_duration_sec` 기본 `5.0초` 뒤 최신 0.50초 이내 shadow
+command를 즉시 발행하며,
 policy/post-reset age 0.50초 초과나 IPC 0.40초 timeout은 fallback 없이 정지한다.
 dual-policy server의 history reset timeout도 0.50초로 맞춘다.
-성공은 연속 A-hold 활성화당 한 번이고 0.12초 이상 A를 놓으면 재무장된다. 이후
-STOP은 shadow를 폐기하지 않는다. 기존 schema v21 35px gate/RED 비필수 초기 대기,
+성공은 Base shadow 승격까지 끝난 뒤에만 기록하며 이후 같은 process에서는 STOP과
+LEFT를 모두 무시하고 Base로 계속 주행한다. 시작 로그에는 bundle 원본 `35px/4초`와
+실효 `40px/1초/5초`를 함께 표시한다. 기존 schema v21 35px gate/RED 비필수 초기 대기,
 schema v20 4초/40px gate와 schema v19 8초 session-rearm,
 schema v18 process당 1회 fix-Base GO1,
 schema v17 기존 Base GO1, schema v16
@@ -225,15 +228,23 @@ initial-stop15/nonstop3, schema v13 `stop15-go15`, schema v12 `stop10-go30`, sch
 bundle은 rollback용으로 보존한다.
 
 ```bash
-cd /home/xytron/xycar_ws_mgw && source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py bundle_id:=traffic-shortcut-nice-ada-very-fast-fix-speed35-regression-resnet18-4s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl35to225-red5first-go1-stoponce-leftsession1-search3-classify3-vote-yolo3-t500-45sessions-20260824 use_camera:=true use_gamepad:=true allow_motion:=true use_monitor_gui:=true
+cd /home/xytron/xycar_ws_mgw
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 launch xycar_ai_drive jetson_traffic_shortcut.launch.py \
+  bundle_id:=traffic-shortcut-nice-ada-very-fast-fix-speed35-regression-resnet18-4s-shadow-ar-handoff-yolo11s-humanbbox-cnn416-actions3-conf50-tl35to225-red5first-go1-stoponce-leftsession1-search3-classify3-vote-yolo3-t500-45sessions-20260824 \
+  signal_bbox_width_min_px:=40 signal_stop_wait_sec:=1.0 \
+  shortcut_duration_sec:=5.0 \
+  use_camera:=true use_gamepad:=false allow_motion:=true \
+  use_monitor_gui:=false
 ```
 
 camera, gamepad와 motor publisher를 시작하므로 실차 실행마다 별도 직전 승인을
 받고 바퀴 지지/안전 공간, 전원 차단, A release·`Ctrl+C`, 경쟁 publisher 부재를
-확인한다. 정지 상태에서 첫 신호를 판정하려면 `buttons[9]`인 LB를 누른 채 A를
-누르고, STOP을 처음부터 무시하며 Base로 즉시 출발하려면 A만 누른다. 정지 중에도 A를 유지하며
-STOP 5회 확정 뒤 STRAIGHT 또는 LEFT의 첫 fresh 판독에서 자동 출발한다. 좌회전 성공
-one-shot을 다시 실행하려면 A를 0.12초 이상 놓았다가 다시 누른다.
+확인한다. Gamepad mode에서 반복 조우 정지를 사용하려면 `buttons[9]`인 LB를 누른 채
+A를 누르고, 조우별 정지를 건너뛰려면 A만 누른다. headless는 위 명령으로 Base 접근을
+자동 시작한다.
 
 `use_monitor_gui:=true`에서는 ROS callback을 background executor가 계속 비우고
 Tk는 기본 15 Hz로 최신 snapshot만 렌더한다. `LIVE CAMERA`에는 가장 최신 camera

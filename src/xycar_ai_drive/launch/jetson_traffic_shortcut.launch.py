@@ -23,6 +23,11 @@ def generate_launch_description():
         'initial_stop_arm_button_index'
     )
     signal_status_log_hz = LaunchConfiguration('signal_status_log_hz')
+    signal_bbox_width_min = LaunchConfiguration(
+        'signal_bbox_width_min_px'
+    )
+    signal_stop_wait = LaunchConfiguration('signal_stop_wait_sec')
+    shortcut_duration = LaunchConfiguration('shortcut_duration_sec')
     use_monitor_gui = LaunchConfiguration('use_monitor_gui')
     monitor_refresh_hz = LaunchConfiguration('monitor_refresh_hz')
     wrapper = (
@@ -57,6 +62,18 @@ def generate_launch_description():
                 default_value='2.0',
             ),
             DeclareLaunchArgument(
+                'signal_bbox_width_min_px',
+                default_value='40',
+            ),
+            DeclareLaunchArgument(
+                'signal_stop_wait_sec',
+                default_value='1.0',
+            ),
+            DeclareLaunchArgument(
+                'shortcut_duration_sec',
+                default_value='5.0',
+            ),
+            DeclareLaunchArgument(
                 'use_monitor_gui',
                 default_value='false',
             ),
@@ -80,6 +97,12 @@ def generate_launch_description():
                         initial_stop_arm_button_index,
                     ],
                     ['signal_status_log_hz:=', signal_status_log_hz],
+                    [
+                        'signal_bbox_width_min_px:=',
+                        signal_bbox_width_min,
+                    ],
+                    ['signal_stop_wait_sec:=', signal_stop_wait],
+                    ['shortcut_duration_sec:=', shortcut_duration],
                     ['use_monitor_gui:=', use_monitor_gui],
                     ['monitor_refresh_hz:=', monitor_refresh_hz],
                 ],

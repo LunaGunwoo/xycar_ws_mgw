@@ -35,6 +35,11 @@ def generate_launch_description():
         'initial_stop_arm_button_index'
     )
     signal_status_log_hz = LaunchConfiguration('signal_status_log_hz')
+    signal_bbox_width_min = LaunchConfiguration(
+        'signal_bbox_width_min_px'
+    )
+    signal_stop_wait = LaunchConfiguration('signal_stop_wait_sec')
+    shortcut_duration = LaunchConfiguration('shortcut_duration_sec')
     use_monitor_gui = LaunchConfiguration('use_monitor_gui')
     monitor_refresh_hz = LaunchConfiguration('monitor_refresh_hz')
 
@@ -80,6 +85,18 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 'signal_status_log_hz',
                 default_value='2.0',
+            ),
+            DeclareLaunchArgument(
+                'signal_bbox_width_min_px',
+                default_value='40',
+            ),
+            DeclareLaunchArgument(
+                'signal_stop_wait_sec',
+                default_value='1.0',
+            ),
+            DeclareLaunchArgument(
+                'shortcut_duration_sec',
+                default_value='5.0',
             ),
             DeclareLaunchArgument(
                 'use_monitor_gui',
@@ -155,6 +172,18 @@ def generate_launch_description():
                         ),
                         'signal_status_log_hz': ParameterValue(
                             signal_status_log_hz,
+                            value_type=float,
+                        ),
+                        'signal_bbox_width_min_px': ParameterValue(
+                            signal_bbox_width_min,
+                            value_type=int,
+                        ),
+                        'signal_stop_wait_sec': ParameterValue(
+                            signal_stop_wait,
+                            value_type=float,
+                        ),
+                        'shortcut_duration_sec': ParameterValue(
+                            shortcut_duration,
                             value_type=float,
                         ),
                     },

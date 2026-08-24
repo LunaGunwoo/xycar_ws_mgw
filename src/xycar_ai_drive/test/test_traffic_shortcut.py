@@ -22,6 +22,7 @@ from xycar_ai_drive.traffic_light_detector import (
     LetterboxTransform,
     LampAction,
     LampReading,
+    RepeatedSignalEncounterLatch,
     SignalClass,
     SignalInspection,
     SignalReading,
@@ -805,6 +806,278 @@ def test_initial_wait_latch_requires_confirmed_stop_before_go():
     assert latch.snapshot.phase == InitialStopPhase.NAVIGATION
     assert latch.observe(stop) == LampAction.UNKNOWN
     assert latch.snapshot.stop_ignored
+
+
+def test_repeated_signal_encounter_stops_at_width_and_waits_after_publish():
+    latch = RepeatedSignalEncounterLatch(
+        bbox_width_min=40,
+        bbox_width_max=225,
+        stop_wait_sec=1.0,
+    )
+    latch.reset(initial_stop_armed=True)
+
+    assert latch.observe(
+        _signal(SignalClass.STOP, width=39),
+        now_monotonic=1.0,
+        detector_frame_span=3,
+    ) == LampAction.UNKNOWN
+    assert latch.phase == InitialStopPhase.ARMED
+
+    assert latch.observe(
+        _signal(SignalClass.UNKNOWN, width=40),
+        now_monotonic=1.1,
+        detector_frame_span=3,
+    ) == LampAction.RED
+    assert latch.phase == InitialStopPhase.WAIT_FOR_SIGNAL
+
+    # Classifications do not count until an actual STOP command starts dwell.
+    assert latch.observe(
+        _signal(SignalClass.LEFT, width=50),
+        now_monotonic=5.0,
+        detector_frame_span=3,
+    ) == LampAction.RED
+    assert latch.on_stop_command_published(now_monotonic=10.0)
+    assert not latch.on_stop_command_published(now_monotonic=10.1)
+    assert latch.observe(
+        _signal(SignalClass.STRAIGHT, width=50),
+        now_monotonic=10.999,
+        detector_frame_span=3,
+    ) == LampAction.RED
+
+    assert latch.observe(
+        _signal(SignalClass.STOP, width=50),
+        now_monotonic=11.0,
+        detector_frame_span=3,
+    ) == LampAction.RED
+    assert latch.phase == InitialStopPhase.STOPPED
+    assert latch.observe(
+        None,
+        now_monotonic=11.1,
+        detector_frame_span=3,
+    ) == LampAction.RED
+    assert latch.observe(
+        _signal(SignalClass.UNKNOWN, width=50),
+        now_monotonic=11.15,
+        detector_frame_span=3,
+    ) == LampAction.RED
+    assert latch.observe(
+        _signal(SignalClass.STRAIGHT, width=50),
+        now_monotonic=11.2,
+        detector_frame_span=3,
+    ) == LampAction.STRAIGHT
+    assert latch.phase == InitialStopPhase.PASSED
+
+
+def test_repeated_signal_encounter_rearms_after_thirty_missing_frames():
+    latch = RepeatedSignalEncounterLatch(
+        bbox_width_min=40,
+        bbox_width_max=225,
+        stop_wait_sec=1.0,
+    )
+    latch.reset(initial_stop_armed=True)
+    latch.observe(
+        _signal(SignalClass.STRAIGHT),
+        now_monotonic=0.0,
+        detector_frame_span=3,
+    )
+    latch.on_stop_command_published(now_monotonic=0.1)
+    assert latch.observe(
+        _signal(SignalClass.STRAIGHT),
+        now_monotonic=1.1,
+        detector_frame_span=3,
+    ) == LampAction.STRAIGHT
+
+    assert latch.observe(
+        _signal(SignalClass.LEFT),
+        now_monotonic=1.2,
+        detector_frame_span=3,
+    ) == LampAction.UNKNOWN
+    for step in range(9):
+        assert latch.observe(
+            None,
+            now_monotonic=2.0 + step,
+            detector_frame_span=3,
+        ) == LampAction.UNKNOWN
+        assert not latch.rearmed_on_last_observation
+    assert latch.observe(
+        None,
+        now_monotonic=11.0,
+        detector_frame_span=3,
+    ) == LampAction.UNKNOWN
+    assert latch.rearmed_on_last_observation
+    assert latch.phase == InitialStopPhase.ARMED
+
+
+def test_repeated_signal_fsm_handles_three_encounters_then_ignores_left():
+    latch = RepeatedSignalEncounterLatch(
+        bbox_width_min=40,
+        bbox_width_max=225,
+        stop_wait_sec=1.0,
+    )
+    fsm = TrafficShortcutFsm(
+        shortcut_duration_sec=5.0,
+        seamless_base_handoff=True,
+        one_shot_initial_stop=True,
+        initial_left_direct_shortcut=True,
+        repeat_initial_stop_until_shortcut=True,
+    )
+    latch.reset(initial_stop_armed=True)
+    fsm.enable(initial_stop_armed=True)
+
+    now = 1.0
+    for _ in range(2):
+        signal = latch.observe(
+            _signal(SignalClass.STRAIGHT),
+            now_monotonic=now,
+            detector_frame_span=3,
+        )
+        assert fsm.on_frame(signal, now_monotonic=now).publish_stop
+        latch.on_stop_command_published(now_monotonic=now + 0.1)
+        signal = latch.observe(
+            _signal(SignalClass.STRAIGHT),
+            now_monotonic=now + 1.1,
+            detector_frame_span=3,
+        )
+        assert fsm.on_frame(
+            signal,
+            now_monotonic=now + 1.1,
+        ).policy == PolicyChoice.BASE
+        for miss in range(10):
+            signal = latch.observe(
+                None,
+                now_monotonic=now + 2.0 + miss,
+                detector_frame_span=3,
+            )
+            if latch.rearmed_on_last_observation:
+                assert fsm.rearm_initial_stop()
+            assert fsm.on_frame(
+                signal,
+                now_monotonic=now + 2.0 + miss,
+            ).policy == PolicyChoice.BASE
+        now += 20.0
+
+    signal = latch.observe(
+        _signal(SignalClass.LEFT),
+        now_monotonic=now,
+        detector_frame_span=3,
+    )
+    assert fsm.on_frame(signal, now_monotonic=now).publish_stop
+    latch.on_stop_command_published(now_monotonic=now + 0.1)
+    signal = latch.observe(
+        _signal(SignalClass.LEFT),
+        now_monotonic=now + 1.1,
+        detector_frame_span=3,
+    )
+    switch = fsm.on_frame(signal, now_monotonic=now + 1.1)
+    assert switch.state == MissionState.SWITCH_TO_SHORTCUT
+    assert switch.publish_stop
+    assert fsm.on_frame(
+        signal,
+        now_monotonic=now + 1.2,
+    ).policy == PolicyChoice.SHORTCUT
+    fsm.on_shortcut_command_published(now_monotonic=now + 2.0)
+    assert fsm.on_control_tick(now_monotonic=now + 6.999) is None
+    assert fsm.on_control_tick(
+        now_monotonic=now + 7.0,
+    ).promote_base_shadow
+    fsm.on_base_shadow_promoted()
+    assert fsm.shortcut_completed
+    assert fsm.on_frame(
+        LampAction.LEFT,
+        now_monotonic=now + 7.1,
+    ).policy == PolicyChoice.BASE
+    fsm.disable()
+    fsm.enable(initial_stop_armed=False)
+    assert fsm.shortcut_completed
+    assert fsm.on_frame(
+        LampAction.LEFT,
+        now_monotonic=now + 7.2,
+    ).policy == PolicyChoice.BASE
+
+
+@pytest.mark.parametrize('left_encounter', [1, 2, 3, None])
+def test_repeated_signal_left_can_arrive_on_any_of_three_encounters(
+    left_encounter,
+):
+    latch = RepeatedSignalEncounterLatch(
+        bbox_width_min=40,
+        bbox_width_max=225,
+        stop_wait_sec=1.0,
+    )
+    fsm = TrafficShortcutFsm(
+        shortcut_duration_sec=5.0,
+        seamless_base_handoff=True,
+        one_shot_initial_stop=True,
+        initial_left_direct_shortcut=True,
+        repeat_initial_stop_until_shortcut=True,
+    )
+    latch.reset(initial_stop_armed=True)
+    fsm.enable(initial_stop_armed=True)
+
+    switched_on = None
+    for encounter in range(1, 4):
+        now = float(encounter * 20)
+        result_class = (
+            SignalClass.LEFT
+            if encounter == left_encounter
+            else SignalClass.STRAIGHT
+        )
+        signal = latch.observe(
+            _signal(result_class),
+            now_monotonic=now,
+            detector_frame_span=3,
+        )
+        assert fsm.on_frame(signal, now_monotonic=now).publish_stop
+        latch.on_stop_command_published(now_monotonic=now + 0.1)
+        signal = latch.observe(
+            _signal(result_class),
+            now_monotonic=now + 1.1,
+            detector_frame_span=3,
+        )
+        plan = fsm.on_frame(signal, now_monotonic=now + 1.1)
+        if result_class == SignalClass.LEFT:
+            assert plan.state == MissionState.SWITCH_TO_SHORTCUT
+            switched_on = encounter
+            break
+        assert plan.policy == PolicyChoice.BASE
+        for miss in range(10):
+            signal = latch.observe(
+                None,
+                now_monotonic=now + 2.0 + miss,
+                detector_frame_span=3,
+            )
+            if latch.rearmed_on_last_observation:
+                assert fsm.rearm_initial_stop()
+            assert fsm.on_frame(
+                signal,
+                now_monotonic=now + 2.0 + miss,
+            ).policy == PolicyChoice.BASE
+
+    assert switched_on == left_encounter
+    if left_encounter is None:
+        assert latch.phase == InitialStopPhase.ARMED
+        assert fsm.state == MissionState.BASE
+        assert not fsm.shortcut_completed
+
+
+def test_repeated_signal_latch_a_only_bypasses_stop_but_keeps_left():
+    latch = RepeatedSignalEncounterLatch(
+        bbox_width_min=40,
+        bbox_width_max=225,
+        stop_wait_sec=1.0,
+    )
+    latch.reset(initial_stop_armed=False)
+
+    assert latch.observe(
+        _signal(SignalClass.STOP),
+        now_monotonic=1.0,
+        detector_frame_span=3,
+    ) == LampAction.UNKNOWN
+    assert latch.observe(
+        _signal(SignalClass.LEFT),
+        now_monotonic=1.1,
+        detector_frame_span=3,
+    ) == LampAction.LEFT
 
 
 def test_initial_wait_fsm_stops_then_routes_confirmed_left_directly():
@@ -2627,7 +2900,7 @@ def test_integrated_node_without_gamepad_does_not_require_joy():
     assert TrafficShortcutPolicyNode._can_enable_locked(node, 1.0)
 
 
-def test_schema22_headless_emulates_lb_a_and_stays_stopped():
+def test_schema22_headless_arms_repeated_approach_without_waiting_at_start():
     observations = []
     published = []
     warnings = []
@@ -2655,12 +2928,16 @@ def test_schema22_headless_emulates_lb_a_and_stays_stopped():
             'pressed': True,
             'now': observations[0]['now'],
             'initial_stop_armed': True,
-            'wait_for_signal': True,
+            'wait_for_signal': False,
         }
     ]
     assert published == [DriveCommand()]
     assert 'INITIAL_STOP_ARMED source=HEADLESS' in warnings
-    assert any('red-first wait started' in message for message in warnings)
+    assert 'SIGNAL_APPROACH source=HEADLESS' in warnings
+    assert any(
+        'repeated signal handling started' in message
+        for message in warnings
+    )
 
 
 def test_red_first_wait_ignores_policy_stale_but_not_camera_stale():
@@ -2680,7 +2957,7 @@ def test_red_first_wait_ignores_policy_stale_but_not_camera_stale():
     )
 
 
-def test_integrated_node_maps_sdl_lb_button_nine_to_initial_wait():
+def test_integrated_node_maps_sdl_lb_button_nine_to_repeated_approach():
     observations = []
     operator_logs = []
 
@@ -2696,6 +2973,8 @@ def test_integrated_node_maps_sdl_lb_button_nine_to_initial_wait():
         _lock=threading.Lock(),
         _joy_valid=False,
         _last_joy_monotonic=None,
+        _runtime_signal_options_enabled=True,
+        _fsm=SimpleNamespace(shortcut_completed=False),
         _observe_drive_gate_locked=lambda **kwargs: observe(None, **kwargs),
         _force_fault=lambda _reason: None,
         get_logger=lambda: SimpleNamespace(
@@ -2714,11 +2993,20 @@ def test_integrated_node_maps_sdl_lb_button_nine_to_initial_wait():
 
     assert observations[-1]['pressed']
     assert observations[-1]['initial_stop_armed']
-    assert observations[-1]['wait_for_signal']
-    assert operator_logs[-1] == 'WAIT_FOR_SIGNAL source=LB+A'
+    assert not observations[-1]['wait_for_signal']
+    assert operator_logs[-1] == 'SIGNAL_APPROACH source=LB+A'
 
     buttons[9] = 0
     buttons[4] = 1
+    TrafficShortcutPolicyNode._on_joy(
+        node,
+        SimpleNamespace(buttons=buttons),
+    )
+    assert not observations[-1]['initial_stop_armed']
+    assert not observations[-1]['wait_for_signal']
+
+    node._fsm.shortcut_completed = True
+    buttons[9] = 1
     TrafficShortcutPolicyNode._on_joy(
         node,
         SimpleNamespace(buttons=buttons),
@@ -2753,7 +3041,68 @@ def test_integrated_node_initial_wait_control_tick_publishes_stop():
     assert published == [DriveCommand()]
 
 
+def test_integrated_node_starts_dwell_on_first_actual_stop_publish():
+    latch = RepeatedSignalEncounterLatch(
+        bbox_width_min=40,
+        bbox_width_max=225,
+        stop_wait_sec=1.0,
+    )
+    latch.reset(initial_stop_armed=True)
+    assert latch.observe(
+        _signal(SignalClass.STOP),
+        now_monotonic=1.0,
+        detector_frame_span=3,
+    ) == LampAction.RED
+    published = []
+    logs = []
+    node = SimpleNamespace(
+        _next_graph_check_monotonic=math.inf,
+        require_gamepad_hold=True,
+        _drive_gate=SimpleNamespace(enabled=True),
+        _lock=threading.Lock(),
+        _unsafe_reason_locked=lambda _now: None,
+        _fsm=SimpleNamespace(
+            on_control_tick=lambda **_kwargs: None,
+            shortcut_started_monotonic=None,
+        ),
+        _transition_stop_pending=False,
+        _transition_stop_sent_waiting_decision=False,
+        _decision=MissionDecision(
+            command=DriveCommand(),
+            policy=PolicyChoice.NONE,
+            state=MissionState.INITIAL_STOP,
+            source_monotonic=1.0,
+            completed_monotonic=1.0,
+            inference_ms=0.0,
+            frame_sequence=1,
+        ),
+        _lamp_latch=latch,
+        _effective_stop_wait_sec=1.0,
+        _publish_and_record_locked=lambda command, **_kwargs: (
+            published.append(command)
+        ),
+        _safe_log_warning=logs.append,
+        _stop_reason='pending',
+    )
+
+    TrafficShortcutPolicyNode._on_control_timer(node)
+
+    assert published == [DriveCommand()]
+    assert logs == ['SIGNAL_DWELL_STARTED duration=1s']
+    assert not latch.on_stop_command_published(now_monotonic=100.0)
+
+
 def test_traffic_shortcut_launch_ties_gamepad_to_hold_gate():
+    config_path = (
+        Path(__file__).parents[1]
+        / 'config'
+        / 'traffic_shortcut_policy.yaml'
+    )
+    config_text = config_path.read_text(encoding='utf-8')
+    assert 'signal_bbox_width_min_px: 40' in config_text
+    assert 'signal_stop_wait_sec: 1.0' in config_text
+    assert 'shortcut_duration_sec: 5.0' in config_text
+
     launch_path = (
         Path(__file__).parents[1]
         / 'launch'
@@ -2766,6 +3115,12 @@ def test_traffic_shortcut_launch_ties_gamepad_to_hold_gate():
     assert "'initial_stop_arm_button_index'" in launch_text
     assert "default_value='9'" in launch_text
     assert "'signal_status_log_hz'" in launch_text
+    assert "'signal_bbox_width_min_px'" in launch_text
+    assert "default_value='40'" in launch_text
+    assert "'signal_stop_wait_sec'" in launch_text
+    assert "default_value='1.0'" in launch_text
+    assert "'shortcut_duration_sec'" in launch_text
+    assert "default_value='5.0'" in launch_text
     assert "'use_monitor_gui'" in launch_text
     assert "default_value='false'" in launch_text
     assert "'monitor_refresh_hz'" in launch_text
@@ -2786,6 +3141,9 @@ def test_traffic_shortcut_launch_ties_gamepad_to_hold_gate():
     assert "'initial_stop_arm_button_index:='" in jetson_launch_text
     assert "default_value='9'" in jetson_launch_text
     assert "'signal_status_log_hz:='" in jetson_launch_text
+    assert "'signal_bbox_width_min_px:='" in jetson_launch_text
+    assert "'signal_stop_wait_sec:='" in jetson_launch_text
+    assert "'shortcut_duration_sec:='" in jetson_launch_text
     assert "'use_monitor_gui:='" in jetson_launch_text
     assert "'monitor_refresh_hz:='" in jetson_launch_text
     assert "'inference_timeout_sec:='" in jetson_launch_text
