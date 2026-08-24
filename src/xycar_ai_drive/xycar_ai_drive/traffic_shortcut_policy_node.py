@@ -229,7 +229,7 @@ class TrafficShortcutPolicyNode(Node):
                 == 'drive_gate_activation'
             ),
         )
-        if self.bundle.schema_version in {15, 16, 17, 18, 19}:
+        if self.bundle.schema_version in {15, 16, 17, 18, 19, 20}:
             self._lamp_latch = InitialWaitSignalLatch(
                 bbox_width_min=self.bundle.detector.bbox_width_min,
                 bbox_width_max=self.bundle.detector.bbox_width_max,
@@ -410,7 +410,7 @@ class TrafficShortcutPolicyNode(Node):
             'Traffic shortcut policy started OFF. Hold LB+A to wait stopped '
             'for 1 fresh STRAIGHT/LEFT or 5 STOP classifications, '
             'or hold A alone to start Base immediately; release A to stop.'
-            if self.bundle.schema_version in {17, 18, 19}
+            if self.bundle.schema_version in {17, 18, 19, 20}
             else 'Traffic shortcut policy started OFF. Hold LB+A to wait stopped '
             'for 3 matching fresh STRAIGHT/LEFT or 5 STOP classifications, '
             'or hold A alone to start Base immediately; release A to stop.'
@@ -586,12 +586,12 @@ class TrafficShortcutPolicyNode(Node):
         expected_width = (
             (40, 225)
             if self.bundle.schema_version
-            in {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}
+            in {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
             else (45, 200)
         )
         expected_votes = (
             (5, 1, 1)
-            if self.bundle.schema_version in {17, 18, 19}
+            if self.bundle.schema_version in {17, 18, 19, 20}
             else (5, 3, 3)
             if self.bundle.schema_version == 16
             else (5, 5, 5)
@@ -659,7 +659,7 @@ class TrafficShortcutPolicyNode(Node):
         expected_base_speed_cap = (
             35.0
             if self.bundle.schema_version
-            in {11, 12, 13, 14, 15, 16, 17, 18, 19}
+            in {11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
             else 25.0
         )
         if self.bundle.base_speed_cap != expected_base_speed_cap:
@@ -698,7 +698,7 @@ class TrafficShortcutPolicyNode(Node):
                 or not self.bundle.control_vote_on_fresh_yolo_only
             ):
                 raise ValueError('schema v16 initial wait contract mismatch')
-        elif self.bundle.schema_version in {17, 18, 19}:
+        elif self.bundle.schema_version in {17, 18, 19, 20}:
             if (
                 not self.bundle.initial_stop_one_shot
                 or self.bundle.initial_stop_clear_consecutive_reads != 1
@@ -707,7 +707,7 @@ class TrafficShortcutPolicyNode(Node):
                 or not self.bundle.control_vote_on_fresh_yolo_only
             ):
                 raise ValueError(
-                    'schema v17/v18/v19 initial wait contract mismatch'
+                    'schema v17..v20 initial wait contract mismatch'
                 )
         elif (
             self.bundle.initial_stop_one_shot
@@ -719,7 +719,7 @@ class TrafficShortcutPolicyNode(Node):
             raise ValueError('legacy bundle has one-shot STOP behavior')
         expected_shortcut_scope = (
             'drive_gate_activation'
-            if self.bundle.schema_version == 19
+            if self.bundle.schema_version in {19, 20}
             else 'process'
         )
         if (
@@ -800,7 +800,7 @@ class TrafficShortcutPolicyNode(Node):
         now = time.monotonic()
         required_button_index = (
             max(self.a_button_index, self.initial_stop_arm_button_index)
-            if self.bundle.schema_version in {14, 15, 16, 17, 18, 19}
+            if self.bundle.schema_version in {14, 15, 16, 17, 18, 19, 20}
             else self.a_button_index
         )
         if len(message.buttons) <= required_button_index:
@@ -817,6 +817,7 @@ class TrafficShortcutPolicyNode(Node):
             17,
             18,
             19,
+            20,
         } and bool(message.buttons[self.initial_stop_arm_button_index])
         with self._lock:
             self._joy_valid = True
@@ -827,12 +828,12 @@ class TrafficShortcutPolicyNode(Node):
                 initial_stop_armed=initial_stop_armed,
                 wait_for_signal=(
                     initial_stop_armed
-                    and self.bundle.schema_version in {15, 16, 17, 18, 19}
+                    and self.bundle.schema_version in {15, 16, 17, 18, 19, 20}
                 ),
             )
         if action == ToggleAction.ENABLED:
             if (
-                self.bundle.schema_version in {15, 16, 17, 18, 19}
+                self.bundle.schema_version in {15, 16, 17, 18, 19, 20}
                 and initial_stop_armed
             ):
                 self.get_logger().warning(
@@ -881,10 +882,10 @@ class TrafficShortcutPolicyNode(Node):
                 self._fsm.fault()
                 self._stop_reason = f'policy reset failed: {exc}'
                 return ToggleAction.REJECTED
-            if self.bundle.schema_version in {14, 15, 16, 17, 18, 19}:
+            if self.bundle.schema_version in {14, 15, 16, 17, 18, 19, 20}:
                 expected_latch_type = (
                     InitialWaitSignalLatch
-                    if self.bundle.schema_version in {15, 16, 17, 18, 19}
+                    if self.bundle.schema_version in {15, 16, 17, 18, 19, 20}
                     else InitialStopSignalLatch
                 )
                 if not isinstance(self._lamp_latch, expected_latch_type):
@@ -1395,13 +1396,14 @@ class TrafficShortcutPolicyNode(Node):
                             )
                         )
                     if (
-                        self.bundle.schema_version in {14, 15, 16, 17, 18, 19}
+                        self.bundle.schema_version in {14, 15, 16, 17, 18, 19, 20}
                         and plan.state == MissionState.SHORTCUT
                         and not self._shortcut_started_logged
                     ):
                         self._shortcut_started_logged = True
                         operator_messages.append(
-                            'SHORTCUT_STARTED duration=8.0s'
+                            'SHORTCUT_STARTED '
+                            f'duration={self.bundle.shortcut_duration_sec:g}s'
                         )
                     if plan.state != MissionState.RED_STOP:
                         self._reset_yolo_missing_release_locked()
@@ -1649,10 +1651,10 @@ class TrafficShortcutPolicyNode(Node):
                     pressed=True,
                     now=now,
                     initial_stop_armed=(
-                        self.bundle.schema_version in {14, 15, 16, 17, 18, 19}
+                        self.bundle.schema_version in {14, 15, 16, 17, 18, 19, 20}
                     ),
                     wait_for_signal=(
-                        self.bundle.schema_version in {14, 15, 16, 17, 18, 19}
+                        self.bundle.schema_version in {14, 15, 16, 17, 18, 19, 20}
                     ),
                 )
             reason = None
@@ -1711,14 +1713,14 @@ class TrafficShortcutPolicyNode(Node):
                 self._transition_stop_sent_waiting_decision
             )
         if auto_action == ToggleAction.ENABLED:
-            if self.bundle.schema_version in {15, 16, 17, 18, 19}:
+            if self.bundle.schema_version in {15, 16, 17, 18, 19, 20}:
                 self._safe_log_warning('INITIAL_STOP_ARMED source=HEADLESS')
                 self._safe_log_warning('WAIT_FOR_SIGNAL source=HEADLESS')
             message = (
                 'Traffic shortcut headless signal search started; motor '
                 'remains stopped until READY and 1 fresh STRAIGHT/LEFT '
                 'or 5 STOP classifications.'
-                if self.bundle.schema_version in {17, 18, 19}
+                if self.bundle.schema_version in {17, 18, 19, 20}
                 else 'Traffic shortcut headless signal search started; motor '
                 'remains stopped until READY and 3 matching fresh '
                 'STRAIGHT/LEFT or 5 STOP classifications.'
