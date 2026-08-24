@@ -56,9 +56,7 @@ class TrafficLightViewerResult:
     inspection: SignalInspection | None
     width_gate_accepted: bool
     final_action: LampAction
-    latch_snapshot: (
-        TrafficSignalLatchSnapshot | InitialStopSignalLatchSnapshot
-    )
+    latch_snapshot: TrafficSignalLatchSnapshot | InitialStopSignalLatchSnapshot
     vote_updated: bool = True
     inference_kind: str = 'YOLO+CNN'
     error: str | None = None
@@ -115,15 +113,13 @@ class TrafficLightViewerNode(Node):
                 self.bundle.detector.inference_every_n_frames
             ),
             classification_every_n_frames_after_detection=(
-                self.bundle.detector
-                .classification_every_n_frames_after_detection
+                self.bundle.detector.classification_every_n_frames_after_detection
             ),
             reuse_detected_bbox_between_yolo_frames=(
-                self.bundle.detector
-                .reuse_detected_bbox_between_yolo_frames
+                self.bundle.detector.reuse_detected_bbox_between_yolo_frames
             ),
         )
-        if self.bundle.schema_version in {15, 16, 17, 18}:
+        if self.bundle.schema_version in {15, 16, 17, 18, 19}:
             self._latch = InitialWaitSignalLatch(
                 bbox_width_min=self.bundle.detector.bbox_width_min,
                 bbox_width_max=self.bundle.detector.bbox_width_max,
@@ -207,7 +203,7 @@ class TrafficLightViewerNode(Node):
         )
         clear_contract = (
             f',clear:{self.bundle.initial_stop_clear_consecutive_reads}'
-            if self.bundle.schema_version in {14, 15, 16, 17, 18}
+            if self.bundle.schema_version in {14, 15, 16, 17, 18, 19}
             else ''
         )
         self.get_logger().info(
@@ -227,10 +223,25 @@ class TrafficLightViewerNode(Node):
     def _validate_bundle_contract(self) -> None:
         detector = self.bundle.detector
         if self.bundle.schema_version not in {
-            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
         }:
             raise ValueError(
-                'traffic viewer supports classifier bundle schema 4..18'
+                'traffic viewer supports classifier bundle schema 4..19'
             )
         if detector.mode != 'yolo_cnn_classifier':
             raise ValueError(
@@ -238,16 +249,14 @@ class TrafficLightViewerNode(Node):
             )
         expected_width = (
             (40, 225)
-            if self.bundle.schema_version in {
-                6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
-            }
+            if self.bundle.schema_version
+            in {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}
             else (45, 200)
         )
         expected_votes = (
             (5, 1, 1)
-            if self.bundle.schema_version in {17, 18}
-            else
-            (5, 3, 3)
+            if self.bundle.schema_version in {17, 18, 19}
+            else (5, 3, 3)
             if self.bundle.schema_version == 16
             else (5, 5, 5)
             if self.bundle.schema_version == 15
@@ -279,9 +288,7 @@ class TrafficLightViewerNode(Node):
             )
         expected_classification_every = (
             1
-            if self.bundle.schema_version in {
-                8, 9, 10, 11, 12, 13, 14, 15
-            }
+            if self.bundle.schema_version in {8, 9, 10, 11, 12, 13, 14, 15}
             else 3
         )
         expected_reuse_detected_bbox = self.bundle.schema_version in {
@@ -385,9 +392,7 @@ class TrafficLightViewerNode(Node):
                         self._signal_cadence.observe_detection(
                             frame_sequence=sequence,
                             box=(
-                                None
-                                if inspection is None
-                                else inspection.bbox
+                                None if inspection is None else inspection.bbox
                             ),
                         )
                     else:
@@ -495,7 +500,9 @@ class TrafficLightViewerNode(Node):
                     latch_snapshot=self._latch.snapshot,
                     vote_updated=False,
                 )
-        self.get_logger().info('Traffic signal vote and initial-stop phase reset')
+        self.get_logger().info(
+            'Traffic signal vote and initial-stop phase reset'
+        )
 
     def shutdown(self) -> None:
         with self._frame_condition:
@@ -642,9 +649,7 @@ class TrafficLightViewerApplication:
         result, last_camera, camera_error = self.node.snapshot()
         now = time.monotonic()
         camera_age = (
-            None
-            if last_camera is None
-            else max(0.0, now - last_camera)
+            None if last_camera is None else max(0.0, now - last_camera)
         )
         if result is None:
             status = camera_error or (
@@ -692,10 +697,7 @@ class TrafficLightViewerApplication:
             )
 
         sample_age = max(0.0, now - result.source_monotonic)
-        stale = (
-            camera_age is None
-            or camera_age > self.node.camera_stale_sec
-        )
+        stale = camera_age is None or camera_age > self.node.camera_stale_sec
         raw_class = (
             SignalClass.UNKNOWN
             if inspection is None
@@ -723,9 +725,7 @@ class TrafficLightViewerApplication:
                 f'bbox: x={box.x}, y={box.y}, w={box.width}, '
                 f'h={box.height} | YOLO confidence={box.confidence:.3f}'
             )
-        camera_age_text = (
-            'n/a' if camera_age is None else f'{camera_age:.2f}s'
-        )
+        camera_age_text = 'n/a' if camera_age is None else f'{camera_age:.2f}s'
         self._detail_text.set(
             f'raw class: {raw_class.value}\n'
             + (
@@ -737,21 +737,18 @@ class TrafficLightViewerApplication:
             f'vote: {snapshot.candidate_reads}/{snapshot.required_reads}\n'
             f'stop latch: {"ON" if snapshot.stop_latched else "OFF"}\n'
             + (
-                'schema v17/v18: fresh YOLO+CNN every 3 camera frames | '
+                'schema v17/v18/v19: fresh YOLO+CNN every 3 camera frames | '
                 'STOP 5 | STRAIGHT/LEFT 1 | cached CNN disabled | '
                 'post-clear STOP ignored\n'
-                if self.node.bundle.schema_version in {17, 18}
-                else
-                'schema v16: fresh YOLO+CNN every 3 camera frames | '
+                if self.node.bundle.schema_version in {17, 18, 19}
+                else 'schema v16: fresh YOLO+CNN every 3 camera frames | '
                 'STOP 5 | STRAIGHT/LEFT 3 | cached CNN disabled | '
                 'post-clear STOP ignored\n'
                 if self.node.bundle.schema_version == 16
-                else
-                'schema v15: fresh YOLO+CNN only vote | all classes 5 | '
+                else 'schema v15: fresh YOLO+CNN only vote | all classes 5 | '
                 'cached CNN diagnostics only | post-clear STOP ignored\n'
                 if self.node.bundle.schema_version == 15
-                else
-                'schema v14: armed STOP 15 | non-STOP clear 3 | '
+                else 'schema v14: armed STOP 15 | non-STOP clear 3 | '
                 'navigation LEFT 15 | post-clear STOP ignored\n'
                 if self.node.bundle.schema_version == 14
                 else ''
@@ -821,7 +818,7 @@ def _inspection_crop(result: TrafficLightViewerResult) -> np.ndarray:
         _put_overlay_text(panel, text, (20, 68), (180, 180, 180))
         return panel
     bounds = result.inspection.crop_bounds
-    return result.frame[bounds.y1:bounds.y2, bounds.x1:bounds.x2]
+    return result.frame[bounds.y1 : bounds.y2, bounds.x1 : bounds.x2]
 
 
 def _put_overlay_text(

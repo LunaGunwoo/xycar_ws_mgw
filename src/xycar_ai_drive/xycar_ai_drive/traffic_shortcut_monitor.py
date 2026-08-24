@@ -243,9 +243,7 @@ class TrafficShortcutMonitorNode(Node):
         self.prediction_topic = str(
             self.get_parameter('prediction_topic').value
         ).strip()
-        self.motor_topic = str(
-            self.get_parameter('motor_topic').value
-        ).strip()
+        self.motor_topic = str(self.get_parameter('motor_topic').value).strip()
         self.enabled_topic = str(
             self.get_parameter('enabled_topic').value
         ).strip()
@@ -442,17 +440,13 @@ class TrafficShortcutMonitorNode(Node):
         with self._lock:
             return TrafficShortcutMonitorSnapshot(
                 signal=self._signal,
-                signal_received_monotonic=(
-                    self._signal_received_monotonic
-                ),
+                signal_received_monotonic=(self._signal_received_monotonic),
                 matched_frame=self._matched_frame,
                 latest_frame=self._latest_frame,
                 prediction=self._prediction,
                 actual=self._actual,
                 enabled=self._enabled,
-                enabled_received_monotonic=(
-                    self._enabled_received_monotonic
-                ),
+                enabled_received_monotonic=(self._enabled_received_monotonic),
                 camera_error=self._camera_error,
                 signal_error=self._signal_error,
                 control_error=self._control_error,
@@ -483,12 +477,10 @@ class TrafficShortcutMonitorApplication:
         self._crop_photo: ImageTk.PhotoImage | None = None
         self._render_signature: tuple[object, ...] | None = None
         self._probability_vars = {
-            label: tk.DoubleVar(value=0.0)
-            for label in node.class_labels
+            label: tk.DoubleVar(value=0.0) for label in node.class_labels
         }
         self._probability_text = {
-            label: tk.StringVar(value='0.0%')
-            for label in node.class_labels
+            label: tk.StringVar(value='0.0%') for label in node.class_labels
         }
         self._signal_class_text = tk.StringVar(value='WAITING')
         self._signal_status_text = tk.StringVar(
@@ -718,8 +710,7 @@ class TrafficShortcutMonitorApplication:
             235,
             258,
             text=(
-                f'arrow length: |speed| / {self.node.speed_scale:g} '
-                '(visual scale)'
+                f'arrow length: |speed| / {self.node.speed_scale:g} (visual scale)'
             ),
             fill='#666666',
         )
@@ -733,8 +724,7 @@ class TrafficShortcutMonitorApplication:
         executor_error = self.executor_thread.error
         if executor_error is not None:
             self.node.get_logger().error(
-                'traffic shortcut monitor ROS executor failed: '
-                f'{executor_error}'
+                f'traffic shortcut monitor ROS executor failed: {executor_error}'
             )
             self.close()
             return
@@ -759,7 +749,9 @@ class TrafficShortcutMonitorApplication:
             snapshot.signal,
         )
         signature = (
-            None if snapshot.latest_frame is None else snapshot.latest_frame.stamp_key,
+            None
+            if snapshot.latest_frame is None
+            else snapshot.latest_frame.stamp_key,
             None if exact_frame is None else exact_frame.stamp_key,
             snapshot.signal,
             selection.mode,
@@ -805,7 +797,9 @@ class TrafficShortcutMonitorApplication:
         probability_map = (
             {}
             if signal is None or signal.probabilities is None
-            else dict(zip(signal.class_labels, signal.probabilities, strict=True))
+            else dict(
+                zip(signal.class_labels, signal.probabilities, strict=True)
+            )
         )
         for label in self.node.class_labels:
             probability = probability_map.get(label, 0.0)
@@ -817,7 +811,9 @@ class TrafficShortcutMonitorApplication:
 
         if signal is None:
             raw_class = 'WAITING'
-            self._signal_status_text.set('Waiting for policy signal diagnostics')
+            self._signal_status_text.set(
+                'Waiting for policy signal diagnostics'
+            )
             self._signal_detail_text.set(
                 'The policy publishes diagnostics only while its mission '
                 'gate is active and signal classification runs.'
@@ -829,7 +825,8 @@ class TrafficShortcutMonitorApplication:
             )
             self._signal_detail_text.set(
                 f'last raw={signal.raw_class} | final={signal.final_action} | '
-                f'phase={signal.phase} | mission={signal.mission_state}\n'
+                f'phase={signal.phase} | mission={signal.mission_state} | '
+                f'shortcut={signal.shortcut_status}\n'
                 f'candidate={signal.candidate} | vote='
                 f'{signal.candidate_reads}/{signal.required_reads} | '
                 f'vote update={"YES" if signal.vote_updated else "NO"}\n'
@@ -852,7 +849,8 @@ class TrafficShortcutMonitorApplication:
             )
             self._signal_detail_text.set(
                 f'raw={signal.raw_class} | final={signal.final_action} | '
-                f'phase={signal.phase} | mission={signal.mission_state}\n'
+                f'phase={signal.phase} | mission={signal.mission_state} | '
+                f'shortcut={signal.shortcut_status}\n'
                 f'candidate={signal.candidate} | vote='
                 f'{signal.candidate_reads}/{signal.required_reads} | '
                 f'vote update={"YES" if signal.vote_updated else "NO"}\n'
@@ -992,8 +990,7 @@ class TrafficShortcutMonitorApplication:
     def _on_gui_exception(self, exception_type, exception, traceback) -> None:
         try:
             self.node.get_logger().error(
-                f'traffic shortcut GUI failed: {exception_type.__name__}: '
-                f'{exception}'
+                f'traffic shortcut GUI failed: {exception_type.__name__}: {exception}'
             )
         finally:
             self.close()
@@ -1098,7 +1095,9 @@ def monitor_live_panel(
 ) -> np.ndarray:
     """Render the latest camera frame without model overlays."""
     if frame is None:
-        return _placeholder_panel('WAITING FOR LIVE CAMERA', width=640, height=420)
+        return _placeholder_panel(
+            'WAITING FOR LIVE CAMERA', width=640, height=420
+        )
     panel = frame.copy()
     _put_overlay_text(
         panel,
@@ -1123,9 +1122,7 @@ def drive_vector_endpoint(
         raise ValueError('drive vector values must be finite')
     if maximum_length <= 0.0 or speed_scale <= 0.0:
         raise ValueError('drive vector scales must be positive')
-    visual_angle = math.radians(
-        max(-100.0, min(100.0, float(angle))) * 0.6
-    )
+    visual_angle = math.radians(max(-100.0, min(100.0, float(angle))) * 0.6)
     length = min(abs(float(speed)) / speed_scale, 1.0) * maximum_length
     direction = -1.0 if speed < 0.0 else 1.0
     return (
@@ -1175,11 +1172,7 @@ def monitor_frame_panel(
         y1 = min(max(math.floor(box.y), 0), height - 1)
         x2 = min(max(math.ceil(box.x + box.width), 0), width - 1)
         y2 = min(max(math.ceil(box.y + box.height), 0), height - 1)
-        color = (
-            (0, 190, 0)
-            if signal.width_gate_accepted
-            else (0, 120, 255)
-        )
+        color = (0, 190, 0) if signal.width_gate_accepted else (0, 120, 255)
         if x2 > x1 and y2 > y1:
             cv2.rectangle(panel, (x1, y1), (x2, y2), color, 2)
         probability = _raw_probability(signal)
@@ -1249,8 +1242,7 @@ def monitor_crop_panel(
     panel = _enlarged_crop_panel(
         crop,
         label=(
-            f'{signal.source} crop=({x1},{y1})-({x2},{y2}) '
-            f'size={x2 - x1}x{y2 - y1}'
+            f'{signal.source} crop=({x1},{y1})-({x2},{y2}) size={x2 - x1}x{y2 - y1}'
         ),
     )
     if display_mode == SignalPanelMode.STALE:
@@ -1289,9 +1281,7 @@ def _enlarged_crop_panel(crop: np.ndarray, *, label: str) -> np.ndarray:
     )
     target_width = max(1, int(round(crop.shape[1] * scale)))
     target_height = max(1, int(round(crop.shape[0] * scale)))
-    interpolation = (
-        cv2.INTER_LANCZOS4 if scale > 1.0 else cv2.INTER_AREA
-    )
+    interpolation = cv2.INTER_LANCZOS4 if scale > 1.0 else cv2.INTER_AREA
     resized = cv2.resize(
         crop,
         (target_width, target_height),
@@ -1332,9 +1322,7 @@ def _validate_drive_values(angle: float, speed: float) -> None:
 def _raw_probability(signal: SignalDebugSnapshot) -> float:
     if signal.probabilities is None:
         return 0.0
-    mapping = dict(
-        zip(signal.class_labels, signal.probabilities, strict=True)
-    )
+    mapping = dict(zip(signal.class_labels, signal.probabilities, strict=True))
     if signal.raw_class in mapping:
         return mapping[signal.raw_class]
     return max(signal.probabilities, default=0.0)

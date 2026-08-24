@@ -29,6 +29,7 @@ def generate_launch_description():
     device_id = LaunchConfiguration('device_id')
     base_socket_path = LaunchConfiguration('base_socket_path')
     shortcut_socket_path = LaunchConfiguration('shortcut_socket_path')
+    inference_timeout = LaunchConfiguration('inference_timeout_sec')
     rpc_timeout = LaunchConfiguration('inference_rpc_timeout_sec')
     initial_stop_arm_button_index = LaunchConfiguration(
         'initial_stop_arm_button_index'
@@ -65,8 +66,12 @@ def generate_launch_description():
                 default_value='/run/user/1000/xycar-ai/traffic-shortcut.sock',
             ),
             DeclareLaunchArgument(
+                'inference_timeout_sec',
+                default_value='0.50',
+            ),
+            DeclareLaunchArgument(
                 'inference_rpc_timeout_sec',
-                default_value='0.20',
+                default_value='0.40',
             ),
             DeclareLaunchArgument(
                 'initial_stop_arm_button_index',
@@ -136,6 +141,10 @@ def generate_launch_description():
                         'inference_device': 'cuda',
                         'base_socket_path': base_socket_path,
                         'shortcut_socket_path': shortcut_socket_path,
+                        'inference_timeout_sec': ParameterValue(
+                            inference_timeout,
+                            value_type=float,
+                        ),
                         'inference_rpc_timeout_sec': ParameterValue(
                             rpc_timeout,
                             value_type=float,

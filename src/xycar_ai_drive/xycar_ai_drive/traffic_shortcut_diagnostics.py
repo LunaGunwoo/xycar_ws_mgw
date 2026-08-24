@@ -6,9 +6,17 @@ import json
 import math
 from dataclasses import asdict, dataclass
 
-SIGNAL_DEBUG_SCHEMA_VERSION = 1
-SIGNAL_DEBUG_SOURCES = frozenset(
-    {'YOLO_CNN', 'CACHED_CNN', 'YOLO_NO_BOX'}
+SIGNAL_DEBUG_SCHEMA_VERSION = 2
+SIGNAL_DEBUG_SOURCES = frozenset({'YOLO_CNN', 'CACHED_CNN', 'YOLO_NO_BOX'})
+SHORTCUT_STATUSES = frozenset(
+    {
+        'DISABLED',
+        'READY',
+        'TRANSITION_STOP',
+        'ACTIVE',
+        'COMPLETED_THIS_ACTIVATION',
+        'FAULT',
+    }
 )
 
 
@@ -56,6 +64,7 @@ class SignalDebugSnapshot:
     required_reads: int
     phase: str
     mission_state: str
+    shortcut_status: str
     detector_inference_ms: float
 
     @property
@@ -123,6 +132,7 @@ def _validated_snapshot(value: object) -> SignalDebugSnapshot:
         'required_reads',
         'phase',
         'mission_state',
+        'shortcut_status',
         'detector_inference_ms',
     }
     if set(value) != required:
@@ -155,6 +165,11 @@ def _validated_snapshot(value: object) -> SignalDebugSnapshot:
     candidate = _text(value['candidate'], 'candidate')
     phase = _text(value['phase'], 'phase')
     mission_state = _text(value['mission_state'], 'mission_state')
+    shortcut_status = _text(value['shortcut_status'], 'shortcut_status')
+    if shortcut_status not in SHORTCUT_STATUSES:
+        raise SignalDebugContractError(
+            f'unsupported shortcut status: {shortcut_status}'
+        )
 
     labels_value = value['class_labels']
     if not isinstance(labels_value, (list, tuple)) or len(labels_value) != 3:
@@ -170,10 +185,9 @@ def _validated_snapshot(value: object) -> SignalDebugSnapshot:
     probabilities: tuple[float, ...] | None
     if probabilities_value is None:
         probabilities = None
-    elif (
-        isinstance(probabilities_value, (list, tuple))
-        and len(probabilities_value) == len(class_labels)
-    ):
+    elif isinstance(probabilities_value, (list, tuple)) and len(
+        probabilities_value
+    ) == len(class_labels):
         probabilities = tuple(
             _finite_float(
                 probability,
@@ -241,6 +255,7 @@ def _validated_snapshot(value: object) -> SignalDebugSnapshot:
         required_reads=required_reads,
         phase=phase,
         mission_state=mission_state,
+        shortcut_status=shortcut_status,
         detector_inference_ms=detector_inference_ms,
     )
 

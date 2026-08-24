@@ -45,19 +45,24 @@ class TrafficShortcutFsm:
         seamless_base_handoff: bool = False,
         one_shot_initial_stop: bool = False,
         initial_left_direct_shortcut: bool = False,
+        rearm_shortcut_on_enable: bool = False,
     ) -> None:
         if (
             not math.isfinite(shortcut_duration_sec)
             or shortcut_duration_sec <= 0.0
         ):
-            raise ValueError('shortcut_duration_sec must be finite and positive')
+            raise ValueError(
+                'shortcut_duration_sec must be finite and positive'
+            )
         self.shortcut_duration_sec = float(shortcut_duration_sec)
         self.seamless_base_handoff = bool(seamless_base_handoff)
         self.one_shot_initial_stop = bool(one_shot_initial_stop)
-        self.initial_left_direct_shortcut = bool(
-            initial_left_direct_shortcut
-        )
-        if self.initial_left_direct_shortcut and not self.one_shot_initial_stop:
+        self.initial_left_direct_shortcut = bool(initial_left_direct_shortcut)
+        self.rearm_shortcut_on_enable = bool(rearm_shortcut_on_enable)
+        if (
+            self.initial_left_direct_shortcut
+            and not self.one_shot_initial_stop
+        ):
             raise ValueError(
                 'initial LEFT shortcut requires one-shot mission mode'
             )
@@ -83,6 +88,8 @@ class TrafficShortcutFsm:
             raise ValueError('signal wait requires initial STOP arm')
         self.initial_stop_armed = bool(initial_stop_armed)
         self.initial_stop_consumed = not initial_stop_armed
+        if self.rearm_shortcut_on_enable:
+            self.shortcut_completed = False
         self.state = (
             MissionState.WAIT_FOR_SIGNAL
             if wait_for_signal
@@ -194,7 +201,9 @@ class TrafficShortcutFsm:
     def on_shortcut_command_published(self, *, now_monotonic: float) -> None:
         self._validate_now(now_monotonic)
         if self.state != MissionState.SHORTCUT:
-            raise RuntimeError('shortcut command published outside SHORTCUT state')
+            raise RuntimeError(
+                'shortcut command published outside SHORTCUT state'
+            )
         if self.shortcut_started_monotonic is None:
             self.shortcut_started_monotonic = now_monotonic
 

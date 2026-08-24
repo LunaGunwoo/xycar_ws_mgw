@@ -59,6 +59,7 @@ from xycar_ai_drive.traffic_shortcut_artifact import (
     EXPECTED_SPEED35_BASE_ARTIFACT_ID,
     EXPECTED_SPEED35_FIX_BASE_ARTIFACT_ID,
     EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+    EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_SESSION_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     EXPECTED_SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
@@ -160,11 +161,14 @@ def test_yolo_decode_selects_max_confidence_and_scales_bbox():
         height=30,
         confidence=pytest.approx(0.9),
     )
-    assert decode_detection_box(
-        np.zeros((1, 5, 8400), dtype=np.float32),
-        frame_height=480,
-        frame_width=640,
-    ) is None
+    assert (
+        decode_detection_box(
+            np.zeros((1, 5, 8400), dtype=np.float32),
+            frame_height=480,
+            frame_width=640,
+        )
+        is None
+    )
 
 
 def test_yolo_letterbox_preserves_aspect_ratio_and_restores_bbox():
@@ -266,9 +270,7 @@ def test_classifier_detector_uses_yolo_box_padding_and_cnn_argmax():
     )
     assert len(inspection.probabilities) == 4
     assert sum(inspection.probabilities) == pytest.approx(1.0)
-    assert inspection.probabilities[2] == pytest.approx(
-        reading.probability
-    )
+    assert inspection.probabilities[2] == pytest.approx(reading.probability)
     tensor = classifier.inputs[0]['image']
     assert tensor.shape == (1, 3, 48, 96)
     assert tensor.dtype == np.float32
@@ -288,9 +290,7 @@ def test_classifier_detector_decodes_all_signal_classes(logits, expected):
     yolo = _FakeOnnxSession(
         _output_with_candidates((320.0, 240.0, 100.0, 40.0, 0.9))
     )
-    classifier = _FakeClassifierSession(
-        np.array([logits], dtype=np.float32)
-    )
+    classifier = _FakeClassifierSession(np.array([logits], dtype=np.float32))
     detector = TrafficClassifierDetector(
         yolo_session=yolo,
         classifier_session=classifier,
@@ -418,7 +418,10 @@ def test_action_classifier_stop_maps_to_latched_red():
 
     assert latch.observe(stop) == LampAction.UNKNOWN
     assert latch.observe(stop) == LampAction.RED
-    assert latch.observe(_signal(SignalClass.UNKNOWN, width=100)) == LampAction.RED
+    assert (
+        latch.observe(_signal(SignalClass.UNKNOWN, width=100))
+        == LampAction.RED
+    )
     assert latch.observe(straight) == LampAction.RED
     assert latch.observe(straight) == LampAction.STRAIGHT
 
@@ -441,15 +444,21 @@ def test_action_classifier_stop10_go30_applies_before_and_after_stop():
         assert latch.observe(stop) == LampAction.UNKNOWN
         assert latch.snapshot.required_reads == 10
         assert latch.snapshot.candidate_reads == step + 1
-        assert fsm.on_frame(
-            LampAction.UNKNOWN,
-            now_monotonic=float(step),
-        ).policy == PolicyChoice.BASE
+        assert (
+            fsm.on_frame(
+                LampAction.UNKNOWN,
+                now_monotonic=float(step),
+            ).policy
+            == PolicyChoice.BASE
+        )
     assert latch.observe(stop) == LampAction.RED
-    assert fsm.on_frame(
-        LampAction.RED,
-        now_monotonic=9.0,
-    ).state == MissionState.RED_STOP
+    assert (
+        fsm.on_frame(
+            LampAction.RED,
+            now_monotonic=9.0,
+        ).state
+        == MissionState.RED_STOP
+    )
 
     for step in range(29):
         assert latch.observe(left) == LampAction.RED
@@ -469,17 +478,23 @@ def test_action_classifier_stop10_go30_applies_before_and_after_stop():
     for _ in range(29):
         assert latch.observe(left) == LampAction.UNKNOWN
     assert latch.observe(left) == LampAction.LEFT
-    assert fsm.on_frame(
-        LampAction.LEFT,
-        now_monotonic=50.0,
-    ).state == MissionState.SWITCH_TO_SHORTCUT
+    assert (
+        fsm.on_frame(
+            LampAction.LEFT,
+            now_monotonic=50.0,
+        ).state
+        == MissionState.SWITCH_TO_SHORTCUT
+    )
 
     latch.reset()
     fsm.enable()
     for _ in range(10):
         stopped = latch.observe(stop)
     assert stopped == LampAction.RED
-    assert fsm.on_frame(stopped, now_monotonic=60.0).state == MissionState.RED_STOP
+    assert (
+        fsm.on_frame(stopped, now_monotonic=60.0).state
+        == MissionState.RED_STOP
+    )
     for _ in range(29):
         assert latch.observe(straight) == LampAction.RED
     assert latch.observe(straight) == LampAction.STRAIGHT
@@ -526,15 +541,21 @@ def test_action_classifier_stop15_go15_resumes_without_drive_gate_reset():
 
     for step in range(14):
         assert latch.observe(stop) == LampAction.UNKNOWN
-        assert fsm.on_frame(
-            LampAction.UNKNOWN,
-            now_monotonic=float(step),
-        ).policy == PolicyChoice.BASE
+        assert (
+            fsm.on_frame(
+                LampAction.UNKNOWN,
+                now_monotonic=float(step),
+            ).policy
+            == PolicyChoice.BASE
+        )
     assert latch.observe(stop) == LampAction.RED
-    assert fsm.on_frame(
-        LampAction.RED,
-        now_monotonic=14.0,
-    ).state == MissionState.RED_STOP
+    assert (
+        fsm.on_frame(
+            LampAction.RED,
+            now_monotonic=14.0,
+        ).state
+        == MissionState.RED_STOP
+    )
 
     for step in range(14):
         assert latch.observe(straight) == LampAction.RED
@@ -599,10 +620,13 @@ def test_initial_stop_once_latch_clears_on_three_mixed_non_stop_reads():
 def test_initial_stop_once_fsm_arms_waits_and_ignores_later_red():
     fsm = TrafficShortcutFsm(one_shot_initial_stop=True)
     fsm.enable(initial_stop_armed=True)
-    assert fsm.on_frame(
-        LampAction.UNKNOWN,
-        now_monotonic=0.0,
-    ).policy == PolicyChoice.BASE
+    assert (
+        fsm.on_frame(
+            LampAction.UNKNOWN,
+            now_monotonic=0.0,
+        ).policy
+        == PolicyChoice.BASE
+    )
     stopped = fsm.on_frame(LampAction.RED, now_monotonic=0.1)
     assert stopped.state == MissionState.INITIAL_STOP
     assert stopped.publish_stop
@@ -610,10 +634,13 @@ def test_initial_stop_once_fsm_arms_waits_and_ignores_later_red():
     assert resumed.state == MissionState.BASE
     assert resumed.policy == PolicyChoice.BASE
     assert fsm.initial_stop_consumed
-    assert fsm.on_frame(
-        LampAction.RED,
-        now_monotonic=0.3,
-    ).policy == PolicyChoice.BASE
+    assert (
+        fsm.on_frame(
+            LampAction.RED,
+            now_monotonic=0.3,
+        ).policy
+        == PolicyChoice.BASE
+    )
 
     fsm.disable()
     fsm.enable(initial_stop_armed=True, wait_for_signal=True)
@@ -622,21 +649,30 @@ def test_initial_stop_once_fsm_arms_waits_and_ignores_later_red():
         LampAction.RED,
         now_monotonic=0.4,
     ).publish_stop
-    assert fsm.on_frame(
-        LampAction.LEFT,
-        now_monotonic=0.5,
-    ).policy == PolicyChoice.BASE
+    assert (
+        fsm.on_frame(
+            LampAction.LEFT,
+            now_monotonic=0.5,
+        ).policy
+        == PolicyChoice.BASE
+    )
 
     fsm.disable()
     fsm.enable()
-    assert fsm.on_frame(
-        LampAction.RED,
-        now_monotonic=0.6,
-    ).policy == PolicyChoice.BASE
-    assert fsm.on_frame(
-        LampAction.LEFT,
-        now_monotonic=0.7,
-    ).state == MissionState.SWITCH_TO_SHORTCUT
+    assert (
+        fsm.on_frame(
+            LampAction.RED,
+            now_monotonic=0.6,
+        ).policy
+        == PolicyChoice.BASE
+    )
+    assert (
+        fsm.on_frame(
+            LampAction.LEFT,
+            now_monotonic=0.7,
+        ).state
+        == MissionState.SWITCH_TO_SHORTCUT
+    )
 
 
 def test_initial_wait_latch_uses_fresh_stop5_and_go3_votes():
@@ -746,10 +782,13 @@ def test_initial_wait_fsm_stops_then_routes_confirmed_left_directly():
     direct_left = fsm.on_frame(LampAction.LEFT, now_monotonic=0.1)
     assert direct_left.state == MissionState.SWITCH_TO_SHORTCUT
     assert direct_left.publish_stop
-    assert fsm.on_frame(
-        LampAction.LEFT,
-        now_monotonic=0.2,
-    ).policy == PolicyChoice.SHORTCUT
+    assert (
+        fsm.on_frame(
+            LampAction.LEFT,
+            now_monotonic=0.2,
+        ).policy
+        == PolicyChoice.SHORTCUT
+    )
 
     fsm.disable()
     fsm.enable(initial_stop_armed=True, wait_for_signal=True)
@@ -759,10 +798,13 @@ def test_initial_wait_fsm_stops_then_routes_confirmed_left_directly():
 
     fsm.disable()
     fsm.enable()
-    assert fsm.on_frame(
-        LampAction.RED,
-        now_monotonic=0.4,
-    ).policy == PolicyChoice.BASE
+    assert (
+        fsm.on_frame(
+            LampAction.RED,
+            now_monotonic=0.4,
+        ).policy
+        == PolicyChoice.BASE
+    )
 
 
 def test_classifier_detector_rejects_bad_logits_and_empty_crop():
@@ -863,6 +905,7 @@ def _debug_snapshot(**overrides):
         'required_reads': 5,
         'phase': 'WAIT_FOR_SIGNAL',
         'mission_state': 'RED_STOP',
+        'shortcut_status': 'READY',
         'detector_inference_ms': 12.5,
     }
     values.update(overrides)
@@ -899,6 +942,8 @@ def test_signal_debug_json_round_trip_and_source_contracts():
         encode_signal_debug(
             replace(snapshot, detector_inference_ms=float('nan'))
         )
+    with pytest.raises(SignalDebugContractError, match='shortcut status'):
+        encode_signal_debug(replace(snapshot, shortcut_status='UNKNOWN'))
 
 
 def test_monitor_matches_exact_stamp_and_never_overlays_another_frame():
@@ -984,11 +1029,14 @@ def test_monitor_matches_exact_stamp_and_never_overlays_another_frame():
     retained = TrafficShortcutMonitorNode.snapshot(node)
     assert signal.stamp_key not in node._frames
     assert retained.matched_frame is exact
-    assert select_signal_panel(
-        retained,
-        now_monotonic=1.9,
-        signal_stale_sec=1.0,
-    ).mode == SignalPanelMode.MATCHED
+    assert (
+        select_signal_panel(
+            retained,
+            now_monotonic=1.9,
+            signal_stale_sec=1.0,
+        ).mode
+        == SignalPanelMode.MATCHED
+    )
 
     stale = select_signal_panel(
         retained,
@@ -1148,7 +1196,10 @@ def test_lamp_width_gate_five_votes_priority_and_latch_clearing():
     green = _reading((10, 10, 10, 230))
     unknown = _reading((10, 10, 10, 10))
 
-    assert latch.observe(_reading((255, 10, 10, 10), width=44)) == LampAction.UNKNOWN
+    assert (
+        latch.observe(_reading((255, 10, 10, 10), width=44))
+        == LampAction.UNKNOWN
+    )
     for _ in range(4):
         assert latch.observe(red) == LampAction.UNKNOWN
     assert latch.observe(red) == LampAction.RED
@@ -1196,8 +1247,7 @@ def test_legacy_lamp_votes_keep_red_three_and_other_actions_immediate():
 def test_classifier_latch_requires_same_raw_class_and_retains_stop():
     latch = TrafficSignalLatch()
     assert (
-        latch.observe(_signal(SignalClass.RED, width=44))
-        == LampAction.UNKNOWN
+        latch.observe(_signal(SignalClass.RED, width=44)) == LampAction.UNKNOWN
     )
     assert latch.snapshot.candidate == SignalClass.UNKNOWN
     assert latch.snapshot.candidate_reads == 0
@@ -1319,14 +1369,20 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
         schema_version=3,
         artifact_id=EXPECTED_EXPANDED_SIGNAL_VOTE_BUNDLE_ID,
     ) == (5, 5, 5)
-    assert _expected_shortcut_artifact_id(
-        schema_version=2,
-        artifact_id='legacy',
-    ) == EXPECTED_SHORTCUT_ARTIFACT_ID
-    assert _expected_shortcut_artifact_id(
-        schema_version=3,
-        artifact_id=EXPECTED_EXPANDED_SIGNAL_VOTE_BUNDLE_ID,
-    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert (
+        _expected_shortcut_artifact_id(
+            schema_version=2,
+            artifact_id='legacy',
+        )
+        == EXPECTED_SHORTCUT_ARTIFACT_ID
+    )
+    assert (
+        _expected_shortcut_artifact_id(
+            schema_version=3,
+            artifact_id=EXPECTED_EXPANDED_SIGNAL_VOTE_BUNDLE_ID,
+        )
+        == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    )
     assert _load_signal_vote_contract(
         {'signal_vote': classifier_vote},
         schema_version=4,
@@ -1337,46 +1393,61 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
         schema_version=5,
         artifact_id=EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID,
     ) == (2, 2, 2)
-    assert _expected_shortcut_artifact_id(
-        schema_version=5,
-        artifact_id=EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID,
-    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert (
+        _expected_shortcut_artifact_id(
+            schema_version=5,
+            artifact_id=EXPECTED_YOLO_MISSING_RELEASE_BUNDLE_ID,
+        )
+        == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    )
     assert _load_signal_vote_contract(
         {'signal_vote': human_bbox_classifier_vote},
         schema_version=6,
         artifact_id=EXPECTED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     ) == (2, 2, 2)
-    assert _expected_shortcut_artifact_id(
-        schema_version=6,
-        artifact_id=EXPECTED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
-    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert (
+        _expected_shortcut_artifact_id(
+            schema_version=6,
+            artifact_id=EXPECTED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+        )
+        == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    )
     assert _load_signal_vote_contract(
         {'signal_vote': stabilized_human_bbox_classifier_vote},
         schema_version=7,
         artifact_id=EXPECTED_STABILIZED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     ) == (3, 15, 15)
-    assert _expected_shortcut_artifact_id(
-        schema_version=7,
-        artifact_id=EXPECTED_STABILIZED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
-    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert (
+        _expected_shortcut_artifact_id(
+            schema_version=7,
+            artifact_id=EXPECTED_STABILIZED_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+        )
+        == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    )
     assert _load_signal_vote_contract(
         {'signal_vote': stabilized_human_bbox_classifier_vote},
         schema_version=8,
         artifact_id=EXPECTED_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     ) == (3, 15, 15)
-    assert _expected_shortcut_artifact_id(
-        schema_version=8,
-        artifact_id=EXPECTED_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
-    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert (
+        _expected_shortcut_artifact_id(
+            schema_version=8,
+            artifact_id=EXPECTED_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+        )
+        == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    )
     assert _load_signal_vote_contract(
         {'signal_vote': stop10_adaptive_human_bbox_classifier_vote},
         schema_version=9,
         artifact_id=EXPECTED_STOP10_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
     ) == (10, 15, 15)
-    assert _expected_shortcut_artifact_id(
-        schema_version=9,
-        artifact_id=EXPECTED_STOP10_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
-    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert (
+        _expected_shortcut_artifact_id(
+            schema_version=9,
+            artifact_id=EXPECTED_STOP10_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID,
+        )
+        == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    )
     assert _load_signal_vote_contract(
         {'signal_vote': stop30_go30_adaptive_human_bbox_classifier_vote},
         schema_version=10,
@@ -1384,12 +1455,15 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
             EXPECTED_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
         ),
     ) == (30, 30, 30)
-    assert _expected_shortcut_artifact_id(
-        schema_version=10,
-        artifact_id=(
-            EXPECTED_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
-        ),
-    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    assert (
+        _expected_shortcut_artifact_id(
+            schema_version=10,
+            artifact_id=(
+                EXPECTED_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    )
     assert _load_signal_vote_contract(
         {'signal_vote': stop30_go30_adaptive_human_bbox_classifier_vote},
         schema_version=11,
@@ -1397,18 +1471,24 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
             EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
         ),
     ) == (30, 30, 30)
-    assert _expected_shortcut_artifact_id(
-        schema_version=11,
-        artifact_id=(
-            EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
-        ),
-    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
-    assert _expected_base_artifact_id(
-        schema_version=11,
-        artifact_id=(
-            EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
-        ),
-    ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    assert (
+        _expected_shortcut_artifact_id(
+            schema_version=11,
+            artifact_id=(
+                EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    )
+    assert (
+        _expected_base_artifact_id(
+            schema_version=11,
+            artifact_id=(
+                EXPECTED_SPEED35_STOP30_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    )
     assert _load_signal_vote_contract(
         {'signal_vote': stop10_go30_adaptive_human_bbox_classifier_vote},
         schema_version=12,
@@ -1416,18 +1496,24 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
             EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
         ),
     ) == (10, 30, 30)
-    assert _expected_shortcut_artifact_id(
-        schema_version=12,
-        artifact_id=(
-            EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
-        ),
-    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
-    assert _expected_base_artifact_id(
-        schema_version=12,
-        artifact_id=(
-            EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
-        ),
-    ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    assert (
+        _expected_shortcut_artifact_id(
+            schema_version=12,
+            artifact_id=(
+                EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    )
+    assert (
+        _expected_base_artifact_id(
+            schema_version=12,
+            artifact_id=(
+                EXPECTED_SPEED35_STOP10_GO30_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    )
     stop15_go15_adaptive_human_bbox_classifier_vote = {
         **stabilized_human_bbox_classifier_vote,
         'consecutive_reads_by_raw_class': {
@@ -1443,18 +1529,24 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
             EXPECTED_SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
         ),
     ) == (15, 15, 15)
-    assert _expected_shortcut_artifact_id(
-        schema_version=13,
-        artifact_id=(
-            EXPECTED_SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
-        ),
-    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
-    assert _expected_base_artifact_id(
-        schema_version=13,
-        artifact_id=(
-            EXPECTED_SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
-        ),
-    ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    assert (
+        _expected_shortcut_artifact_id(
+            schema_version=13,
+            artifact_id=(
+                EXPECTED_SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    )
+    assert (
+        _expected_base_artifact_id(
+            schema_version=13,
+            artifact_id=(
+                EXPECTED_SPEED35_STOP15_GO15_ADAPTIVE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    )
     initial_stop_once_vote = {
         'raw_classes': ['STOP', 'STRAIGHT', 'LEFT'],
         'consecutive_reads_by_raw_class': {
@@ -1476,18 +1568,24 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
             EXPECTED_SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
         ),
     ) == (15, 15, 15)
-    assert _expected_shortcut_artifact_id(
-        schema_version=14,
-        artifact_id=(
-            EXPECTED_SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
-        ),
-    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
-    assert _expected_base_artifact_id(
-        schema_version=14,
-        artifact_id=(
-            EXPECTED_SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
-        ),
-    ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    assert (
+        _expected_shortcut_artifact_id(
+            schema_version=14,
+            artifact_id=(
+                EXPECTED_SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    )
+    assert (
+        _expected_base_artifact_id(
+            schema_version=14,
+            artifact_id=(
+                EXPECTED_SPEED35_INITIAL_STOP_ONCE_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    )
     initial_wait_fresh5_vote = {
         'raw_classes': ['STOP', 'STRAIGHT', 'LEFT'],
         'consecutive_reads_by_raw_class': {
@@ -1511,18 +1609,24 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
             EXPECTED_SPEED35_INITIAL_WAIT_FRESH5_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
         ),
     ) == (5, 5, 5)
-    assert _expected_shortcut_artifact_id(
-        schema_version=15,
-        artifact_id=(
-            EXPECTED_SPEED35_INITIAL_WAIT_FRESH5_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
-        ),
-    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
-    assert _expected_base_artifact_id(
-        schema_version=15,
-        artifact_id=(
-            EXPECTED_SPEED35_INITIAL_WAIT_FRESH5_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
-        ),
-    ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    assert (
+        _expected_shortcut_artifact_id(
+            schema_version=15,
+            artifact_id=(
+                EXPECTED_SPEED35_INITIAL_WAIT_FRESH5_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    )
+    assert (
+        _expected_base_artifact_id(
+            schema_version=15,
+            artifact_id=(
+                EXPECTED_SPEED35_INITIAL_WAIT_FRESH5_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    )
     initial_wait_fresh3_vote = {
         **initial_wait_fresh5_vote,
         'consecutive_reads_by_raw_class': {
@@ -1539,18 +1643,24 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
             EXPECTED_SPEED35_INITIAL_WAIT_FRESH3_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
         ),
     ) == (5, 3, 3)
-    assert _expected_shortcut_artifact_id(
-        schema_version=16,
-        artifact_id=(
-            EXPECTED_SPEED35_INITIAL_WAIT_FRESH3_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
-        ),
-    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
-    assert _expected_base_artifact_id(
-        schema_version=16,
-        artifact_id=(
-            EXPECTED_SPEED35_INITIAL_WAIT_FRESH3_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
-        ),
-    ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    assert (
+        _expected_shortcut_artifact_id(
+            schema_version=16,
+            artifact_id=(
+                EXPECTED_SPEED35_INITIAL_WAIT_FRESH3_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    )
+    assert (
+        _expected_base_artifact_id(
+            schema_version=16,
+            artifact_id=(
+                EXPECTED_SPEED35_INITIAL_WAIT_FRESH3_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    )
     initial_wait_go1_vote = {
         **initial_wait_fresh3_vote,
         'consecutive_reads_by_raw_class': {
@@ -1566,18 +1676,24 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
             EXPECTED_SPEED35_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
         ),
     ) == (5, 1, 1)
-    assert _expected_shortcut_artifact_id(
-        schema_version=17,
-        artifact_id=(
-            EXPECTED_SPEED35_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
-        ),
-    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
-    assert _expected_base_artifact_id(
-        schema_version=17,
-        artifact_id=(
-            EXPECTED_SPEED35_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
-        ),
-    ) == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    assert (
+        _expected_shortcut_artifact_id(
+            schema_version=17,
+            artifact_id=(
+                EXPECTED_SPEED35_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    )
+    assert (
+        _expected_base_artifact_id(
+            schema_version=17,
+            artifact_id=(
+                EXPECTED_SPEED35_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_SPEED35_BASE_ARTIFACT_ID
+    )
     assert _load_signal_vote_contract(
         {'signal_vote': initial_wait_go1_vote},
         schema_version=18,
@@ -1585,18 +1701,49 @@ def test_bundle_signal_vote_contract_preserves_legacy_and_requires_five():
             EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
         ),
     ) == (5, 1, 1)
-    assert _expected_shortcut_artifact_id(
-        schema_version=18,
+    assert (
+        _expected_shortcut_artifact_id(
+            schema_version=18,
+            artifact_id=(
+                EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    )
+    assert (
+        _expected_base_artifact_id(
+            schema_version=18,
+            artifact_id=(
+                EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_SPEED35_FIX_BASE_ARTIFACT_ID
+    )
+    assert _load_signal_vote_contract(
+        {'signal_vote': initial_wait_go1_vote},
+        schema_version=19,
         artifact_id=(
-            EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_SESSION_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
         ),
-    ) == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
-    assert _expected_base_artifact_id(
-        schema_version=18,
-        artifact_id=(
-            EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
-        ),
-    ) == EXPECTED_SPEED35_FIX_BASE_ARTIFACT_ID
+    ) == (5, 1, 1)
+    assert (
+        _expected_shortcut_artifact_id(
+            schema_version=19,
+            artifact_id=(
+                EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_SESSION_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_EXPANDED_SHORTCUT_ARTIFACT_ID
+    )
+    assert (
+        _expected_base_artifact_id(
+            schema_version=19,
+            artifact_id=(
+                EXPECTED_SPEED35_FIX_INITIAL_WAIT_GO1_SESSION_HUMAN_BBOX_CLASSIFIER_BUNDLE_ID
+            ),
+        )
+        == EXPECTED_SPEED35_FIX_BASE_ARTIFACT_ID
+    )
     with pytest.raises(ArtifactContractError, match='signal vote'):
         _load_signal_vote_contract(
             {
@@ -1623,10 +1770,13 @@ def test_yolo_missing_release_requires_ten_scheduled_misses():
     )
     fsm = TrafficShortcutFsm()
     fsm.enable()
-    assert fsm.on_frame(
-        LampAction.RED,
-        now_monotonic=0.0,
-    ).state == MissionState.RED_STOP
+    assert (
+        fsm.on_frame(
+            LampAction.RED,
+            now_monotonic=0.0,
+        ).state
+        == MissionState.RED_STOP
+    )
 
     for step in range(9):
         assert not counter.observe(
@@ -1640,11 +1790,14 @@ def test_yolo_missing_release_requires_ten_scheduled_misses():
             now_monotonic=0.1 + step,
         ).publish_stop
 
-    assert counter.observe(
-        red_stop_active=True,
-        detector_observed=True,
-        yolo_box_found=True,
-    ) is False
+    assert (
+        counter.observe(
+            red_stop_active=True,
+            detector_observed=True,
+            yolo_box_found=True,
+        )
+        is False
+    )
     assert counter.missing_frames == 0
     for frame_span in (4, 4, 4, 4, 4, 4, 4):
         assert not counter.observe(
@@ -1794,6 +1947,75 @@ def test_initial_wait_terminal_events_ignore_cached_vote_updates():
     assert not any(message.startswith('READY') for message in final)
 
 
+def test_completed_activation_logs_left_ignored_once_and_status():
+    latch = InitialWaitSignalLatch(
+        bbox_width_min=40,
+        bbox_width_max=225,
+        stop_consecutive_reads=5,
+        left_consecutive_reads=1,
+        straight_consecutive_reads=1,
+    )
+    latch.reset(initial_stop_armed=False, wait_for_signal=False)
+    fsm = TrafficShortcutFsm(
+        one_shot_initial_stop=True,
+        initial_left_direct_shortcut=True,
+    )
+    fsm.enable()
+    fsm.shortcut_completed = True
+    node = SimpleNamespace(
+        _lamp_latch=latch,
+        _fsm=fsm,
+        bundle=SimpleNamespace(
+            schema_version=19,
+            detector=SimpleNamespace(
+                red_consecutive_reads=5,
+                left_consecutive_reads=1,
+            ),
+        ),
+        _ready_logged=False,
+        _stop_ignored_logged=False,
+        _left_ignored_logged=False,
+        _signal_log_gate=SignalStatusLogGate(rate_hz=2.0),
+    )
+    reading = _signal(SignalClass.LEFT)
+    previous = latch.snapshot
+    signal = latch.observe(reading)
+    plan = fsm.on_frame(signal, now_monotonic=1.0)
+
+    messages = TrafficShortcutPolicyNode._one_shot_signal_logs_locked(
+        node,
+        previous=previous,
+        reading=reading,
+        raw_class=SignalClass.LEFT,
+        source='YOLO_CNN',
+        signal=signal,
+        plan=plan,
+        now_monotonic=1.0,
+        vote_updated=True,
+    )
+    repeated = TrafficShortcutPolicyNode._one_shot_signal_logs_locked(
+        node,
+        previous=latch.snapshot,
+        reading=reading,
+        raw_class=SignalClass.LEFT,
+        source='YOLO_CNN',
+        signal=signal,
+        plan=plan,
+        now_monotonic=1.1,
+        vote_updated=True,
+    )
+
+    assert 'LEFT_IGNORED reason=SESSION_COMPLETE action=RELEASE_A' in messages
+    assert not any(message.startswith('LEFT_IGNORED') for message in repeated)
+    assert (
+        TrafficShortcutPolicyNode._shortcut_status_locked(
+            node,
+            MissionState.BASE,
+        )
+        == 'COMPLETED_THIS_ACTIVATION'
+    )
+
+
 def test_policy_signal_debug_snapshot_contains_runtime_vote_and_geometry():
     latch_snapshot = InitialStopSignalLatchSnapshot(
         candidate=SignalClass.LEFT,
@@ -1806,6 +2028,10 @@ def test_policy_signal_debug_snapshot_contains_runtime_vote_and_geometry():
     )
     node = SimpleNamespace(
         _lamp_latch=SimpleNamespace(snapshot=latch_snapshot),
+        _fsm=SimpleNamespace(shortcut_completed=False),
+        _shortcut_status_locked=lambda state: (
+            TrafficShortcutPolicyNode._shortcut_status_locked(node, state)
+        ),
         bundle=SimpleNamespace(
             artifact_id='traffic-bundle',
             detector=SimpleNamespace(
@@ -1827,20 +2053,18 @@ def test_policy_signal_debug_snapshot_contains_runtime_vote_and_geometry():
         probabilities=(0.02, 0.08, 0.90),
     )
 
-    snapshot = (
-        TrafficShortcutPolicyNode._make_signal_debug_snapshot_locked(
-            node,
-            frame_sequence=9,
-            stamp_sec=7,
-            stamp_nanosec=8,
-            source='CACHED_CNN',
-            vote_updated=False,
-            raw_class=SignalClass.LEFT,
-            final_action=LampAction.UNKNOWN,
-            inspection=inspection,
-            plan=SimpleNamespace(state=MissionState.RED_STOP),
-            detector_inference_ms=4.5,
-        )
+    snapshot = TrafficShortcutPolicyNode._make_signal_debug_snapshot_locked(
+        node,
+        frame_sequence=9,
+        stamp_sec=7,
+        stamp_nanosec=8,
+        source='CACHED_CNN',
+        vote_updated=False,
+        raw_class=SignalClass.LEFT,
+        final_action=LampAction.UNKNOWN,
+        inspection=inspection,
+        plan=SimpleNamespace(state=MissionState.RED_STOP),
+        detector_inference_ms=4.5,
     )
 
     assert snapshot.stamp_key == (7, 8)
@@ -1914,6 +2138,49 @@ def test_fsm_base_transition_exact_eight_seconds_and_one_shot():
     assert ignored_left.policy == PolicyChoice.BASE
 
 
+def test_fsm_rearms_successful_shortcut_on_new_drive_activation():
+    fsm = TrafficShortcutFsm(
+        shortcut_duration_sec=8.0,
+        seamless_base_handoff=True,
+        one_shot_initial_stop=True,
+        initial_left_direct_shortcut=True,
+        rearm_shortcut_on_enable=True,
+    )
+    fsm.enable()
+    assert fsm.on_frame(
+        LampAction.LEFT,
+        now_monotonic=1.0,
+    ).publish_stop
+    assert (
+        fsm.on_frame(
+            LampAction.LEFT,
+            now_monotonic=1.1,
+        ).policy
+        == PolicyChoice.SHORTCUT
+    )
+    fsm.on_shortcut_command_published(now_monotonic=2.0)
+    assert fsm.on_control_tick(
+        now_monotonic=10.0,
+    ).promote_base_shadow
+    fsm.on_base_shadow_promoted()
+    assert fsm.shortcut_completed
+    assert (
+        fsm.on_frame(
+            LampAction.LEFT,
+            now_monotonic=10.1,
+        ).policy
+        == PolicyChoice.BASE
+    )
+
+    fsm.disable()
+    fsm.enable()
+
+    assert not fsm.shortcut_completed
+    retry = fsm.on_frame(LampAction.LEFT, now_monotonic=11.0)
+    assert retry.publish_stop
+    assert retry.state == MissionState.SWITCH_TO_SHORTCUT
+
+
 def test_fsm_shadow_handoff_has_no_exit_stop_and_completes_on_promotion():
     fsm = TrafficShortcutFsm(
         shortcut_duration_sec=8.0,
@@ -1924,10 +2191,13 @@ def test_fsm_shadow_handoff_has_no_exit_stop_and_completes_on_promotion():
         LampAction.LEFT,
         now_monotonic=1.0,
     ).publish_stop
-    assert fsm.on_frame(
-        LampAction.LEFT,
-        now_monotonic=1.1,
-    ).policy == PolicyChoice.SHORTCUT
+    assert (
+        fsm.on_frame(
+            LampAction.LEFT,
+            now_monotonic=1.1,
+        ).policy
+        == PolicyChoice.SHORTCUT
+    )
     fsm.on_shortcut_command_published(now_monotonic=2.0)
 
     handoff = fsm.on_control_tick(now_monotonic=10.0)
@@ -1961,18 +2231,27 @@ def test_fsm_red_cancels_without_consuming_and_allows_retry():
     retry = fsm.on_frame(LampAction.LEFT, now_monotonic=1.2)
     assert retry.state == MissionState.SWITCH_TO_SHORTCUT
     assert retry.publish_stop
-    assert fsm.on_frame(
-        LampAction.LEFT,
-        now_monotonic=1.3,
-    ).policy == PolicyChoice.SHORTCUT
+    assert (
+        fsm.on_frame(
+            LampAction.LEFT,
+            now_monotonic=1.3,
+        ).policy
+        == PolicyChoice.SHORTCUT
+    )
 
 
 def test_fsm_off_fault_and_red_priority_paths_stop():
     fsm = TrafficShortcutFsm()
     assert fsm.on_frame(LampAction.LEFT, now_monotonic=0.0).publish_stop
     fsm.enable()
-    assert fsm.on_frame(LampAction.RED, now_monotonic=0.1).state == MissionState.RED_STOP
-    assert fsm.on_frame(LampAction.STRAIGHT, now_monotonic=0.2).policy == PolicyChoice.BASE
+    assert (
+        fsm.on_frame(LampAction.RED, now_monotonic=0.1).state
+        == MissionState.RED_STOP
+    )
+    assert (
+        fsm.on_frame(LampAction.STRAIGHT, now_monotonic=0.2).policy
+        == PolicyChoice.BASE
+    )
     fsm.fault()
     assert fsm.on_frame(LampAction.STRAIGHT, now_monotonic=0.3).publish_stop
     fsm.disable()
@@ -1992,7 +2271,7 @@ def _safe_node_state():
         camera_timeout_sec=0.25,
         _awaiting_post_reset_decision=False,
         _history_reset_monotonic=None,
-        inference_timeout_sec=0.25,
+        inference_timeout_sec=0.50,
         _drive_gate=SimpleNamespace(enabled=True),
         _transition_stop_pending=False,
         _decision=MissionDecision(
@@ -2074,6 +2353,84 @@ def test_integrated_node_post_reset_timeout_and_actual_history_only():
     assert tuple(speed35_history_node._history)[-1] == (60, 85)
 
 
+def test_integrated_node_policy_freshness_allows_half_second_then_faults():
+    node = _safe_node_state()
+    node._decision = replace(node._decision, source_monotonic=0.50)
+    assert TrafficShortcutPolicyNode._unsafe_reason_locked(node, 1.0) is None
+
+    reason = TrafficShortcutPolicyNode._unsafe_reason_locked(node, 1.001)
+
+    assert 'selected policy inference is stale' in reason
+    assert 'age=0.501s' in reason
+    assert 'limit=0.500s' in reason
+
+
+def test_transition_stop_is_published_once_before_shortcut_decision():
+    published = []
+    events = []
+    fsm = TrafficShortcutFsm(
+        one_shot_initial_stop=True,
+        initial_left_direct_shortcut=True,
+    )
+    fsm.enable()
+    assert fsm.on_frame(
+        LampAction.LEFT,
+        now_monotonic=1.0,
+    ).publish_stop
+    node = SimpleNamespace(
+        _next_graph_check_monotonic=math.inf,
+        require_gamepad_hold=True,
+        _drive_gate=SimpleNamespace(enabled=True),
+        _lock=threading.RLock(),
+        _unsafe_reason_locked=lambda _now: None,
+        _fsm=fsm,
+        _transition_stop_pending=True,
+        _transition_stop_sent_waiting_decision=False,
+        _mission_generation=0,
+        _frame_sequence=3,
+        _minimum_next_frame_sequence=0,
+        _decision=None,
+        _awaiting_post_reset_decision=False,
+        _history_reset_monotonic=None,
+        _stop_reason=None,
+        _publish_and_record_locked=lambda command, decision_sequence: (
+            published.append((command, decision_sequence))
+        ),
+        _emit_operator_logs=lambda messages: events.extend(messages),
+        _publish_stop=lambda: published.append(('fallback-stop', None)),
+    )
+
+    TrafficShortcutPolicyNode._on_control_timer(node)
+    TrafficShortcutPolicyNode._on_control_timer(node)
+
+    assert published == [(DriveCommand(), None)]
+    assert events == ['TRANSITION_STOP cycle=1/1']
+
+    assert (
+        fsm.on_frame(
+            LampAction.LEFT,
+            now_monotonic=1.1,
+        ).policy
+        == PolicyChoice.SHORTCUT
+    )
+    node._transition_stop_sent_waiting_decision = False
+    node._awaiting_post_reset_decision = False
+    node._decision = MissionDecision(
+        command=DriveCommand(-20.0, 23.0),
+        policy=PolicyChoice.SHORTCUT,
+        state=MissionState.SHORTCUT,
+        source_monotonic=1.1,
+        completed_monotonic=1.12,
+        inference_ms=20.0,
+        frame_sequence=6,
+    )
+
+    TrafficShortcutPolicyNode._on_control_timer(node)
+
+    assert published[-1] == (DriveCommand(-20.0, 23.0), 6)
+    assert len(published) == 2
+
+
 def test_integrated_node_without_gamepad_does_not_require_joy():
     node = _safe_node_state()
     node.require_gamepad_hold = False
@@ -2102,7 +2459,9 @@ def test_integrated_node_maps_sdl_lb_button_nine_to_initial_wait():
         _last_joy_monotonic=None,
         _observe_drive_gate_locked=lambda **kwargs: observe(None, **kwargs),
         _force_fault=lambda _reason: None,
-        get_logger=lambda: SimpleNamespace(warning=lambda *_args, **_kwargs: None),
+        get_logger=lambda: SimpleNamespace(
+            warning=lambda *_args, **_kwargs: None
+        ),
         _safe_log_warning=operator_logs.append,
     )
     buttons = [0] * 10
@@ -2144,6 +2503,7 @@ def test_integrated_node_initial_wait_control_tick_publishes_stop():
         _unsafe_reason_locked=lambda _now: None,
         _fsm=fsm,
         _transition_stop_pending=False,
+        _transition_stop_sent_waiting_decision=False,
         _decision=None,
         _publish_stop=lambda: published.append(DriveCommand()),
     )
@@ -2171,6 +2531,9 @@ def test_traffic_shortcut_launch_ties_gamepad_to_hold_gate():
     assert "default_value='false'" in launch_text
     assert "'monitor_refresh_hz'" in launch_text
     assert "default_value='15.0'" in launch_text
+    assert "'inference_timeout_sec'" in launch_text
+    assert "default_value='0.50'" in launch_text
+    assert "default_value='0.40'" in launch_text
     assert "executable='traffic_shortcut_monitor'" in launch_text
     assert 'IfCondition(use_monitor_gui)' in launch_text
     assert 'traffic shortcut monitor exited; stopping mission' in launch_text
@@ -2186,6 +2549,9 @@ def test_traffic_shortcut_launch_ties_gamepad_to_hold_gate():
     assert "'signal_status_log_hz:='" in jetson_launch_text
     assert "'use_monitor_gui:='" in jetson_launch_text
     assert "'monitor_refresh_hz:='" in jetson_launch_text
+    assert "'inference_timeout_sec:='" in jetson_launch_text
+    assert "default_value='0.50'" in jetson_launch_text
+    assert "default_value='0.40'" in jetson_launch_text
 
     camera_launch_text = (
         Path(__file__).parents[3]
@@ -2224,9 +2590,7 @@ def test_traffic_light_viewer_launch_has_no_motion_endpoints():
         package_root / 'launch' / 'traffic_light_viewer.launch.py'
     ).read_text(encoding='utf-8')
     viewer_text = (
-        package_root
-        / 'xycar_ai_drive'
-        / 'traffic_light_viewer.py'
+        package_root / 'xycar_ai_drive' / 'traffic_light_viewer.py'
     ).read_text(encoding='utf-8')
 
     assert "executable='traffic_light_viewer'" in launch_text
@@ -2243,14 +2607,10 @@ def test_traffic_light_viewer_launch_has_no_motion_endpoints():
 def test_traffic_shortcut_monitor_is_passive_and_has_no_inference_runtime():
     package_root = Path(__file__).parents[1]
     monitor_text = (
-        package_root
-        / 'xycar_ai_drive'
-        / 'traffic_shortcut_monitor.py'
+        package_root / 'xycar_ai_drive' / 'traffic_shortcut_monitor.py'
     ).read_text(encoding='utf-8')
     policy_text = (
-        package_root
-        / 'xycar_ai_drive'
-        / 'traffic_shortcut_policy_node.py'
+        package_root / 'xycar_ai_drive' / 'traffic_shortcut_policy_node.py'
     ).read_text(encoding='utf-8')
     setup_text = (package_root / 'setup.py').read_text(encoding='utf-8')
     config_text = (
@@ -2272,7 +2632,9 @@ def test_traffic_shortcut_monitor_is_passive_and_has_no_inference_runtime():
     assert 'rclpy.spin_once' not in monitor_text
     assert 'LIVE CAMERA' in monitor_text
     assert 'MODEL INPUT (EXACT)' in monitor_text
-    assert 'self.signal_debug_publisher = self.create_publisher(' in policy_text
+    assert (
+        'self.signal_debug_publisher = self.create_publisher(' in policy_text
+    )
     assert 'get_subscription_count() < 1' in policy_text
 
 
@@ -2287,6 +2649,7 @@ def test_traffic_shortcut_monitor_is_passive_and_has_no_inference_runtime():
         (16, (5, 3, 3), 3, False),
         (17, (5, 1, 1), 3, False),
         (18, (5, 1, 1), 3, False),
+        (19, (5, 1, 1), 3, False),
     ],
 )
 def test_traffic_light_viewer_accepts_speed35_bundle_contracts(
@@ -2431,7 +2794,7 @@ def _shadow_handoff_node(*, source_monotonic=9.9):
         SimpleNamespace(
             bundle=SimpleNamespace(
                 base_shadow_enabled=True,
-                base_shadow_max_age_sec=0.25,
+                base_shadow_max_age_sec=0.50,
             ),
             _base_shadow_decision=MissionDecision(
                 command=DriveCommand(12.0, 22.0),
@@ -2485,9 +2848,7 @@ def test_fresh_shadow_handoff_promotes_history_without_stop():
 
 
 def test_stale_shadow_handoff_fails_without_publish_and_red_discards():
-    node, published, _predictions = _shadow_handoff_node(
-        source_monotonic=9.0
-    )
+    node, published, _predictions = _shadow_handoff_node(source_monotonic=9.0)
 
     reason = node._promote_base_shadow_locked(10.0)
 

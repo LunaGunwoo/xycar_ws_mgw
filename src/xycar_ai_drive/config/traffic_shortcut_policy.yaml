@@ -26,14 +26,14 @@ traffic_shortcut_policy:
     publish_rate_hz: 20.0
     joy_timeout_sec: 0.25
     camera_timeout_sec: 0.25
-    inference_timeout_sec: 0.25
+    inference_timeout_sec: 0.50
     graph_check_period_sec: 0.5
     stop_publish_count: 5
 
     inference_device: cuda
     base_socket_path: /run/user/1000/xycar-ai/traffic-base.sock
     shortcut_socket_path: /run/user/1000/xycar-ai/traffic-shortcut.sock
-    inference_rpc_timeout_sec: 0.20
+    inference_rpc_timeout_sec: 0.40
 
 traffic_shortcut_monitor:
   ros__parameters:
